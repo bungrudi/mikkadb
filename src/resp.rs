@@ -1,10 +1,10 @@
-use std::cmp::PartialEq;
+
 
 enum RespState {
     Idle,
-    ArrayDef { startpos: usize },
-    BulkDef { startpos: usize },
-    BulkData { startpos: usize },
+    // ArrayDef,
+    // BulkDef,
+    BulkData,
     End,
     Error,
 }
@@ -90,7 +90,7 @@ impl Context<'_> {
                 // when we first encounter a non-numeric character, we should expect a carriage return
                 if self.buffer[self.current_pos] == b'\r' && self.buffer[self.current_pos + 1] == b'\n' {
                     self.current_pos += 2;
-                    self.resp_state = RespState::BulkData { startpos: self.current_pos };
+                    self.resp_state = RespState::BulkData;
 
                 } else {
                     self.resp_state = RespState::Error;
@@ -107,7 +107,7 @@ impl Context<'_> {
                         }
                         let data = std::str::from_utf8(&self.buffer[self.current_pos..endpos]).unwrap();
 
-                        if(self.current_command.command == Context::EMPTY_STR) {
+                        if self.current_command.command == Context::EMPTY_STR {
                             self.current_command.command = data;
                         } else {
                             self.current_command.data = data;
@@ -161,8 +161,9 @@ impl Context<'_> {
             // TODO length should be parameterized
             let mut startpos = self.current_pos;
             let mut first_space = false;
-            while true {
-                if self.buffer[self.current_pos] == b' ' && !first_space {
+            loop {
+                if self.current_pos < self.read_len &&
+                    self.buffer[self.current_pos] == b' ' && !first_space {
                     let data = std::str::from_utf8(&self.buffer[startpos..self.current_pos]).unwrap();
                     self.current_command.command = data;
                     first_space = true;
@@ -178,6 +179,7 @@ impl Context<'_> {
                         self.current_command.data = data;
                     }
                     self.commands.push(self.current_command);
+                    self.current_command = Command { command: Context::EMPTY_STR, data: Context::EMPTY_STR };
                     break;
                 }
                 self.current_pos += 1;
@@ -233,6 +235,12 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<Command> {
         panic!("Error parsing RESP: {}", context.error_reason);
     }
 
+    // if there is leftover command, push it to vector
+    if context.current_command.command != Context::EMPTY_STR {
+        context.commands.push(context.current_command);
+        context.current_command = Command { command: Context::EMPTY_STR, data: Context::EMPTY_STR };
+    }
+
     context.commands
 }
 
@@ -252,9 +260,27 @@ mod tests {
     }
 
     #[test]
+    fn test_resp_command_single() {
+        let buffer = b"*1\r\n$4\r\nping\r\n";
+        let commands = parse_resp(buffer, buffer.len());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command, "ping");
+        assert_eq!(commands[0].data, "");
+    }
+
+    #[test]
     fn test_non_resp_single() {
         let buffer = b"PING\r\n";
         let commands = parse_resp(buffer,6);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command, "PING");
+        assert_eq!(commands[0].data, "");
+    }
+
+    #[test]
+    fn test_non_resp_single_no_ending_whitespace() {
+        let buffer = b"PING";
+        let commands = parse_resp(buffer,4);
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].command, "PING");
         assert_eq!(commands[0].data, "");

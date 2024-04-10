@@ -21,7 +21,7 @@ impl ClientHandler {
 
     pub fn start(&mut self) {
         let mut buffer: [u8;2048] = [0; 2048];
-        let mut client = Arc::clone(&self.client);
+        let client = Arc::clone(&self.client);
         thread::spawn(move || {
             let mut client = client.lock().unwrap();
             'LOOP_COMMAND: while let Ok(bytes_read) = client.read(&mut buffer) {
