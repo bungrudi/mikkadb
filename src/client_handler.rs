@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use crate::resp::parse_resp;
 
 // ClientHandler should ideally be an actor.
 pub struct ClientHandler {
@@ -9,6 +10,9 @@ pub struct ClientHandler {
 }
 
 impl ClientHandler {
+    const PING : &'static [&'static str] = &["PING", "ping"];
+    const ECHO : &'static [&'static str] = &["ECHO", "echo"];
+
     pub fn new (client: TcpStream) -> Self {
         ClientHandler {
             client: Arc::new(Mutex::new(client)),
@@ -25,10 +29,17 @@ impl ClientHandler {
                 if bytes_read == 0 {
                     break 'LOOP_COMMAND;
                 }
-                let command = std::str::from_utf8(&buffer[..bytes_read]);
-                // TODO we'll deal with the command later
-                // now just assume its PING and return PONG
-                client.write_all(b"+PONG\r\n").unwrap();
+                let commands = parse_resp(&buffer, bytes_read);
+                let command = commands[0];
+                if Self::PING.contains(&command.command) {
+                    client.write_all(b"+PONG\r\n").unwrap();
+                } else if Self::ECHO.contains(&command.command) {
+                    client.write_all(b"+").unwrap();
+                    client.write_all(command.data.as_bytes()).unwrap();
+                    client.write_all(b"\r\n").unwrap();
+                } else {
+                    client.write_all(b"-ERR unknown command\r\n").unwrap();
+                }
             }
             println!("closing connection {}", client.peer_addr().unwrap());
         });
