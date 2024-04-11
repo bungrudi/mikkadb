@@ -1,4 +1,5 @@
-
+use std::string::ToString;
+use crate::redis::RedisCommand;
 
 enum RespState {
     Idle,
@@ -9,10 +10,9 @@ enum RespState {
     Error,
 }
 
-#[derive(Copy, Clone)]
-pub struct Command<'a> {
-    pub(crate) command: &'a str,
-    pub(crate) data: &'a str,
+struct Command<'a> {
+    command: &'a str,
+    data: &'a str,
 }
 
 struct Context<'a> {
@@ -22,7 +22,7 @@ struct Context<'a> {
     resp_state: RespState,
     data_length: usize,
     current_command: Command<'a>,
-    commands: Vec<Command<'a>>,
+    commands: Vec<RedisCommand<'a>>,
     error_reason: String,
 }
 
@@ -38,7 +38,7 @@ impl Context<'_> {
         match self.resp_state {
             RespState::Idle => {
                // self.resp_state = RespState::ArrayDef { startpos: self.current_pos + 1 }
-                // TODO currently we do nothing with array and array length
+                // TODO the array length should be used to parse the next n bulk data. array length context should be in the context.
                 // expect the next character to be numeric, if not, throw an error.
                 // after that just fast forward to the end of the array, or the end of carriage return + endline.
                 self.current_pos += 1;
@@ -111,8 +111,22 @@ impl Context<'_> {
                             self.current_command.command = data;
                         } else {
                             self.current_command.data = data;
-                            self.commands.push(self.current_command);
-                            self.current_command = Command { command: Context::EMPTY_STR, data: Context::EMPTY_STR };
+                            self.command_to_redis_command();
+                            // TODO the pushing of the command should be done after the command is fully parsed.
+                            // for example *3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$6\r\nval01\r\n
+                            // Escape character is '^]'.
+                            // *3
+                            // $3
+                            // SET
+                            // $4
+                            // key0
+                            // $4
+                            // val0
+                            // +OK
+                            // the above example shows that original redis command is processing it per buld data.
+                            // it complete the command as soon as it hits 'val0'. we should do the same.
+                            // TODO remove intermediary command.. and maybe change RedisCommand into a trait?
+                            SAMPE SINI
                         }
 
                         // after this, expect the next to be carriage return + endline and then move the pointer.
@@ -178,8 +192,7 @@ impl Context<'_> {
                     } else {
                         self.current_command.data = data;
                     }
-                    self.commands.push(self.current_command);
-                    self.current_command = Command { command: Context::EMPTY_STR, data: Context::EMPTY_STR };
+                    self.command_to_redis_command();
                     break;
                 }
                 self.current_pos += 1;
@@ -189,11 +202,38 @@ impl Context<'_> {
             self.error_reason = Context::PARSE_ERROR.to_string();
         }
     }
+
+    const PING : &'static str = "PING";
+    const ECHO : &'static str = "ECHO";
+    const SET : &'static str = "SET";
+    const GET : &'static str = "GET";
+    fn command_to_redis_command<'a>(&mut self) {
+        let redis_command = match self.current_command.command {
+            command if command.eq_ignore_ascii_case(Self::PING) => RedisCommand::Ping,
+            command if command.eq_ignore_ascii_case(Self::ECHO) => RedisCommand::Echo { data: self.current_command.data },
+            command if command.eq_ignore_ascii_case(Self::SET) => {
+                let mut iter = self.current_command.data.split_whitespace();
+                let key = iter.next().unwrap_or_else( || "");
+                let value = iter.next().unwrap_or_else( || "");
+                if key == "" {
+                    RedisCommand::Error { message: "SET command requires key".to_string() }
+                } else {
+                    RedisCommand::Set { key, value }
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::GET) => RedisCommand::Get { key: self.current_command.data },
+            _ => RedisCommand::Error { message: format!("Unknown command: {}", self.current_command.command) },
+        };
+        self.commands.push(redis_command);
+        self.current_command = Command { command: Context::EMPTY_STR, data: Context::EMPTY_STR };
+    }
 }
 
 
+
+
 // parse RESP using a simple state machine algorithm
-pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<Command> {
+pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
     let mut context = Context {
         buffer,
         read_len: len,
@@ -237,8 +277,7 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<Command> {
 
     // if there is leftover command, push it to vector
     if context.current_command.command != Context::EMPTY_STR {
-        context.commands.push(context.current_command);
-        context.current_command = Command { command: Context::EMPTY_STR, data: Context::EMPTY_STR };
+        context.command_to_redis_command();
     }
 
     context.commands
@@ -255,8 +294,10 @@ mod tests {
         let buffer = b"*2\r\n$4\r\nECHO\r\n$4\r\nHOLA\r\n";
         let commands = parse_resp(buffer,24);
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].command, "ECHO");
-        assert_eq!(commands[0].data, "HOLA");
+        match commands[0] {
+            RedisCommand::Echo { data } => assert_eq!(data, "HOLA"),
+            _ => panic!("Invalid command"),
+        }
     }
 
     #[test]
@@ -264,8 +305,24 @@ mod tests {
         let buffer = b"*1\r\n$4\r\nping\r\n";
         let commands = parse_resp(buffer, buffer.len());
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].command, "ping");
-        assert_eq!(commands[0].data, "");
+        match commands[0] {
+            RedisCommand::Ping => (),
+            _ => panic!("Invalid command"),
+        }
+    }
+
+    #[test]
+    fn test_resp_set_command() {
+        let buffer = b"*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$6\r\nval01\r\n";
+        let commands = parse_resp(buffer, buffer.len());
+        assert_eq!(commands.len(), 1);
+        match commands[0] {
+            RedisCommand::Set { key, value } => {
+                assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
+            },
+            _ => panic!("Invalid command"),
+        }
     }
 
     #[test]
@@ -273,8 +330,10 @@ mod tests {
         let buffer = b"PING\r\n";
         let commands = parse_resp(buffer,6);
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].command, "PING");
-        assert_eq!(commands[0].data, "");
+        match commands[0] {
+            RedisCommand::Ping => (),
+            _ => panic!("Invalid command"),
+        }
     }
 
     #[test]
@@ -282,8 +341,10 @@ mod tests {
         let buffer = b"PING";
         let commands = parse_resp(buffer,4);
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].command, "PING");
-        assert_eq!(commands[0].data, "");
+        match commands[0] {
+            RedisCommand::Ping => (),
+            _ => panic!("Invalid command"),
+        }
     }
 
     #[test]
@@ -291,7 +352,12 @@ mod tests {
         let buffer = b"SET key00 val00\r\n";
         let commands = parse_resp(buffer,17);
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].command, "SET");
-        assert_eq!(commands[0].data, "key00 val00");
+        match commands[0] {
+            RedisCommand::Set { key, value } => {
+                assert_eq!(key, "key00");
+                assert_eq!(value, "val00");
+            },
+            _ => panic!("Invalid command"),
+        }
     }
 }
