@@ -35,6 +35,7 @@ impl ClientHandler {
 
                 let command = commands.get(0).unwrap();
                 match command {
+                    // TODO move this to Redis
                     RedisCommand::Ping => {
                         client.write_all(b"+PONG\r\n").unwrap();
                     },
@@ -66,16 +67,6 @@ impl ClientHandler {
                         client.write_all(b"\r\n").unwrap();
                     }
                 }
-
-                // if Self::PING.contains(&command.command) {
-                //     client.write_all(b"+PONG\r\n").unwrap();
-                // } else if Self::ECHO.contains(&command.command) {
-                //     client.write_all(b"+").unwrap();
-                //     client.write_all(command.data.as_bytes()).unwrap();
-                //     client.write_all(b"\r\n").unwrap();
-                // } else {
-                //     client.write_all(b"-ERR unknown command\r\n").unwrap();
-                // }
             }
             println!("closing connection {}", client.peer_addr().unwrap());
         });

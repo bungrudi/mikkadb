@@ -1,6 +1,17 @@
 use std::string::ToString;
 use crate::redis::RedisCommand;
 
+macro_rules! process_command {
+    ($self:ident) => {
+        let command = $self.current_command.command;
+        let params = $self.current_command.data;
+        if let Some(redis_command) = RedisCommand::data(command, params) {
+            $self.commands.push(redis_command);
+            $self.current_command = Command::new();
+        }
+    };
+}
+
 enum RespState {
     Idle,
     // ArrayDef,
@@ -12,7 +23,27 @@ enum RespState {
 
 struct Command<'a> {
     command: &'a str,
-    data: &'a str,
+    data: [&'a str; 5],
+}
+
+impl<'a> Command<'a> {
+    const EMPTY_STR: &'static str = "";
+
+    fn new() -> Self {
+        Command {
+            command: Command::EMPTY_STR,
+            data: [Command::EMPTY_STR; 5], // max 5 fow now
+        }
+    }
+
+    fn push_param(&mut self, param: &'a str) {
+        for i in 0..self.data.len() {
+            if self.data[i] == Command::EMPTY_STR {
+                self.data[i] = param;
+                break;
+            }
+        }
+    }
 }
 
 struct Context<'a> {
@@ -31,7 +62,7 @@ impl Context<'_> {
     const PARSE_ERROR: &'static str = "PARSE_ERROR";
     const STATE_ERROR: &'static str = "STATE_ERROR";
 
-    const EMPTY_STR: &'static str = "";
+    // const EMPTY_STR: &'static str = "";
 
     fn char_asterisk(&mut self) {
         // parse the array length, move pointer to the end of the array length, change state to Idle
@@ -91,7 +122,6 @@ impl Context<'_> {
                 if self.buffer[self.current_pos] == b'\r' && self.buffer[self.current_pos + 1] == b'\n' {
                     self.current_pos += 2;
                     self.resp_state = RespState::BulkData;
-
                 } else {
                     self.resp_state = RespState::Error;
                     self.error_reason = format!("parse error at position {}", self.current_pos);
@@ -107,27 +137,14 @@ impl Context<'_> {
                         }
                         let data = std::str::from_utf8(&self.buffer[self.current_pos..endpos]).unwrap();
 
-                        if self.current_command.command == Context::EMPTY_STR {
+                        if self.current_command.command == Command::EMPTY_STR {
                             self.current_command.command = data;
                         } else {
-                            self.current_command.data = data;
-                            self.command_to_redis_command();
-                            // TODO the pushing of the command should be done after the command is fully parsed.
-                            // for example *3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$6\r\nval01\r\n
-                            // Escape character is '^]'.
-                            // *3
-                            // $3
-                            // SET
-                            // $4
-                            // key0
-                            // $4
-                            // val0
-                            // +OK
-                            // the above example shows that original redis command is processing it per buld data.
-                            // it complete the command as soon as it hits 'val0'. we should do the same.
-                            // TODO remove intermediary command.. and maybe change RedisCommand into a trait?
-                            SAMPE SINI
+                            self.current_command.push_param(data);
                         }
+
+                        // self.command_to_redis_command();
+                        process_command!(self);
 
                         // after this, expect the next to be carriage return + endline and then move the pointer.
                         // if not, it's end of operation.
@@ -172,29 +189,32 @@ impl Context<'_> {
         // we do this by validating that the first character is not an asterisk or dollar sign,
         // and pointer is at pos 0.
         if self.current_pos == 0 && (self.buffer[self.current_pos] != b'*' && self.buffer[self.current_pos] != b'$') {
-            // TODO length should be parameterized
             let mut startpos = self.current_pos;
-            let mut first_space = false;
+            // let mut first_space = false;
             loop {
-                if self.current_pos < self.read_len &&
-                    self.buffer[self.current_pos] == b' ' && !first_space {
-                    let data = std::str::from_utf8(&self.buffer[startpos..self.current_pos]).unwrap();
-                    self.current_command.command = data;
-                    first_space = true;
-                    startpos = self.current_pos + 1;
-                }
-                else if self.current_pos >= self.read_len ||
+                if self.current_pos == self.read_len ||
+                    self.buffer[self.current_pos] == b' ' ||
                     self.buffer[self.current_pos] == b'\r' ||
                     self.buffer[self.current_pos] == b'\n' {
                     let data = std::str::from_utf8(&self.buffer[startpos..self.current_pos]).unwrap();
-                    if self.current_command.command == Context::EMPTY_STR {
+                    // first_space = true;
+                    if self.current_command.command == Command::EMPTY_STR {
                         self.current_command.command = data;
                     } else {
-                        self.current_command.data = data;
+                        self.current_command.push_param(data);
                     }
-                    self.command_to_redis_command();
-                    break;
+                    process_command!(self);
+                    // for this case, we should only have one command
+                    if self.commands.len() > 0 {
+                        break;
+                    }
+
+                    if self.current_pos >= self.read_len {
+                        break;
+                    }
+                    startpos = self.current_pos + 1;
                 }
+
                 self.current_pos += 1;
             }
 
@@ -203,33 +223,7 @@ impl Context<'_> {
         }
     }
 
-    const PING : &'static str = "PING";
-    const ECHO : &'static str = "ECHO";
-    const SET : &'static str = "SET";
-    const GET : &'static str = "GET";
-    fn command_to_redis_command<'a>(&mut self) {
-        let redis_command = match self.current_command.command {
-            command if command.eq_ignore_ascii_case(Self::PING) => RedisCommand::Ping,
-            command if command.eq_ignore_ascii_case(Self::ECHO) => RedisCommand::Echo { data: self.current_command.data },
-            command if command.eq_ignore_ascii_case(Self::SET) => {
-                let mut iter = self.current_command.data.split_whitespace();
-                let key = iter.next().unwrap_or_else( || "");
-                let value = iter.next().unwrap_or_else( || "");
-                if key == "" {
-                    RedisCommand::Error { message: "SET command requires key".to_string() }
-                } else {
-                    RedisCommand::Set { key, value }
-                }
-            },
-            command if command.eq_ignore_ascii_case(Self::GET) => RedisCommand::Get { key: self.current_command.data },
-            _ => RedisCommand::Error { message: format!("Unknown command: {}", self.current_command.command) },
-        };
-        self.commands.push(redis_command);
-        self.current_command = Command { command: Context::EMPTY_STR, data: Context::EMPTY_STR };
-    }
 }
-
-
 
 
 // parse RESP using a simple state machine algorithm
@@ -240,7 +234,7 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
         current_pos: 0,
         resp_state: RespState::Idle,
         data_length: 0,
-        current_command: Command { command: Context::EMPTY_STR, data: Context::EMPTY_STR },
+        current_command: Command::new(),
         commands: Vec::new(),
         error_reason: Context::NO_ERROR.to_string(),
     };
@@ -258,15 +252,17 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
         // if let RespState::End = context.resp_state {
         //     break;
         // }
-        match context.buffer[context.current_pos] {
-            b'*' => context.char_asterisk(),
-            b'$' => context.char_dollar(),
-            b'\r' => context.char_carriage_return(),
-            _ => {
-                // panic!("Invalid RESP character at position {}", context.current_pos)
-                context.handle_data_non_resp();
-                break;
-            },
+        {
+            match context.buffer[context.current_pos] {
+                b'*' => context.char_asterisk(),
+                b'$' => context.char_dollar(),
+                b'\r' => context.char_carriage_return(),
+                _ => {
+                    // panic!("Invalid RESP character at position {}", context.current_pos)
+                    context.handle_data_non_resp();
+                    break;
+                },
+            }
         }
         // context.current_pos += 1;
     }
@@ -276,13 +272,13 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
     }
 
     // if there is leftover command, push it to vector
-    if context.current_command.command != Context::EMPTY_STR {
-        context.command_to_redis_command();
+    if context.current_command.command != Command::EMPTY_STR {
+        // context.command_to_redis_command();
+        process_command!(context);
     }
 
     context.commands
 }
-
 
 // write test here
 #[cfg(test)]
@@ -313,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_resp_set_command() {
-        let buffer = b"*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$6\r\nval01\r\n";
+        let buffer = b"*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n";
         let commands = parse_resp(buffer, buffer.len());
         assert_eq!(commands.len(), 1);
         match commands[0] {

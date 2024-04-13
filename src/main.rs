@@ -4,9 +4,11 @@ mod redis;
 
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
-
+/**
+* This is an implementation of a key value store that immitates Redis.
+*/
 fn main() {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
+
     println!("Logs from your program will appear here!");
 
     let redis = Arc::new(Mutex::new(redis::Redis::new()));
