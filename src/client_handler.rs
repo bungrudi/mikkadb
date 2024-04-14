@@ -57,7 +57,7 @@ impl ClientHandler {
                             }
                         }
                     },
-                    RedisCommand::Set { key, value } => {
+                    RedisCommand::Set { key, value, ttl } => {
                         redis.lock().unwrap().set(key, value);
                         client.write_all(b"+OK\r\n").unwrap();
                     },

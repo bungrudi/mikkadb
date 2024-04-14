@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+#[derive(Debug)]
 pub enum RedisCommand<'a> {
     Echo { data: &'a str },
     Ping,
-    Set { key: &'a str, value: &'a str },
+    Set { key: &'a str, value: &'a str, ttl: Option<usize> },
     Get { key: &'a str },
     Error { message: String },
 }
@@ -35,7 +36,20 @@ impl RedisCommand<'_> {
                 if key == "" || value == "" {
                     None
                 } else {
-                    Some(RedisCommand::Set { key, value })
+                    let ttl = match params[2].eq_ignore_ascii_case("EX") {
+                        true => match params[3].parse::<usize>() {
+                            Ok(value) => Some(value * 1000),
+                            Err(_) => None,
+                        },
+                        false => match params[2].eq_ignore_ascii_case("PX") {
+                            true => match params[3].parse::<usize>() {
+                                Ok(value) => Some(value),
+                                Err(_) => None,
+                            },
+                            false => None,
+                        },
+                    };
+                    Some(RedisCommand::Set { key, value, ttl })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::GET) => {

@@ -3,11 +3,24 @@ use crate::redis::RedisCommand;
 
 macro_rules! process_command {
     ($self:ident) => {
-        let command = $self.current_command.command;
-        let params = $self.current_command.data;
-        if let Some(redis_command) = RedisCommand::data(command, params) {
-            $self.commands.push(redis_command);
-            $self.current_command = Command::new();
+        match &$self.current_command {
+            Some(command) => {
+                let command_ = command.command;
+                let params = command.data;
+                match RedisCommand::data(command_, params) {
+                    Some(redis_command) => {
+                        // print!("Command: {:?}", redis_command);
+                        $self.commands.push(redis_command);
+                        $self.current_command = None;
+                    },
+                    None => { // we treat None as error. This should not happen.
+                        $self.error_reason = Context::PARSE_ERROR.to_string();
+                    }
+                }
+            },
+            None => {
+                // $self.error_reason = Context::STATE_ERROR.to_string();
+            }
         }
     };
 }
@@ -24,15 +37,17 @@ enum RespState {
 struct Command<'a> {
     command: &'a str,
     data: [&'a str; 5],
+    num_params: u8
 }
 
 impl<'a> Command<'a> {
     const EMPTY_STR: &'static str = "";
 
-    fn new() -> Self {
+    fn new(num_params:u8) -> Self {
         Command {
             command: Command::EMPTY_STR,
             data: [Command::EMPTY_STR; 5], // max 5 fow now
+            num_params
         }
     }
 
@@ -52,7 +67,7 @@ struct Context<'a> {
     current_pos: usize,
     resp_state: RespState,
     data_length: usize,
-    current_command: Command<'a>,
+    current_command: Option<Command<'a>>,
     commands: Vec<RedisCommand<'a>>,
     error_reason: String,
 }
@@ -68,14 +83,20 @@ impl Context<'_> {
         // parse the array length, move pointer to the end of the array length, change state to Idle
         match self.resp_state {
             RespState::Idle => {
-               // self.resp_state = RespState::ArrayDef { startpos: self.current_pos + 1 }
-                // TODO the array length should be used to parse the next n bulk data. array length context should be in the context.
+
                 // expect the next character to be numeric, if not, throw an error.
                 // after that just fast forward to the end of the array, or the end of carriage return + endline.
                 self.current_pos += 1;
+                let startpos = self.current_pos;
                 while self.buffer[self.current_pos].is_ascii_digit() {
                     self.current_pos += 1;
                 }
+                // parse length of the array.
+                // the length of the array is the number of params in current command.
+                let num_params: u8 = std::str::from_utf8(&self.buffer[startpos..self.current_pos]).unwrap().parse().unwrap();
+                // for every *n, create a new command object.
+                // number of params is n-1 because the first param is the command itself.
+                self.current_command = Some(Command::new(num_params-1));
                 // check for end of buffer
                 if self.current_pos == self.read_len {
                     self.resp_state = RespState::End;
@@ -136,15 +157,26 @@ impl Context<'_> {
                             endpos = self.read_len - 1;
                         }
                         let data = std::str::from_utf8(&self.buffer[self.current_pos..endpos]).unwrap();
-
-                        if self.current_command.command == Command::EMPTY_STR {
-                            self.current_command.command = data;
+                        let mut command  = match self.current_command {
+                            Some(ref mut command) => {
+                                command
+                            },
+                            None => {
+                                panic!("Current command not initialized when parsing bulk data");
+                            }
+                        };
+                        if command.command == Command::EMPTY_STR {
+                            command.command = data;
                         } else {
-                            self.current_command.push_param(data);
+                            command.push_param(data);
                         }
 
-                        // self.command_to_redis_command();
-                        process_command!(self);
+                        // check if we have read all params.
+                        // if we have, convert to RedisCommand and push to vector.
+
+                        if command.data.iter().filter(|&x| x != &Command::EMPTY_STR).count() == command.num_params as usize {
+                            process_command!(self);
+                        }
 
                         // after this, expect the next to be carriage return + endline and then move the pointer.
                         // if not, it's end of operation.
@@ -188,6 +220,10 @@ impl Context<'_> {
         // first we should validate that the string is not in RESP format.
         // we do this by validating that the first character is not an asterisk or dollar sign,
         // and pointer is at pos 0.
+
+        // we don't now how many params we have, so we set it to 0.
+        let mut command  = Command::new(0);
+
         if self.current_pos == 0 && (self.buffer[self.current_pos] != b'*' && self.buffer[self.current_pos] != b'$') {
             let mut startpos = self.current_pos;
             // let mut first_space = false;
@@ -198,15 +234,10 @@ impl Context<'_> {
                     self.buffer[self.current_pos] == b'\n' {
                     let data = std::str::from_utf8(&self.buffer[startpos..self.current_pos]).unwrap();
                     // first_space = true;
-                    if self.current_command.command == Command::EMPTY_STR {
-                        self.current_command.command = data;
+                    if command.command == Command::EMPTY_STR {
+                        command.command = data;
                     } else {
-                        self.current_command.push_param(data);
-                    }
-                    process_command!(self);
-                    // for this case, we should only have one command
-                    if self.commands.len() > 0 {
-                        break;
+                        command.push_param(data);
                     }
 
                     if self.current_pos >= self.read_len {
@@ -218,6 +249,9 @@ impl Context<'_> {
                 self.current_pos += 1;
             }
 
+            self.current_command = Some(command);
+
+            process_command!(self);
         } else {
             self.error_reason = Context::PARSE_ERROR.to_string();
         }
@@ -234,7 +268,7 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
         current_pos: 0,
         resp_state: RespState::Idle,
         data_length: 0,
-        current_command: Command::new(),
+        current_command: None,
         commands: Vec::new(),
         error_reason: Context::NO_ERROR.to_string(),
     };
@@ -243,7 +277,6 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
         if context.error_reason != Context::NO_ERROR || matches!(context.resp_state, RespState::End) {
             break;
         }
-        // TODO check end buffer
         // end if length > buffer length or end of string length
         if context.current_pos >= context.read_len {
             break;
@@ -252,17 +285,16 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
         // if let RespState::End = context.resp_state {
         //     break;
         // }
-        {
-            match context.buffer[context.current_pos] {
-                b'*' => context.char_asterisk(),
-                b'$' => context.char_dollar(),
-                b'\r' => context.char_carriage_return(),
-                _ => {
-                    // panic!("Invalid RESP character at position {}", context.current_pos)
-                    context.handle_data_non_resp();
-                    break;
-                },
-            }
+
+        match context.buffer[context.current_pos] {
+            b'*' => context.char_asterisk(),
+            b'$' => context.char_dollar(),
+            b'\r' => context.char_carriage_return(),
+            _ => {
+                // panic!("Invalid RESP character at position {}", context.current_pos)
+                context.handle_data_non_resp();
+                break;
+            },
         }
         // context.current_pos += 1;
     }
@@ -272,15 +304,18 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
     }
 
     // if there is leftover command, push it to vector
-    if context.current_command.command != Command::EMPTY_STR {
-        // context.command_to_redis_command();
-        process_command!(context);
-    }
+    // match &context.current_command {
+    //     Some(ref command) => {
+    //         process_command!(context);
+    //     },
+    //     None => (),
+    // }
+    // just call macro directly, the check like the code above is redundant.
+    process_command!(context);
 
     context.commands
 }
 
-// write test here
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,9 +348,110 @@ mod tests {
         let commands = parse_resp(buffer, buffer.len());
         assert_eq!(commands.len(), 1);
         match commands[0] {
-            RedisCommand::Set { key, value } => {
+            RedisCommand::Set { key, value, ttl} => {
                 assert_eq!(key, "key01");
                 assert_eq!(value, "val01");
+                assert_eq!(ttl, None);
+            },
+            _ => panic!("Invalid command"),
+        }
+    }
+
+    #[test]
+    fn test_resp_set_ttl_and_echo() {
+        let buffer = b"*5\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n$2\r\nex\r\n$2\r\n60\r\n*2\r\n$4\r\nECHO\r\n$5\r\nHELLO\r\n";
+        let commands = parse_resp(buffer, buffer.len());
+        assert_eq!(commands.len(), 2);
+        match commands[0] {
+            RedisCommand::Set { key, value, ttl } => {
+                assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
+                assert_eq!(ttl, Some(60000));
+            },
+            _ => panic!("Invalid command"),
+        }
+        match commands[1] {
+            RedisCommand::Echo { data } => assert_eq!(data, "HELLO"),
+            _ => panic!("Invalid command"),
+        }
+    }
+
+    #[test]
+    fn test_resp_five_commands_various_types_with_invalid() {
+        let buffer = b"*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n*2\r\n$3\r\nGET\r\n$5\r\nkey01\r\n*2\r\n$4\r\nECHO\r\n$5\r\nHELLO\r\n*1\r\n$4\r\nPING\r\n*2\r\n$4\r\nFAKE\r\n$5\r\nPARAM\r\n";
+        let commands = parse_resp(buffer, buffer.len());
+        assert_eq!(commands.len(), 5);
+        match commands[0] {
+            RedisCommand::Set { key, value, ttl } => {
+                assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
+                assert_eq!(ttl, None);
+            },
+            _ => panic!("Invalid command"),
+        }
+        match commands[1] {
+            RedisCommand::Get { key } => {
+                assert_eq!(key, "key01");
+            },
+            _ => panic!("Invalid command"),
+        }
+        match commands[2] {
+            RedisCommand::Echo { data } => {
+                assert_eq!(data, "HELLO");
+            },
+            _ => panic!("Invalid command"),
+        }
+        match commands[3] {
+            RedisCommand::Ping => (),
+            _ => panic!("Invalid command"),
+        }
+        match &commands[4] {
+            RedisCommand::Error { message } => {
+                assert_eq!(message, "Unknown command: FAKE");
+            },
+            _ => panic!("Invalid command"),
+        }
+    }
+    #[test]
+    fn test_resp_six_commands_various_types_all_valid() {
+        let buffer = b"*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n*2\r\n$3\r\nGET\r\n$5\r\nkey01\r\n*2\r\n$4\r\nECHO\r\n$5\r\nHELLO\r\n*1\r\n$4\r\nPING\r\n*5\r\n$3\r\nSET\r\n$5\r\nkey02\r\n$5\r\nval02\r\n$2\r\nEX\r\n$2\r\n60\r\n*2\r\n$3\r\nGET\r\n$5\r\nkey02\r\n";
+        let commands = parse_resp(buffer, buffer.len());
+        assert_eq!(commands.len(), 6);
+        match commands[0] {
+            RedisCommand::Set { key, value, ttl } => {
+                assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
+                assert_eq!(ttl, None);
+            },
+            _ => panic!("Invalid command"),
+        }
+        match commands[1] {
+            RedisCommand::Get { key } => {
+                assert_eq!(key, "key01");
+            },
+            _ => panic!("Invalid command"),
+        }
+        match commands[2] {
+            RedisCommand::Echo { data } => {
+                assert_eq!(data, "HELLO");
+            },
+            _ => panic!("Invalid command"),
+        }
+        match commands[3] {
+            RedisCommand::Ping => (),
+            _ => panic!("Invalid command"),
+        }
+        match commands[4] {
+            RedisCommand::Set { key, value, ttl } => {
+                assert_eq!(key, "key02");
+                assert_eq!(value, "val02");
+                assert_eq!(ttl, Some(60000));
+            },
+            _ => panic!("Invalid command"),
+        }
+        match commands[5] {
+            RedisCommand::Get { key } => {
+                assert_eq!(key, "key02");
             },
             _ => panic!("Invalid command"),
         }
@@ -349,11 +485,13 @@ mod tests {
         let commands = parse_resp(buffer,17);
         assert_eq!(commands.len(), 1);
         match commands[0] {
-            RedisCommand::Set { key, value } => {
+            RedisCommand::Set { key, value, ttl } => {
                 assert_eq!(key, "key00");
                 assert_eq!(value, "val00");
+                assert_eq!(ttl, None);
             },
             _ => panic!("Invalid command"),
         }
     }
 }
+
