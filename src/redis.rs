@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 #[derive(Debug)]
 pub enum RedisCommand<'a> {
+    None,
     Echo { data: &'a str },
     Ping,
     Set { key: &'a str, value: &'a str, ttl: Option<usize> },
@@ -15,6 +16,13 @@ impl RedisCommand<'_> {
     const ECHO : &'static str = "ECHO";
     const SET : &'static str = "SET";
     const GET : &'static str = "GET";
+
+    pub fn is_none(&self) -> bool {
+        match self {
+            RedisCommand::None => true,
+            _ => false,
+        }
+    }
 
     /// Create command from the data received from the client.
     /// It should check if the parameters are complete, otherwise return None.
@@ -81,6 +89,31 @@ impl Redis {
 
     pub fn get(&self, key: &str) -> Option<String> {
         self.data.lock().unwrap().get(key).cloned()
+    }
+
+    pub fn execute_command(&mut self, command: &RedisCommand) -> Result<String, String> {
+        match command {
+            RedisCommand::Ping => {
+                Ok("PONG".to_string())
+            },
+            RedisCommand::Echo { data } => {
+                Ok(data.to_string())
+            },
+            RedisCommand::Get { key } => {
+                match self.get(key) {
+                    Some(value) => Ok(value),
+                    None => Ok("$-1".to_string()),
+                }
+            },
+            RedisCommand::Set { key, value, ttl } => {
+                self.set(key, value);
+                Ok("OK".to_string())
+            },
+            RedisCommand::Error { message } => {
+                Err(format!("ERR {}", message))
+            },
+            _ => Err("ERR Unknown command".to_string()),
+        }
     }
 }
 

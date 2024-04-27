@@ -10,8 +10,14 @@ macro_rules! process_command {
                 match RedisCommand::data(command_, params) {
                     Some(redis_command) => {
                         // print!("Command: {:?}", redis_command);
-                        $self.commands.push(redis_command);
-                        $self.current_command = None;
+
+                        if $self.command_index < 25 {
+                            $self.commands[$self.command_index as usize] = redis_command;
+                            $self.current_command = None;
+                            $self.command_index += 1;
+                        } else{
+                            $self.error_reason = "Too many commands".to_string();
+                        }
                     },
                     None => { // we treat None as error. This should not happen.
                         $self.error_reason = Context::PARSE_ERROR.to_string();
@@ -22,6 +28,12 @@ macro_rules! process_command {
                 // $self.error_reason = Context::STATE_ERROR.to_string();
             }
         }
+    };
+}
+
+macro_rules! commands_len  {
+    ($commands:expr) => {
+        $commands.iter().filter(|&x| !x.is_none()).count()
     };
 }
 
@@ -68,7 +80,8 @@ struct Context<'a> {
     resp_state: RespState,
     data_length: usize,
     current_command: Option<Command<'a>>,
-    commands: Vec<RedisCommand<'a>>,
+    command_index: u8,
+    commands: [RedisCommand<'a>;25],
     error_reason: String,
 }
 
@@ -261,7 +274,8 @@ impl Context<'_> {
 
 
 // parse RESP using a simple state machine algorithm
-pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
+pub fn parse_resp(buffer: &[u8], len: usize) -> [RedisCommand;25] {
+    const ARRAY_REPEAT_VALUE: RedisCommand<'_> = RedisCommand::None;
     let mut context = Context {
         buffer,
         read_len: len,
@@ -269,7 +283,8 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
         resp_state: RespState::Idle,
         data_length: 0,
         current_command: None,
-        commands: Vec::new(),
+        command_index: 0,
+        commands: [ARRAY_REPEAT_VALUE;25],
         error_reason: Context::NO_ERROR.to_string(),
     };
 
@@ -324,7 +339,7 @@ mod tests {
     fn test_resp_command_pair() {
         let buffer = b"*2\r\n$4\r\nECHO\r\n$4\r\nHOLA\r\n";
         let commands = parse_resp(buffer,24);
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands_len!(commands), 1);
         match commands[0] {
             RedisCommand::Echo { data } => assert_eq!(data, "HOLA"),
             _ => panic!("Invalid command"),
@@ -335,7 +350,7 @@ mod tests {
     fn test_resp_command_single() {
         let buffer = b"*1\r\n$4\r\nping\r\n";
         let commands = parse_resp(buffer, buffer.len());
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands_len!(commands), 1);
         match commands[0] {
             RedisCommand::Ping => (),
             _ => panic!("Invalid command"),
@@ -346,7 +361,7 @@ mod tests {
     fn test_resp_set_command() {
         let buffer = b"*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n";
         let commands = parse_resp(buffer, buffer.len());
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands_len!(commands), 1);
         match commands[0] {
             RedisCommand::Set { key, value, ttl} => {
                 assert_eq!(key, "key01");
@@ -361,7 +376,7 @@ mod tests {
     fn test_resp_set_ttl_and_echo() {
         let buffer = b"*5\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n$2\r\nex\r\n$2\r\n60\r\n*2\r\n$4\r\nECHO\r\n$5\r\nHELLO\r\n";
         let commands = parse_resp(buffer, buffer.len());
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands_len!(commands), 2);
         match commands[0] {
             RedisCommand::Set { key, value, ttl } => {
                 assert_eq!(key, "key01");
@@ -380,7 +395,7 @@ mod tests {
     fn test_resp_five_commands_various_types_with_invalid() {
         let buffer = b"*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n*2\r\n$3\r\nGET\r\n$5\r\nkey01\r\n*2\r\n$4\r\nECHO\r\n$5\r\nHELLO\r\n*1\r\n$4\r\nPING\r\n*2\r\n$4\r\nFAKE\r\n$5\r\nPARAM\r\n";
         let commands = parse_resp(buffer, buffer.len());
-        assert_eq!(commands.len(), 5);
+        assert_eq!(commands_len!(commands), 5);
         match commands[0] {
             RedisCommand::Set { key, value, ttl } => {
                 assert_eq!(key, "key01");
@@ -416,7 +431,7 @@ mod tests {
     fn test_resp_six_commands_various_types_all_valid() {
         let buffer = b"*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n*2\r\n$3\r\nGET\r\n$5\r\nkey01\r\n*2\r\n$4\r\nECHO\r\n$5\r\nHELLO\r\n*1\r\n$4\r\nPING\r\n*5\r\n$3\r\nSET\r\n$5\r\nkey02\r\n$5\r\nval02\r\n$2\r\nEX\r\n$2\r\n60\r\n*2\r\n$3\r\nGET\r\n$5\r\nkey02\r\n";
         let commands = parse_resp(buffer, buffer.len());
-        assert_eq!(commands.len(), 6);
+        assert_eq!(commands_len!(commands), 6);
         match commands[0] {
             RedisCommand::Set { key, value, ttl } => {
                 assert_eq!(key, "key01");
@@ -461,7 +476,7 @@ mod tests {
     fn test_non_resp_single() {
         let buffer = b"PING\r\n";
         let commands = parse_resp(buffer,6);
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands_len!(commands), 1);
         match commands[0] {
             RedisCommand::Ping => (),
             _ => panic!("Invalid command"),
@@ -472,7 +487,7 @@ mod tests {
     fn test_non_resp_single_no_ending_whitespace() {
         let buffer = b"PING";
         let commands = parse_resp(buffer,4);
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands_len!(commands), 1);
         match commands[0] {
             RedisCommand::Ping => (),
             _ => panic!("Invalid command"),
@@ -483,7 +498,7 @@ mod tests {
     fn test_non_resp_pair() {
         let buffer = b"SET key00 val00\r\n";
         let commands = parse_resp(buffer,17);
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands_len!(commands), 1);
         match commands[0] {
             RedisCommand::Set { key, value, ttl } => {
                 assert_eq!(key, "key00");

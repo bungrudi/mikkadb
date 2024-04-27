@@ -21,6 +21,7 @@ impl ClientHandler {
     }
 
     pub fn start(&mut self) {
+        const NEWLINE: &str = "\r\n";
         let mut buffer: [u8;2048] = [0; 2048];
         let client = Arc::clone(&self.client);
         let redis = Arc::clone(&self.redis);
@@ -31,42 +32,16 @@ impl ClientHandler {
                 if bytes_read == 0 {
                     break 'LOOP_COMMAND;
                 }
+                // TODO refactor this to use a buffer pool.
                 let commands = parse_resp(&buffer, bytes_read);
 
-                let command = commands.get(0).unwrap();
-                match command {
-                    // TODO move this to Redis
-                    RedisCommand::Ping => {
-                        client.write_all(b"+PONG\r\n").unwrap();
-                    },
-                    RedisCommand::Echo { data } => {
-                        client.write_all(b"+").unwrap();
-                        client.write_all(data.as_bytes()).unwrap();
-                        client.write_all(b"\r\n").unwrap();
-                    },
-                    RedisCommand::Get { key } => {
-                        let value = redis.lock().unwrap().get(key);
-                        match value {
-                            Some(value) => {
-                                client.write_all(b"+").unwrap();
-                                client.write_all(value.as_bytes()).unwrap();
-                                client.write_all(b"\r\n").unwrap();
-                            },
-                            None => {
-                                client.write_all(b"$-1\r\n").unwrap();
-                            }
-                        }
-                    },
-                    RedisCommand::Set { key, value, ttl } => {
-                        redis.lock().unwrap().set(key, value);
-                        client.write_all(b"+OK\r\n").unwrap();
-                    },
-                    RedisCommand::Error { message } => {
-                        client.write_all(b"-ERR ").unwrap();
-                        client.write_all(message.as_bytes()).unwrap();
-                        client.write_all(b"\r\n").unwrap();
-                    }
-                }
+                let command = &commands[0];
+                // TODO use the same buffer to write the response.
+                // actually is there benefit in re-using the buffer?
+                match redis.lock().unwrap().execute_command(command) {
+                    Ok(response) => write!(client, "{}{}", response, NEWLINE).unwrap(),
+                    Err(error) => write!(client, "{}{}", error, NEWLINE).unwrap(),
+                };
             }
             println!("closing connection {}", client.peer_addr().unwrap());
         });
