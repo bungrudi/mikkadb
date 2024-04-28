@@ -9,6 +9,7 @@ pub enum RedisCommand<'a> {
     Ping,
     Set { key: &'a str, value: &'a str, ttl: Option<usize> },
     Get { key: &'a str },
+    Info { subcommand: String },
     Error { message: String },
 }
 
@@ -17,6 +18,7 @@ impl RedisCommand<'_> {
     const ECHO : &'static str = "ECHO";
     const SET : &'static str = "SET";
     const GET : &'static str = "GET";
+    const INFO : &'static str = "INFO";
 
     pub fn is_none(&self) -> bool {
         match self {
@@ -67,6 +69,13 @@ impl RedisCommand<'_> {
                     None
                 } else {
                     Some(RedisCommand::Get { key })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::INFO) => {
+                if params[0].is_empty() {
+                    None
+                } else {
+                    Some(RedisCommand::Info { subcommand: params[0].to_string() })
                 }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
@@ -150,6 +159,16 @@ impl Redis {
             RedisCommand::Set { key, value, ttl } => {
                 self.set(key, value, *ttl);
                 Ok("+OK".to_string())
+            },
+            RedisCommand::Info { subcommand } => {
+                match subcommand.as_str() {
+                    "replication" => {
+                        // For now, return some dummy replication information
+                        let ret = "role:master\r\nconnected_slaves:0";
+                        Ok(format!("${}\r\n{}", ret.len(), ret))
+                    },
+                    _ => Err("ERR Unknown INFO subcommand".to_string()),
+                }
             },
             RedisCommand::Error { message } => {
                 Err(format!("ERR {}", message))
