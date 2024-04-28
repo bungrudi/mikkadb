@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use crate::redis::{Redis, RedisCommand};
+use crate::redis::{Redis};
 use crate::resp::parse_resp;
 
 // ClientHandler should ideally be an actor.
@@ -39,6 +39,7 @@ impl ClientHandler {
                 // TODO use the same buffer to write the response.
                 // actually is there benefit in re-using the buffer?
                 match redis.lock().unwrap().execute_command(command) {
+                    // TODO check if write! is actually the best performance wise.
                     Ok(response) => write!(client, "{}{}", response, NEWLINE).unwrap(),
                     Err(error) => write!(client, "{}{}", error, NEWLINE).unwrap(),
                 };

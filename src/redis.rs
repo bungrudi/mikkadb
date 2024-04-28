@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub enum RedisCommand<'a> {
@@ -73,8 +74,13 @@ impl RedisCommand<'_> {
     }
 }
 
+struct ValueWrapper {
+    value: String,
+    expiration: Option<u128>,
+}
+
 pub struct Redis {
-    data: Mutex<HashMap<String, String>>,
+    data: Mutex<HashMap<String, ValueWrapper>>,
 }
 impl Redis {
     pub fn new() -> Self {
@@ -83,31 +89,67 @@ impl Redis {
         }
     }
 
-    pub fn set(&mut self, key: &str, value: &str) {
-        self.data.lock().unwrap().insert(key.to_string(), value.to_string());
+    pub fn set(&mut self, key: &str, value: &str, ttl: Option<usize>) {
+        let expiration =
+            match ttl {
+                Some(ttl) => {
+                    if ttl == 0 {
+                        None
+                    } else {
+                        Some(SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() + ttl as u128)
+                    }
+                },
+                None => None,
+            };
+        let value_with_ttl = ValueWrapper { value: value.to_string(), expiration: expiration };
+        self.data.lock().unwrap().insert(key.to_string(), value_with_ttl);
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
-        self.data.lock().unwrap().get(key).cloned()
+        let mut binding = self.data.lock().unwrap();
+        let value_wrapper = binding.get(key);
+        match value_wrapper {
+            Some(value_with_ttl) => {
+                match value_with_ttl.expiration {
+                    Some(expiration) => {
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis();
+                        if now > expiration {
+                            binding.remove(key);
+                            None
+                        } else {
+                            Some(value_with_ttl.value.clone())
+                        }
+                    },
+                    None => Some(value_with_ttl.value.clone()),
+                }
+            },
+            None => None,
+        }
     }
 
     pub fn execute_command(&mut self, command: &RedisCommand) -> Result<String, String> {
         match command {
             RedisCommand::Ping => {
-                Ok("PONG".to_string())
+                Ok("+PONG".to_string())
             },
             RedisCommand::Echo { data } => {
-                Ok(data.to_string())
+                Ok(format!("${}\r\n{}", data.len(), data))
             },
             RedisCommand::Get { key } => {
                 match self.get(key) {
-                    Some(value) => Ok(value),
+                    Some(value) => Ok(format!("${}\r\n{}", value.len(), value)),
                     None => Ok("$-1".to_string()),
                 }
             },
             RedisCommand::Set { key, value, ttl } => {
-                self.set(key, value);
-                Ok("OK".to_string())
+                self.set(key, value, *ttl);
+                Ok("+OK".to_string())
             },
             RedisCommand::Error { message } => {
                 Err(format!("ERR {}", message))
@@ -130,20 +172,61 @@ mod tests {
     #[test]
     fn test_set() {
         let mut db = Redis::new();
-        db.set("key1", "value1");
+        db.set("key1", "value1", None);
         assert_eq!(db.get("key1"), Some("value1".to_string()));
     }
 
     #[test]
     fn test_get() {
         let mut db = Redis::new();
-        db.set("key1", "value1");
+        db.set("key1", "value1", None);
         assert_eq!(db.get("key1"), Some("value1".to_string()));
+    }
+
+    #[test]
+    fn test_set_ttl_and_get() {
+        let mut db = Redis::new();
+        db.set("key1", "value1", Some(1000));
+        assert_eq!(db.get("key1"), Some("value1".to_string()));
+        // sleep for 1 second
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(db.get("key1"), None);
     }
 
     #[test]
     fn test_get_nonexistent() {
         let db = Redis::new();
         assert_eq!(db.get("key1"), None);
+    }
+
+    /// Test create RedisCommand::Set with TTL in milliseconds.
+    /// SET key value PX 1000
+    #[test]
+    fn test_set_ttl_px() {
+        let command = RedisCommand::data("SET", ["key", "value", "PX", "1000", ""]);
+        match command {
+            Some(RedisCommand::Set { key, value, ttl }) => {
+                assert_eq!(key, "key");
+                assert_eq!(value, "value");
+                assert_eq!(ttl, Some(1000));
+            },
+            _ => panic!("Expected RedisCommand::Set"),
+        }
+
+    }
+
+    /// Test create RedisCommand::Set with TTL in seconds.
+    /// SET key value EX 1
+    #[test]
+    fn test_set_ttl_ex() {
+        let command = RedisCommand::data("SET", ["key", "value", "EX", "1", ""]);
+        match command {
+            Some(RedisCommand::Set { key, value, ttl }) => {
+                assert_eq!(key, "key");
+                assert_eq!(value, "value");
+                assert_eq!(ttl, Some(1000));
+            },
+            _ => panic!("Expected RedisCommand::Set"),
+        }
     }
 }

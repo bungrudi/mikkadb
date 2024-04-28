@@ -170,7 +170,7 @@ impl Context<'_> {
                             endpos = self.read_len - 1;
                         }
                         let data = std::str::from_utf8(&self.buffer[self.current_pos..endpos]).unwrap();
-                        let mut command  = match self.current_command {
+                        let command  = match self.current_command {
                             Some(ref mut command) => {
                                 command
                             },
@@ -504,6 +504,36 @@ mod tests {
                 assert_eq!(key, "key00");
                 assert_eq!(value, "val00");
                 assert_eq!(ttl, None);
+            },
+            _ => panic!("Invalid command"),
+        }
+    }
+
+    #[test]
+    fn test_resp_set_px() {
+        let buffer = b"*5\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n$2\r\nPX\r\n$4\r\n1500\r\n";
+        let commands = parse_resp(buffer, buffer.len());
+        assert_eq!(commands_len!(commands), 1);
+        match commands[0] {
+            RedisCommand::Set { key, value, ttl } => {
+                assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
+                assert_eq!(ttl, Some(1500));
+            },
+            _ => panic!("Invalid command"),
+        }
+    }
+
+    #[test]
+    fn test_resp_set_ex() {
+        let buffer = b"*5\r\n$3\r\nSET\r\n$5\r\nkey02\r\n$5\r\nval02\r\n$2\r\nEX\r\n$2\r\n60\r\n";
+        let commands = parse_resp(buffer, buffer.len());
+        assert_eq!(commands_len!(commands), 1);
+        match commands[0] {
+            RedisCommand::Set { key, value, ttl } => {
+                assert_eq!(key, "key02");
+                assert_eq!(value, "val02");
+                assert_eq!(ttl, Some(60000));
             },
             _ => panic!("Invalid command"),
         }
