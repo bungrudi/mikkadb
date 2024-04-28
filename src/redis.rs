@@ -2,6 +2,21 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn gen_replid() -> String {
+    // let mut rng = rand::thread_rng();
+    // std::iter::repeat(())
+    //     .map(|()| {
+    //         let num = rng.gen_range(0..62);
+    //         match num {
+    //             0..=9 => (num + 48) as u8 as char, // 0-9
+    //             10..=35 => (num + 87) as u8 as char, // a-z
+    //             _ => (num + 29) as u8 as char, // A-Z
+    //         }
+    //     })
+    //     .take(40)
+    //     .collect()
+    "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string()
+}
 #[derive(Debug)]
 pub enum RedisCommand<'a> {
     None,
@@ -191,12 +206,16 @@ impl Redis {
             RedisCommand::Info { subcommand } => {
                 match subcommand.as_str() {
                     "replication" => {
-                        let mut ret:String = "role:master\r\nconnected_slaves:0".to_string();
-                        if self.config.replicaof_host.is_some() {
-                            ret = format!("role:slave\r\nmaster_host:{}\r\nmaster_port:{}",
-                                self.config.replicaof_host.as_ref().unwrap(),
-                                self.config.replicaof_port.as_ref().unwrap());
-                        }
+                        let ret:String =
+                            if self.config.replicaof_host.is_some() {
+                                format!("role:slave\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nmaster_host:{}\r\nmaster_port:{}",
+                                    gen_replid(),
+                                    self.config.replicaof_host.as_ref().unwrap(),
+                                    self.config.replicaof_port.as_ref().unwrap())
+                            } else {
+                                format!("role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nconnected_slaves:0",
+                                    gen_replid())
+                            };
                         Ok(format!("${}\r\n{}", ret.len(), ret))
                     },
                     _ => Err("ERR Unknown INFO subcommand".to_string()),
