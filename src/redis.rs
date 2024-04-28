@@ -88,12 +88,40 @@ struct ValueWrapper {
     expiration: Option<u128>,
 }
 
+#[derive(Debug)]
+#[derive(Clone)]
+pub struct RedisConfig {
+    pub addr: String,
+    pub port: String,
+    pub replicaof_host: Option<String>,
+    pub replicaof_port: Option<String>,
+}
+
+impl RedisConfig {
+    pub fn new() -> Self {
+        RedisConfig {
+            addr: "0.0.0.0".to_string(),
+            port: "6379".to_string(),
+            replicaof_host: None,
+            replicaof_port: None,
+        }
+    }
+}
 pub struct Redis {
+    config: RedisConfig,
     data: Mutex<HashMap<String, ValueWrapper>>,
 }
 impl Redis {
-    pub fn new() -> Self {
+    pub fn new(config:RedisConfig) -> Self {
         Redis {
+            config,
+            data: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn new_default() -> Self {
+        Redis {
+            config: RedisConfig::new(),
             data: Mutex::new(HashMap::new()),
         }
     }
@@ -163,8 +191,12 @@ impl Redis {
             RedisCommand::Info { subcommand } => {
                 match subcommand.as_str() {
                     "replication" => {
-                        // For now, return some dummy replication information
-                        let ret = "role:master\r\nconnected_slaves:0";
+                        let mut ret:String = "role:master\r\nconnected_slaves:0".to_string();
+                        if self.config.replicaof_host.is_some() {
+                            ret = format!("role:slave\r\nmaster_host:{}\r\nmaster_port:{}",
+                                self.config.replicaof_host.as_ref().unwrap(),
+                                self.config.replicaof_port.as_ref().unwrap());
+                        }
                         Ok(format!("${}\r\n{}", ret.len(), ret))
                     },
                     _ => Err("ERR Unknown INFO subcommand".to_string()),
@@ -184,27 +216,27 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let db = Redis::new();
+        let db = Redis::new_default();
         assert!(db.data.lock().unwrap().is_empty());
     }
 
     #[test]
     fn test_set() {
-        let mut db = Redis::new();
+        let mut db = Redis::new_default();
         db.set("key1", "value1", None);
         assert_eq!(db.get("key1"), Some("value1".to_string()));
     }
 
     #[test]
     fn test_get() {
-        let mut db = Redis::new();
+        let mut db = Redis::new_default();
         db.set("key1", "value1", None);
         assert_eq!(db.get("key1"), Some("value1".to_string()));
     }
 
     #[test]
     fn test_set_ttl_and_get() {
-        let mut db = Redis::new();
+        let mut db = Redis::new_default();
         db.set("key1", "value1", Some(1000));
         assert_eq!(db.get("key1"), Some("value1".to_string()));
         // sleep for 1 second
@@ -214,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent() {
-        let db = Redis::new();
+        let db = Redis::new_default();
         assert_eq!(db.get("key1"), None);
     }
 
