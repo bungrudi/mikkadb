@@ -61,10 +61,7 @@ fn main() {
     // for now let's just code it here.
     // connect to remote host and port, send PING as RESP.
     // if we get PONG we are good to go.
-    // if we don't get PONG we should exit.
-    // if we get an error we should exit.
-    // if we get a response that is not PONG we should exit.
-    // if we get a response that is PONG we should continue.
+    // followup with REPLCONF listening-port and REPLCONF capa psync2
     if let Some(replicaof_host) = &config.replicaof_host {
         if let Some(replicaof_port) = &config.replicaof_port {
             let replicaof_addr = format!("{}:{}", replicaof_host, replicaof_port);
@@ -77,6 +74,27 @@ fn main() {
                     let response = std::str::from_utf8(&buffer[0..bytes_read]).unwrap();
                     if response == "+PONG\r\n" {
                         println!("replicaof host and port is valid");
+                        let replconf = format!("*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n",
+                                            config.port.len(),config.port);
+                        stream.write(replconf.as_bytes()).unwrap();
+                        let bytes_read = stream.read(&mut buffer).unwrap();
+                        let response = std::str::from_utf8(&buffer[0..bytes_read]).unwrap();
+                        if response == "+OK\r\n" {
+                            println!("listening-port set");
+                            let replconf = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+                            stream.write(replconf.as_bytes()).unwrap();
+                            let bytes_read = stream.read(&mut buffer).unwrap();
+                            let response = std::str::from_utf8(&buffer[0..bytes_read]).unwrap();
+                            if response == "+OK\r\n" {
+                                println!("capa psync2 set");
+                            } else {
+                                eprintln!("error setting capa psync2");
+                                std::process::exit(1);
+                            }
+                        } else {
+                            eprintln!("error setting listening-port");
+                            std::process::exit(1);
+                        }
                     } else {
                         eprintln!("replicaof host and port is invalid");
                         std::process::exit(1);
