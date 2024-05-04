@@ -25,6 +25,9 @@ pub enum RedisCommand<'a> {
     Set { key: &'a str, value: &'a str, ttl: Option<usize> },
     Get { key: &'a str },
     Info { subcommand: String },
+    // I dont really like Vec here, but I think Replconf is not
+    // oftenly invoked so I will leave it like this for now.
+    Replconf { subcommand: &'a str, params: Vec<&'a str> },
     Error { message: String },
 }
 
@@ -34,6 +37,7 @@ impl RedisCommand<'_> {
     const SET : &'static str = "SET";
     const GET : &'static str = "GET";
     const INFO : &'static str = "INFO";
+    const REPLCONF : &'static str = "REPLCONF";
 
     pub fn is_none(&self) -> bool {
         match self {
@@ -91,6 +95,15 @@ impl RedisCommand<'_> {
                     None
                 } else {
                     Some(RedisCommand::Info { subcommand: params[0].to_string() })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::REPLCONF) => {
+                let subcommand = params[0];
+                let params = params[1..].iter().filter(|&&p| !p.is_empty()).cloned().collect();
+                if subcommand == "" {
+                    Some(RedisCommand::Error { message: "ERR Wrong number of arguments for 'replconf' command".to_string() })
+                } else {
+                    Some(RedisCommand::Replconf { subcommand, params })
                 }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
@@ -221,6 +234,17 @@ impl Redis {
                     _ => Err("ERR Unknown INFO subcommand".to_string()),
                 }
             },
+            RedisCommand::Replconf {
+                subcommand,params,
+            } => {
+                match subcommand {
+                    &"listening-port" | &"capa" => {
+                        // TODO: Implement the actual logic for these subcommands
+                        Ok("+OK".to_string())
+                    }
+                    _ => Err(format!("ERR Unknown REPLCONF subcommand: {}", subcommand)),
+                }
+            },
             RedisCommand::Error { message } => {
                 Err(format!("ERR {}", message))
             },
@@ -298,5 +322,30 @@ mod tests {
             },
             _ => panic!("Expected RedisCommand::Set"),
         }
+    }
+
+    #[test]
+    fn test_replconf() {
+        let mut db = Redis::new_default();
+        let replconf_command = RedisCommand::Replconf {
+            subcommand: "listening-port",
+            params: vec!["6379"]
+        };
+        let result = db.execute_command(&replconf_command);
+        assert_eq!(result, Ok("+OK".to_string()));
+
+        let replconf_command = RedisCommand::Replconf {
+            subcommand: "capa",
+            params: vec!["psync2"]
+        };
+        let result = db.execute_command(&replconf_command);
+        assert_eq!(result, Ok("+OK".to_string()));
+
+        let replconf_command = RedisCommand::Replconf {
+            subcommand: "unknown",
+            params: vec!["param1", "param2"]
+        };
+        let result = db.execute_command(&replconf_command);
+        assert_eq!(result, Err("ERR Unknown REPLCONF subcommand: unknown".to_string()));
     }
 }
