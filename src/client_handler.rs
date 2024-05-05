@@ -38,10 +38,14 @@ impl ClientHandler {
                 let command = &commands[0];
                 // TODO use the same buffer to write the response.
                 // actually is there benefit in re-using the buffer?
-                match redis.lock().unwrap().execute_command(command) {
+                match redis.lock().unwrap().execute_command(command, Some(&mut client)) {
                     // TODO check if write! is actually the best performance wise.
-                    Ok(response) => write!(client, "{}{}", response, NEWLINE).unwrap(),
-                    Err(error) => write!(client, "{}{}", error, NEWLINE).unwrap(),
+                    Ok(response) => {
+                        if(!response.is_empty())  {
+                            client.write(response.as_bytes());
+                        }
+                    }, //write!(client, "{}", response).unwrap(),
+                    Err(error) => {client.write(error.as_bytes());}//write!(client, "{}", error).unwrap(),
                 };
             }
             println!("closing connection {}", client.peer_addr().unwrap());

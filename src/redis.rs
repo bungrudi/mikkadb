@@ -3,6 +3,10 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::thread;
 use std::io::{Read, Write};
+use std::net::TcpStream;
+use base64;
+use base64::Engine;
+use base64::engine::general_purpose;
 
 fn gen_replid() -> String {
     // let mut rng = rand::thread_rng();
@@ -209,23 +213,24 @@ impl Redis {
         }
     }
 
-    pub fn execute_command(&mut self, command: &RedisCommand) -> Result<String, String> {
+    // TODO client should be a TcpStream not an option.. find how to mock it in tests.
+    pub fn execute_command(&mut self, command: &RedisCommand, client: Option<&mut TcpStream>) -> Result<String, String> {
         match command {
             RedisCommand::Ping => {
-                Ok("+PONG".to_string())
+                Ok("+PONG\r\n".to_string())
             },
             RedisCommand::Echo { data } => {
-                Ok(format!("${}\r\n{}", data.len(), data))
+                Ok(format!("${}\r\n{}\r\n", data.len(), data))
             },
             RedisCommand::Get { key } => {
                 match self.get(key) {
-                    Some(value) => Ok(format!("${}\r\n{}", value.len(), value)),
-                    None => Ok("$-1".to_string()),
+                    Some(value) => Ok(format!("${}\r\n{}\r\n", value.len(), value)),
+                    None => Ok("$-1\r\n".to_string()),
                 }
             },
             RedisCommand::Set { key, value, ttl } => {
                 self.set(key, value, *ttl);
-                Ok("+OK".to_string())
+                Ok("+OK\r\n".to_string())
             },
             RedisCommand::Info { subcommand } => {
                 match subcommand.as_str() {
@@ -240,7 +245,7 @@ impl Redis {
                                 format!("role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nconnected_slaves:0",
                                     gen_replid())
                             };
-                        Ok(format!("${}\r\n{}", ret.len(), ret))
+                        Ok(format!("${}\r\n{}\r\n", ret.len(), ret))
                     },
                     _ => Err("ERR Unknown INFO subcommand".to_string()),
                 }
@@ -251,16 +256,33 @@ impl Redis {
                 match subcommand {
                     &"listening-port" | &"capa" => {
                         // TODO: Implement the actual logic for these subcommands
-                        Ok("+OK".to_string())
+                        Ok("+OK\r\n".to_string())
                     }
-                    _ => Err(format!("ERR Unknown REPLCONF subcommand: {}", subcommand)),
+                    _ => Err(format!("ERR Unknown REPLCONF subcommand: {}\r\n", subcommand)),
                 }
             },
             RedisCommand::Psync {
                 replica_id, offset,
             } => {
                 if *offset == -1 && *replica_id == "?" {
-                    Ok(format!("+FULLRESYNC {} {}\r\n", gen_replid(), 0))
+                    if let Some(client) = client {
+                        client.write(format!("+FULLRESYNC {} {}\r\n", gen_replid(), 0).as_bytes());
+
+                        let rdb_file_base64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
+                        // Decode the base64 string into a byte array
+                        let rdb_file = general_purpose::STANDARD.decode(rdb_file_base64).unwrap();
+                        // let length = rdb_file.len();
+                        // let contents = String::from_utf8_lossy(&rdb_file);
+                        let length = rdb_file.len();
+                        println!("contents: {:?}", rdb_file.as_slice());
+                        println!("contents length: {}", length);
+                        client.write(format!("${}\r\n", length).as_bytes());
+                        client.write(rdb_file.as_slice());
+                        client.flush();
+                    }
+
+                    Ok("".to_string())
+                    // Ok(format!(${}\r\n{}", gen_replid(), 0, rdb_file.len(), contents))
                 } else {
                     Err("ERR Unknown PSYNC subcommand".to_string())
                 }
@@ -374,7 +396,7 @@ mod tests {
         db.set("key1", "value1", Some(1000));
         assert_eq!(db.get("key1"), Some("value1".to_string()));
         // sleep for 1 second
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
         assert_eq!(db.get("key1"), None);
     }
 
@@ -422,22 +444,23 @@ mod tests {
             subcommand: "listening-port",
             params: vec!["6379"]
         };
-        let result = db.execute_command(&replconf_command);
-        assert_eq!(result, Ok("+OK".to_string()));
+        // TODO mock TcpStream...
+        let result = db.execute_command(&replconf_command, None);
+        assert_eq!(result, Ok("+OK\r\n".to_string()));
 
         let replconf_command = RedisCommand::Replconf {
             subcommand: "capa",
             params: vec!["psync2"]
         };
-        let result = db.execute_command(&replconf_command);
-        assert_eq!(result, Ok("+OK".to_string()));
+        let result = db.execute_command(&replconf_command, None);
+        assert_eq!(result, Ok("+OK\r\n".to_string()));
 
         let replconf_command = RedisCommand::Replconf {
             subcommand: "unknown",
             params: vec!["param1", "param2"]
         };
-        let result = db.execute_command(&replconf_command);
-        assert_eq!(result, Err("ERR Unknown REPLCONF subcommand: unknown".to_string()));
+        let result = db.execute_command(&replconf_command, None);
+        assert_eq!(result, Err("ERR Unknown REPLCONF subcommand: unknown\r\n".to_string()));
     }
 
     #[test]
@@ -447,9 +470,9 @@ mod tests {
             replica_id: "?",
             offset: -1,
         };
-        let result = db.execute_command(&psync_command);
+        let result = db.execute_command(&psync_command, None);
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert!(response.starts_with("+FULLRESYNC"));
+        assert!(response.eq("")); // empty response, we write directly to the client.
     }
 }
