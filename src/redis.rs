@@ -30,6 +30,7 @@ pub enum RedisCommand<'a> {
     // I dont really like Vec here, but I think Replconf is not
     // oftenly invoked so I will leave it like this for now.
     Replconf { subcommand: &'a str, params: Vec<&'a str> },
+    Psync { replica_id: &'a str, offset: i8 },
     Error { message: String },
 }
 
@@ -40,6 +41,7 @@ impl RedisCommand<'_> {
     const GET : &'static str = "GET";
     const INFO : &'static str = "INFO";
     const REPLCONF : &'static str = "REPLCONF";
+    const PSYNC : &'static str = "PSYNC";
 
     pub fn is_none(&self) -> bool {
         match self {
@@ -106,6 +108,13 @@ impl RedisCommand<'_> {
                     Some(RedisCommand::Error { message: "ERR Wrong number of arguments for 'replconf' command".to_string() })
                 } else {
                     Some(RedisCommand::Replconf { subcommand, params })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::PSYNC) => {
+                let replica_id = params[0];
+                match params[1].parse::<i8>() {
+                    Ok(offset) => Some(RedisCommand::Psync { replica_id, offset }),
+                    Err(_) => Some(RedisCommand::Error { message: "ERR Invalid offset".to_string() }),
                 }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
@@ -245,6 +254,15 @@ impl Redis {
                         Ok("+OK".to_string())
                     }
                     _ => Err(format!("ERR Unknown REPLCONF subcommand: {}", subcommand)),
+                }
+            },
+            RedisCommand::Psync {
+                replica_id, offset,
+            } => {
+                if *offset == -1 && *replica_id == "?" {
+                    Ok(format!("+FULLRESYNC {} {}\r\n", gen_replid(), 0))
+                } else {
+                    Err("ERR Unknown PSYNC subcommand".to_string())
                 }
             },
             RedisCommand::Error { message } => {
@@ -420,5 +438,18 @@ mod tests {
         };
         let result = db.execute_command(&replconf_command);
         assert_eq!(result, Err("ERR Unknown REPLCONF subcommand: unknown".to_string()));
+    }
+
+    #[test]
+    fn test_psync_fullresync() {
+        let mut db = Redis::new_default();
+        let psync_command = RedisCommand::Psync {
+            replica_id: "?",
+            offset: -1,
+        };
+        let result = db.execute_command(&psync_command);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(response.starts_with("+FULLRESYNC"));
     }
 }
