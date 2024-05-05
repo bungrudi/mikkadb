@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::io::{Read, Write};
 
 fn gen_replid() -> String {
     // let mut rng = rand::thread_rng();
@@ -251,6 +253,77 @@ impl Redis {
             _ => Err("ERR Unknown command".to_string()),
         }
     }
+}
+
+#[inline]
+fn connect_to_server(host: &str, port: &str) -> std::io::Result<std::net::TcpStream> {
+    let replicaof_addr = format!("{}:{}", host, port);
+    std::net::TcpStream::connect(replicaof_addr)
+}
+
+#[inline]
+fn send_command(stream: &mut std::net::TcpStream, command: &str) -> std::io::Result<usize> {
+    stream.write(command.as_bytes())
+}
+
+#[inline]
+fn read_response(stream: &mut std::net::TcpStream, buffer: &mut [u8; 512]) -> std::io::Result<String> {
+    let bytes_read = stream.read(buffer)?;
+    Ok(std::str::from_utf8(&buffer[0..bytes_read]).unwrap().to_string())
+}
+
+#[inline]
+pub fn init_replica(config: &mut RedisConfig) {
+    // as part of startup sequence..
+    // if there is a replicaof host and port then this instance is a replica.
+
+    // for now let's just code it here.
+    // connect to remote host and port, send PING as RESP.
+    // (a) sends PING command - wait for +PONG
+    // (b) sends REPLCONF listening-port <PORT> - wait for +OK
+    // (c) sends REPLCONF capa eof capa psync2 - wait for +OK
+    // (d) sends PSYNC ? -1 - wait for +fullresync
+    // the following sequence in separate thread..
+    let config = config.clone();
+    let handle = thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if let Some(replicaof_host) = &config.replicaof_host {
+            if let Some(replicaof_port) = &config.replicaof_port {
+                match connect_to_server(replicaof_host, replicaof_port) {
+                    Ok(mut stream) => {
+                        let replconf_command = format!("*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n", config.port.len(), config.port);
+                        let commands: Vec<(&str, Box<dyn Fn(&str) -> bool>)> = vec![
+                            ("*1\r\n$4\r\nPING\r\n", Box::new(|response: &str| response == "+PONG\r\n")),
+                            (&replconf_command, Box::new(|response: &str| response == "+OK\r\n")),
+                            ("*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n", Box::new(|response: &str| response == "+OK\r\n")),
+                            ("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n", Box::new(|response: &str| response.to_lowercase().starts_with("+fullresync")))
+                        ];
+
+                        let mut buffer = [0; 512];
+                        for (command, validate) in commands {
+                            println!("sending command: {}", command);
+                            if send_command(&mut stream, command).is_err() {
+                                eprintln!("error executing command: {}", command);
+                                std::process::exit(1);
+                            }
+                            println!("reading response..");
+                            let response = read_response(&mut stream, &mut buffer).unwrap();
+                            println!("response: {}", response);
+                            if !validate(&response) {
+                                eprintln!("unexpected response: {}", response);
+                                std::process::exit(1);
+                            }
+                        }
+                        println!("replicaof host and port is valid");
+                    }
+                    Err(e) => {
+                        eprintln!("error connecting to replicaof host and port: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
