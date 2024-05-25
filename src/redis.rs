@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::thread;
 use std::io::{Read, Write};
@@ -28,11 +28,9 @@ pub enum RedisCommand<'a> {
     None,
     Echo { data: &'a str },
     Ping,
-    Set { key: &'a str, value: &'a str, ttl: Option<usize> },
+    Set { key: &'a str, value: &'a str, ttl: Option<usize>, original_resp: String },
     Get { key: &'a str },
     Info { subcommand: String },
-    // I dont really like Vec here, but I think Replconf is not
-    // oftenly invoked so I will leave it like this for now.
     Replconf { subcommand: &'a str, params: Vec<&'a str> },
     Psync { replica_id: &'a str, offset: i8 },
     Error { message: String },
@@ -58,7 +56,7 @@ impl RedisCommand<'_> {
     /// It should check if the parameters are complete, otherwise return None.
     /// For example Set requires 2 parameters, key and value. When this method is called for
     /// a Set command, the first time it will return true to indicate that it expects another.
-    pub fn data<'a>(command: &'a str, params: [&'a str;5]) -> Option<RedisCommand<'a>> {
+    pub fn data<'a>(command: &'a str, params: [&'a str;5], original_resp: &'a str) -> Option<RedisCommand<'a>> {
         match command {
             command if command.eq_ignore_ascii_case(Self::PING) => Some(RedisCommand::Ping),
             command if command.eq_ignore_ascii_case(Self::ECHO) => {
@@ -87,7 +85,8 @@ impl RedisCommand<'_> {
                             false => None,
                         },
                     };
-                    Some(RedisCommand::Set { key, value, ttl })
+                    // TODO original_resp.to_string() is not efficient.. find a way to avoid it.
+                    Some(RedisCommand::Set { key, value, ttl, original_resp: original_resp.to_string() })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::GET) => {
@@ -150,15 +149,25 @@ impl RedisConfig {
         }
     }
 }
+
+struct Replica {
+    host: String,
+    port: String,
+    stream: Arc<Mutex<TcpStream>>,
+}
 pub struct Redis {
     config: RedisConfig,
     data: Mutex<HashMap<String, ValueWrapper>>,
+    replicas: Mutex<HashMap<String, Replica>>,
+    replica_queue: Mutex<VecDeque<String>>
 }
 impl Redis {
     pub fn new(config:RedisConfig) -> Self {
         Redis {
             config,
             data: Mutex::new(HashMap::new()),
+            replicas: Mutex::new(HashMap::new()),
+            replica_queue: Mutex::new(VecDeque::new())
         }
     }
 
@@ -166,6 +175,8 @@ impl Redis {
         Redis {
             config: RedisConfig::new(),
             data: Mutex::new(HashMap::new()),
+            replicas: Mutex::new(HashMap::new()),
+            replica_queue: Mutex::new(VecDeque::new())
         }
     }
 
@@ -216,34 +227,35 @@ impl Redis {
     // TODO client should be a TcpStream not an option.. find how to mock it in tests.
     pub fn execute_command(&mut self, command: &RedisCommand, client: Option<&mut TcpStream>) -> Result<String, String> {
         match command {
-            RedisCommand::Ping => {
+            RedisCommand::Ping  => {
                 Ok("+PONG\r\n".to_string())
             },
-            RedisCommand::Echo { data } => {
+            RedisCommand::Echo { data} => {
                 Ok(format!("${}\r\n{}\r\n", data.len(), data))
             },
-            RedisCommand::Get { key } => {
+            RedisCommand::Get { key} => {
                 match self.get(key) {
                     Some(value) => Ok(format!("${}\r\n{}\r\n", value.len(), value)),
                     None => Ok("$-1\r\n".to_string()),
                 }
             },
-            RedisCommand::Set { key, value, ttl } => {
+            RedisCommand::Set { key, value, ttl, original_resp } => {
                 self.set(key, value, *ttl);
+                self.replica_queue.lock().unwrap().push_back(original_resp.clone());
                 Ok("+OK\r\n".to_string())
             },
-            RedisCommand::Info { subcommand } => {
+            RedisCommand::Info { subcommand} => {
                 match subcommand.as_str() {
                     "replication" => {
                         let ret:String =
                             if self.config.replicaof_host.is_some() {
                                 format!("role:slave\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nmaster_host:{}\r\nmaster_port:{}",
-                                    gen_replid(),
-                                    self.config.replicaof_host.as_ref().unwrap(),
-                                    self.config.replicaof_port.as_ref().unwrap())
+                                        gen_replid(),
+                                        self.config.replicaof_host.as_ref().unwrap(),
+                                        self.config.replicaof_port.as_ref().unwrap())
                             } else {
                                 format!("role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nconnected_slaves:0",
-                                    gen_replid())
+                                        gen_replid())
                             };
                         Ok(format!("${}\r\n{}\r\n", ret.len(), ret))
                     },
@@ -251,7 +263,7 @@ impl Redis {
                 }
             },
             RedisCommand::Replconf {
-                subcommand,params,
+                subcommand,params
             } => {
                 match subcommand {
                     &"listening-port" | &"capa" => {
@@ -262,7 +274,7 @@ impl Redis {
                 }
             },
             RedisCommand::Psync {
-                replica_id, offset,
+                replica_id, offset
             } => {
                 if *offset == -1 && *replica_id == "?" {
                     if let Some(client) = client {
@@ -271,18 +283,13 @@ impl Redis {
                         let rdb_file_base64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
                         // Decode the base64 string into a byte array
                         let rdb_file = general_purpose::STANDARD.decode(rdb_file_base64).unwrap();
-                        // let length = rdb_file.len();
-                        // let contents = String::from_utf8_lossy(&rdb_file);
                         let length = rdb_file.len();
-                        println!("contents: {:?}", rdb_file.as_slice());
-                        println!("contents length: {}", length);
                         client.write(format!("${}\r\n", length).as_bytes());
                         client.write(rdb_file.as_slice());
                         client.flush();
                     }
 
                     Ok("".to_string())
-                    // Ok(format!(${}\r\n{}", gen_replid(), 0, rdb_file.len(), contents))
                 } else {
                     Err("ERR Unknown PSYNC subcommand".to_string())
                 }
@@ -313,7 +320,7 @@ fn read_response(stream: &mut std::net::TcpStream, buffer: &mut [u8; 512]) -> st
 }
 
 #[inline]
-pub fn init_replica(config: &mut RedisConfig) {
+pub fn init_replica(config: &mut RedisConfig, redis: &mut Redis) {
     // as part of startup sequence..
     // if there is a replicaof host and port then this instance is a replica.
 
@@ -410,12 +417,13 @@ mod tests {
     /// SET key value PX 1000
     #[test]
     fn test_set_ttl_px() {
-        let command = RedisCommand::data("SET", ["key", "value", "PX", "1000", ""]);
+        let command = RedisCommand::data("SET", ["key", "value", "PX", "1000", ""], "SET key value PX 1000\r\n");
         match command {
-            Some(RedisCommand::Set { key, value, ttl }) => {
+            Some(RedisCommand::Set { key, value, ttl, original_resp }) => {
                 assert_eq!(key, "key");
                 assert_eq!(value, "value");
                 assert_eq!(ttl, Some(1000));
+                assert_eq!(original_resp, "SET key value PX 1000\r\n".to_string());
             },
             _ => panic!("Expected RedisCommand::Set"),
         }
@@ -426,12 +434,13 @@ mod tests {
     /// SET key value EX 1
     #[test]
     fn test_set_ttl_ex() {
-        let command = RedisCommand::data("SET", ["key", "value", "EX", "1", ""]);
+        let command = RedisCommand::data("SET", ["key", "value", "EX", "1", ""], "SET key value EX 1\r\n");
         match command {
-            Some(RedisCommand::Set { key, value, ttl }) => {
+            Some(RedisCommand::Set { key, value, ttl, original_resp }) => {
                 assert_eq!(key, "key");
                 assert_eq!(value, "value");
                 assert_eq!(ttl, Some(1000));
+                assert_eq!(original_resp, "SET key value EX 1\r\n".to_string());
             },
             _ => panic!("Expected RedisCommand::Set"),
         }

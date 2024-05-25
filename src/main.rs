@@ -5,7 +5,7 @@ mod redis;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
-use crate::redis::RedisConfig;
+use crate::redis::{init_replica, Redis, RedisConfig};
 
 /**
 * This is an implementation of a key value store that immitates Redis.
@@ -52,7 +52,7 @@ fn main() {
 
     let listener = TcpListener::bind(format!("{}:{}",config.addr,config.port)).unwrap();
 
-    redis::init_replica(&mut config);
+    init_replica(&mut config, &mut redis.lock().unwrap());
 
     for stream in listener.incoming() {
         match stream {

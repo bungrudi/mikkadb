@@ -41,7 +41,7 @@ impl ClientHandler {
                 match redis.lock().unwrap().execute_command(command, Some(&mut client)) {
                     // TODO check if write! is actually the best performance wise.
                     Ok(response) => {
-                        if(!response.is_empty())  {
+                        if !response.is_empty() {
                             client.write(response.as_bytes());
                         }
                     }, //write!(client, "{}", response).unwrap(),
