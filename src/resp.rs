@@ -31,12 +31,6 @@ macro_rules! process_command {
     };
 }
 
-macro_rules! commands_len  {
-    ($commands:expr) => {
-        $commands.iter().filter(|&x| !x.is_none()).count()
-    };
-}
-
 enum RespState {
     Idle,
     // ArrayDef,
@@ -387,6 +381,12 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> [RedisCommand;25] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    macro_rules! commands_len  {
+        ($commands:expr) => {
+            $commands.iter().filter(|&x| !x.is_none()).count()
+        };
+    }
 
     #[test]
     fn test_resp_command_pair() {

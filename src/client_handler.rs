@@ -21,12 +21,12 @@ impl ClientHandler {
     }
 
     pub fn start(&mut self) {
-        const NEWLINE: &str = "\r\n";
         let mut buffer: [u8;2048] = [0; 2048];
         let client = Arc::clone(&self.client);
         let redis = Arc::clone(&self.redis);
         thread::spawn(move || {
             let mut client = client.lock().unwrap();
+            let addr = client.peer_addr().unwrap();
             'LOOP_COMMAND: while let Ok(bytes_read) = client.read(&mut buffer) {
                 println!("read {} bytes", bytes_read);
                 if bytes_read == 0 {
@@ -36,19 +36,25 @@ impl ClientHandler {
                 let commands = parse_resp(&buffer, bytes_read);
 
                 let command = &commands[0];
+                println!("command: {:?}", command);
                 // TODO use the same buffer to write the response.
                 // actually is there benefit in re-using the buffer?
-                match redis.lock().unwrap().execute_command(command, Some(&mut client)) {
+                match redis.lock().expect("failed to lock redis").execute_command(command, Some(&mut client)) {
                     // TODO check if write! is actually the best performance wise.
                     Ok(response) => {
+                        println!("response: {}", response);
                         if !response.is_empty() {
-                            client.write(response.as_bytes());
+                            let _ = client.write(response.as_bytes());
                         }
                     }, //write!(client, "{}", response).unwrap(),
-                    Err(error) => {client.write(error.as_bytes());}//write!(client, "{}", error).unwrap(),
+                    Err(error) => {
+                        eprintln!("error: {}", error);
+                        let _ = client.write(error.as_bytes());
+                    }
                 };
+                println!("after write");
             }
-            println!("closing connection {}", client.peer_addr().unwrap());
+            println!("closing connection {}", addr);
         });
     }
 }
