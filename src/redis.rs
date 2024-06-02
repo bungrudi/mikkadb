@@ -32,6 +32,7 @@ pub enum RedisCommand<'a> {
     Get { key: &'a str },
     Info { subcommand: String },
     Replconf { subcommand: &'a str, params: Vec<&'a str> },
+    ReplconfGetack,
     Psync { replica_id: &'a str, offset: i8 },
     Error { message: String },
 }
@@ -103,7 +104,12 @@ impl RedisCommand<'_> {
                 if subcommand == "" {
                     Some(RedisCommand::Error { message: "ERR Wrong number of arguments for 'replconf' command".to_string() })
                 } else {
-                    Some(RedisCommand::Replconf { subcommand, params })
+                    // check if ReplConf GetAck
+                    if subcommand.eq_ignore_ascii_case("getack") {
+                        Some(RedisCommand::ReplconfGetack)
+                    } else {
+                        Some(RedisCommand::Replconf { subcommand, params })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::PSYNC) => {
@@ -291,6 +297,18 @@ impl Redis {
                     _ => Err(format!("ERR Unknown REPLCONF subcommand: {}\r\n", subcommand)),
                 }
             },
+            RedisCommand::ReplconfGetack => {
+                match client {
+                    Some(client) => {
+                        let _ = client.write("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n".as_bytes());
+                        let _ = client.flush();
+                    },
+                    None => {
+                        return Err("ERR No stream client to send REPLCONF GETACK\r\n".to_string());
+                    }
+                }
+                Ok("".to_string())
+            },
             RedisCommand::Psync {
                 replica_id, offset
             } => {
@@ -360,21 +378,7 @@ pub fn init_replica(config: &mut RedisConfig, redis: Arc<Mutex<Redis>>) {
                         ("*1\r\n$4\r\nPING\r\n", Box::new(|response: &str, _| response == "+PONG\r\n")),
                         (&replconf_command, Box::new(|response: &str, _| response == "+OK\r\n")),
                         ("*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n", Box::new(|response: &str, _| response == "+OK\r\n")),
-                        ("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n", Box::new(
-                            |response: &str, stream|  {
-                                if response.to_lowercase().starts_with("+fullresync") {
-                                    // we will get one more line with the RDB file
-                                    // println!("reading RDB file..");
-                                    // TODO flaky here.. handle fullresync as part of event loop.
-                                    // flaky because the fullresync and RDB reply are not guaranteed to be in one read.
-                                    // in some occasions one read can yield both + other subsequent commands as well i.e. SETs.
-                                    let buf = &mut [0; 2048];
-                                    let read = stream.read(buf).unwrap();
-                                    println!("fullresync RDB: {}", String::from_utf8_lossy(&buf[0..read]));
-                                    return true;
-                                }
-                                return false;
-                            }))
+
                     ];
 
                     let mut buffer = [0; 512];
@@ -392,6 +396,17 @@ pub fn init_replica(config: &mut RedisConfig, redis: Arc<Mutex<Redis>>) {
                             std::process::exit(1);
                         }
                     }
+                    // send psync, and then hand over to the event loop.
+                    if send_command(&mut stream, "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n").is_err() {
+                        eprintln!("error executing PSYNC command");
+                        std::process::exit(1);
+                    }
+                    println!("psync sent");
+                    // Read fullresync and RDB file, and no more.
+                    // leave the rest to the event loop.
+
+                    read_until_end_of_rdb(&mut stream, &mut buffer);
+
                     // let mut redis = redis.lock().unwrap();
                     // redis.master_stream = Some(Arc::new(Mutex::new(stream)));
                     let mut client_handler = crate::client_handler::ClientHandler::new_master(stream, redis.clone());
@@ -401,6 +416,52 @@ pub fn init_replica(config: &mut RedisConfig, redis: Arc<Mutex<Redis>>) {
                 Err(e) => {
                     eprintln!("error connecting to replicaof host and port: {}", e);
                     std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+#[inline]
+fn read_until_end_of_rdb(stream: &mut TcpStream, buffer: &mut [u8; 512]) {
+    // peek until we get '$' and then read the length of the 'fullresync'+RDB file.
+    let mut count = 0;
+    'LOOP_PEEK: while let Ok(peek_size) = stream.peek(buffer) {
+        thread::sleep(std::time::Duration::from_millis(200));
+        println!("peek_size: {}", peek_size);
+        println!("peeked: {}", String::from_utf8_lossy(&buffer[0..peek_size]));
+        if count > 10 {
+            println!("count exceeded");
+            break;
+        }
+        if peek_size == 0 {
+            count += 1;
+            continue;
+        }
+
+        // find the patter '$xx\r\n' where xx is numeric in the buffer, then read from 0 to current pos+88
+        let mut found = false;
+        let mut ret_len;
+        for i in 0..peek_size {
+            if buffer[i] == b'$' {
+                ret_len = i;
+                let mut length = 0;
+                let mut j = i + 1;
+                while j < peek_size {
+                    if buffer[j] == b'\r' {
+                        found = true;
+                        break;
+                    }
+                    length = length * 10 + (buffer[j] - b'0') as usize;
+                    j += 1;
+                }
+                if found {
+                    println!("found RDB length: {}", length);
+                    let mut rdb_buffer = vec![0; ret_len + length + 5]; // 2 would be \r\n
+                    let _ = stream.read_exact(&mut rdb_buffer);
+                    let rdb_file = String::from_utf8_lossy(&rdb_buffer);
+                    println!("rdb_file: {}", rdb_file);
+                    break 'LOOP_PEEK;
                 }
             }
         }
@@ -519,4 +580,34 @@ mod tests {
         let response = result.unwrap();
         assert!(response.eq("")); // empty response, we write directly to the client.
     }
+
+    // use super::*;
+    // use std::io::Cursor;
+    // use std::net::TcpStream;
+    // use std::os::unix::io::FromRawFd;
+    //
+    // #[test]
+    // fn test_read_until_end_of_rdb() {
+    //     // Prepare the data to be read
+    //     // "$88\r\nREDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfa\x05ctime\xc2m\b\xbce\xfa\bused-mem°\xc4\x10\x00\xfa\baof-base\xc0\x00\xff\xf0n;\xfe\xc0\xffZ\xa2"
+    //     let data = "+FULLRESYNC 75cd7bc10c49047e0d163660f3b90625b1af31dc 0\r\n$88\r\nREDIS0011�       redis-ver7.2.0�\r\nredis-bits�@�ctime��eused-mem°�aof-base���n;���Z�*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
+    //     let cursor = Cursor::new(data);
+    //
+    //     // Create a TcpStream from the cursor
+    //     let stream = unsafe { TcpStream::from_raw_fd(cursor.into_raw_fd()) };
+    //
+    //     // Create a buffer to read into
+    //     let mut buffer = [0; 512];
+    //
+    //     // Create a Redis instance
+    //     let redis = Redis::new_default();
+    //
+    //     // Call the function
+    //     let rdb_file = redis.read_until_end_of_rdb(&mut stream, &mut buffer).unwrap();
+    //
+    //     // Check the RDB file
+    //     assert!(rdb_file.starts_with("REDIS0011"));
+    //     assert!(rdb_file.contains("redis-bits"));
+    //     assert!(rdb_file.ends_with("*\r\n"));
+    // }
 }

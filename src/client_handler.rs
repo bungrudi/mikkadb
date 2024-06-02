@@ -39,6 +39,7 @@ impl ClientHandler {
             let mut client = client.lock().unwrap();
             let addr = client.peer_addr().unwrap();
             'LOOP_READ_NETWORK: while let Ok(bytes_read) = client.read(&mut buffer) {
+                // TODO disconnection hook.. this is handy when we want to do cleanup i.e. in a replica setup
                 println!("read {} bytes", bytes_read);
                 if bytes_read == 0 {
                     break 'LOOP_READ_NETWORK;

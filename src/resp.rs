@@ -636,5 +636,27 @@ mod tests {
             _ => panic!("Expected RedisCommand::Set"),
         }
     }
+
+    #[test]
+    fn test_multiple_replconf_commands() {
+        let commands_str = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n*3\r\n$8\r\nREPLCONF\r\n$5\r\nother\r\n$5\r\nparam\r\n";
+        let commands = parse_resp(commands_str.as_bytes(), commands_str.len());
+
+        assert_eq!(commands_len!(commands), 2);
+
+        match &commands[0] {
+            RedisCommand::ReplconfGetack => {},
+            _ => panic!("Expected RedisCommand::ReplconfGetack"),
+        }
+
+        match &commands[1] {
+            RedisCommand::Replconf { subcommand, params } => {
+                assert_eq!(*subcommand, "other");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0], "param");
+            },
+            _ => panic!("Expected RedisCommand::Replconf"),
+        }
+    }
 }
 
