@@ -384,8 +384,12 @@ mod tests {
 
     macro_rules! commands_len  {
         ($commands:expr) => {
-            $commands.iter().filter(|&x| !x.is_none()).count()
+            $commands.iter().filter(|&x| !is_none(&x)).count()
         };
+    }
+
+    fn is_none(command: &RedisCommand) -> bool {
+        matches!(command, RedisCommand::None)
     }
 
     #[test]
@@ -597,6 +601,39 @@ mod tests {
                 assert_eq!(original_resp, std::str::from_utf8(buffer).unwrap());
             },
             _ => panic!("Invalid command"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_set_commands() {
+        let commands_str = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n123\r\n*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$3\r\n456\r\n*3\r\n$3\r\nSET\r\n$3\r\nbaz\r\n$3\r\n789\r\n";
+        // println!("commands_str len: {}", commands_str.len());
+        let commands = parse_resp(commands_str.as_bytes(), commands_str.len());
+
+        assert_eq!(commands_len!(commands), 3);
+
+        match &commands[0] {
+            RedisCommand::Set { key, value, .. } => {
+                assert_eq!(*key, "foo");
+                assert_eq!(*value, "123");
+            },
+            _ => panic!("Expected RedisCommand::Set"),
+        }
+
+        match &commands[1] {
+            RedisCommand::Set { key, value, .. } => {
+                assert_eq!(*key, "bar");
+                assert_eq!(*value, "456");
+            },
+            _ => panic!("Expected RedisCommand::Set"),
+        }
+
+        match &commands[2] {
+            RedisCommand::Set { key, value, .. } => {
+                assert_eq!(*key, "baz");
+                assert_eq!(*value, "789");
+            },
+            _ => panic!("Expected RedisCommand::Set"),
         }
     }
 }

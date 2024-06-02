@@ -144,6 +144,7 @@ impl RedisConfig {
 }
 
 pub struct Replica {
+    #[allow(dead_code)]
     pub(crate) host: String,
     #[allow(dead_code)]
     pub(crate) port: String,
@@ -153,7 +154,8 @@ pub struct Redis {
     config: RedisConfig,
     data: Mutex<HashMap<String, ValueWrapper>>,
     pub(crate) replicas: Mutex<HashMap<String, Replica>>,
-    pub(crate) replica_queue: Mutex<VecDeque<String>>
+    pub(crate) replica_queue: Mutex<VecDeque<String>>,
+    // pub(crate) master_stream: Option<Arc<Mutex<TcpStream>>>,
 }
 impl Redis {
     pub fn new(config:RedisConfig) -> Self {
@@ -161,7 +163,8 @@ impl Redis {
             config,
             data: Mutex::new(HashMap::new()),
             replicas: Mutex::new(HashMap::new()),
-            replica_queue: Mutex::new(VecDeque::new())
+            replica_queue: Mutex::new(VecDeque::new()),
+            // master_stream: None,
         }
     }
 
@@ -171,7 +174,8 @@ impl Redis {
             config: RedisConfig::new(),
             data: Mutex::new(HashMap::new()),
             replicas: Mutex::new(HashMap::new()),
-            replica_queue: Mutex::new(VecDeque::new())
+            replica_queue: Mutex::new(VecDeque::new()),
+            // master_stream: None,
         }
     }
 
@@ -317,9 +321,9 @@ impl Redis {
 }
 
 #[inline]
-fn connect_to_server(host: &str, port: &str) -> std::io::Result<std::net::TcpStream> {
+fn connect_to_server(host: &str, port: &str) -> std::io::Result<TcpStream> {
     let replicaof_addr = format!("{}:{}", host, port);
-    std::net::TcpStream::connect(replicaof_addr)
+    TcpStream::connect(replicaof_addr)
 }
 
 #[inline]
@@ -328,13 +332,13 @@ fn send_command(stream: &mut std::net::TcpStream, command: &str) -> std::io::Res
 }
 
 #[inline]
-fn read_response(stream: &mut std::net::TcpStream, buffer: &mut [u8; 512]) -> std::io::Result<String> {
+fn read_response(stream: &mut TcpStream, buffer: &mut [u8; 512]) -> std::io::Result<String> {
     let bytes_read = stream.read(buffer)?;
-    Ok(std::str::from_utf8(&buffer[0..bytes_read]).unwrap().to_string())
+    Ok(String::from_utf8_lossy(&buffer[0..bytes_read]).to_string()) // TODO ready the RDB part
 }
 
 #[inline]
-pub fn init_replica(config: &mut RedisConfig) {
+pub fn init_replica(config: &mut RedisConfig, redis: Arc<Mutex<Redis>>) {
     // as part of startup sequence..
     // if there is a replicaof host and port then this instance is a replica.
 
@@ -346,45 +350,61 @@ pub fn init_replica(config: &mut RedisConfig) {
     // (d) sends PSYNC ? -1 - wait for +fullresync
     // the following sequence in separate thread..
     let config = config.clone();
-    thread::spawn(move || {
-        thread::sleep(std::time::Duration::from_secs(1));
-        if let Some(replicaof_host) = &config.replicaof_host {
-            if let Some(replicaof_port) = &config.replicaof_port {
-                match connect_to_server(replicaof_host, replicaof_port) {
-                    Ok(mut stream) => {
-                        let replconf_command = format!("*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n", config.port.len(), config.port);
-                        let commands: Vec<(&str, Box<dyn Fn(&str) -> bool>)> = vec![
-                            ("*1\r\n$4\r\nPING\r\n", Box::new(|response: &str| response == "+PONG\r\n")),
-                            (&replconf_command, Box::new(|response: &str| response == "+OK\r\n")),
-                            ("*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n", Box::new(|response: &str| response == "+OK\r\n")),
-                            ("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n", Box::new(|response: &str| response.to_lowercase().starts_with("+fullresync")))
-                        ];
+    thread::sleep(std::time::Duration::from_millis(500));
+    if let Some(replicaof_host) = &config.replicaof_host {
+        if let Some(replicaof_port) = &config.replicaof_port {
+            match connect_to_server(replicaof_host, replicaof_port) {
+                Ok(mut stream) => {
+                    let replconf_command = format!("*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n", config.port.len(), config.port);
+                    let commands: Vec<(&str, Box<dyn Fn(&str, &mut TcpStream) -> bool>)> = vec![
+                        ("*1\r\n$4\r\nPING\r\n", Box::new(|response: &str, _| response == "+PONG\r\n")),
+                        (&replconf_command, Box::new(|response: &str, _| response == "+OK\r\n")),
+                        ("*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n", Box::new(|response: &str, _| response == "+OK\r\n")),
+                        ("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n", Box::new(
+                            |response: &str, stream|  {
+                                if response.to_lowercase().starts_with("+fullresync") {
+                                    // we will get one more line with the RDB file
+                                    // println!("reading RDB file..");
+                                    // TODO flaky here.. handle fullresync as part of event loop.
+                                    // flaky because the fullresync and RDB reply are not guaranteed to be in one read.
+                                    // in some occasions one read can yield both + other subsequent commands as well i.e. SETs.
+                                    let buf = &mut [0; 2048];
+                                    let read = stream.read(buf).unwrap();
+                                    println!("fullresync RDB: {}", String::from_utf8_lossy(&buf[0..read]));
+                                    return true;
+                                }
+                                return false;
+                            }))
+                    ];
 
-                        let mut buffer = [0; 512];
-                        for (command, validate) in commands {
-                            println!("sending command: {}", command);
-                            if send_command(&mut stream, command).is_err() {
-                                eprintln!("error executing command: {}", command);
-                                std::process::exit(1);
-                            }
-                            println!("reading response..");
-                            let response = read_response(&mut stream, &mut buffer).unwrap();
-                            println!("response: {}", response);
-                            if !validate(&response) {
-                                eprintln!("unexpected response: {}", response);
-                                std::process::exit(1);
-                            }
+                    let mut buffer = [0; 512];
+                    for (command, validate) in commands {
+                        println!("sending command: {}", command);
+                        if send_command(&mut stream, command).is_err() {
+                            eprintln!("error executing command: {}", command);
+                            std::process::exit(1);
                         }
-                        println!("replicaof host and port is valid");
+                        println!("reading response..");
+                        let response = read_response(&mut stream, &mut buffer).unwrap();
+                        println!("response: {}", response);
+                        if !validate(&response, &mut stream) {
+                            eprintln!("unexpected response: {}", response);
+                            std::process::exit(1);
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("error connecting to replicaof host and port: {}", e);
-                        std::process::exit(1);
-                    }
+                    // let mut redis = redis.lock().unwrap();
+                    // redis.master_stream = Some(Arc::new(Mutex::new(stream)));
+                    let mut client_handler = crate::client_handler::ClientHandler::new_master(stream, redis.clone());
+                    client_handler.start();
+                    println!("replicaof host and port is valid");
+                }
+                Err(e) => {
+                    eprintln!("error connecting to replicaof host and port: {}", e);
+                    std::process::exit(1);
                 }
             }
         }
-    });
+    }
 }
 
 #[cfg(test)]
@@ -468,7 +488,7 @@ mod tests {
             params: vec!["6379"]
         };
         // TODO mock TcpStream...
-        let result = db.execute_command(&replconf_command, None);
+        let _ = db.execute_command(&replconf_command, None);
         // TODO proper assert after we can mock TcpStream properly
         // assert_eq!(result, Ok("+OK\r\n".to_string()));
 

@@ -64,7 +64,7 @@ fn main() {
 
     let listener = TcpListener::bind(format!("{}:{}",config.addr,config.port)).unwrap();
 
-    init_replica(&mut config);
+    init_replica(&mut config, redis.clone());
 
     let mut handles = vec![];
 
@@ -80,9 +80,9 @@ fn main() {
                     let mut replica_queue = redis.replica_queue.lock().unwrap();
                     if let Some(replica_command) = replica_queue.pop_front() {
                         let replicas = redis.replicas.lock().unwrap();
-                        println!("replicas size: {}", replicas.values().len());
+                        // println!("replicas size: {}", replicas.values().len());
                         for replica in replicas.values() {
-                            println!("sending replica command: {} \r\n to {}:{}", replica_command, &replica.host, &replica.port);
+                            // println!("sending replica command: {} \r\n to {}:{}", replica_command, &replica.host, &replica.port);
                             let mut stream = replica.stream.lock().unwrap();
                             let result = stream.write(replica_command.as_bytes());
                             if result.is_err() {
