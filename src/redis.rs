@@ -35,6 +35,7 @@ pub enum RedisCommand<'a> {
     Replconf { subcommand: &'a str, params: Vec<&'a str> },
     ReplconfGetack,
     Psync { replica_id: &'a str, offset: i8 },
+    Wait { numreplicas: i64, timeout: i64 },
     Error { message: String },
 }
 
@@ -46,6 +47,7 @@ impl RedisCommand<'_> {
     const INFO : &'static str = "INFO";
     const REPLCONF : &'static str = "REPLCONF";
     const PSYNC : &'static str = "PSYNC";
+    const WAIT: &'static str = "WAIT";
 
     /// Create command from the data received from the client.
     /// It should check if the parameters are complete, otherwise return None.
@@ -119,6 +121,11 @@ impl RedisCommand<'_> {
                     Ok(offset) => Some(RedisCommand::Psync { replica_id, offset }),
                     Err(_) => Some(RedisCommand::Error { message: "ERR Invalid offset".to_string() }),
                 }
+            },
+            command if command.eq_ignore_ascii_case(Self::WAIT) => {
+                let numreplicas = params[0].parse::<i64>().unwrap();
+                let timeout = params[1].parse::<i64>().unwrap();
+                Some(RedisCommand::Wait { numreplicas, timeout })
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
         }
@@ -339,6 +346,18 @@ impl Redis {
                     Ok("".to_string())
                 } else {
                     Err("ERR Unknown PSYNC subcommand".to_string())
+                }
+            },
+            RedisCommand::Wait { numreplicas, timeout } => {
+                let replica_count = self.replicas.lock().unwrap().len();
+                if replica_count >= *numreplicas as usize {
+                    Ok(format!(":{}\r\n", replica_count))
+                } else {
+                    // For simplicity, we're not implementing the actual wait logic here.
+                    // In a real implementation, you'd wait for up to `timeout` milliseconds
+                    // for more replicas to connect.
+                    std::thread::sleep(std::time::Duration::from_millis(*timeout as u64));
+                    Ok(format!(":{}\r\n", replica_count))
                 }
             },
             RedisCommand::Error { message } => {
