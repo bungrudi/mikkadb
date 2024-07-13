@@ -47,6 +47,9 @@ impl ClientHandler {
                 // TODO refactor this to use a buffer pool.
                 let commands = parse_resp(&buffer, bytes_read);
 
+                // increment bytes read..
+                redis.lock().expect("failed to lock redis").incr_bytes_processed(bytes_read as u64);
+
                 // let command = &commands[0];
                 // iterate over commands
                 'LOOP_REDIS_CMD: for command in commands {

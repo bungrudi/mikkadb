@@ -7,6 +7,7 @@ use std::net::TcpStream;
 use base64;
 use base64::Engine;
 use base64::engine::general_purpose;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn gen_replid() -> String {
     // let mut rng = rand::thread_rng();
@@ -161,6 +162,7 @@ pub struct Redis {
     data: Mutex<HashMap<String, ValueWrapper>>,
     pub(crate) replicas: Mutex<HashMap<String, Replica>>,
     pub(crate) replica_queue: Mutex<VecDeque<String>>,
+    bytes_processed: AtomicU64,
     // pub(crate) master_stream: Option<Arc<Mutex<TcpStream>>>,
 }
 impl Redis {
@@ -170,6 +172,7 @@ impl Redis {
             data: Mutex::new(HashMap::new()),
             replicas: Mutex::new(HashMap::new()),
             replica_queue: Mutex::new(VecDeque::new()),
+            bytes_processed: AtomicU64::new(0),
             // master_stream: None,
         }
     }
@@ -181,6 +184,7 @@ impl Redis {
             data: Mutex::new(HashMap::new()),
             replicas: Mutex::new(HashMap::new()),
             replica_queue: Mutex::new(VecDeque::new()),
+            bytes_processed: AtomicU64::new(0),
             // master_stream: None,
         }
     }
@@ -300,7 +304,14 @@ impl Redis {
             RedisCommand::ReplconfGetack => {
                 match client {
                     Some(client) => {
-                        let _ = client.write("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n".as_bytes());
+                        let mut bytes_processed = self.get_bytes_processed() - 37;
+                        // hacky, temporary way. we need to omit the "REPLCONF GETACK" and we assume it is 37 bytes.
+                        if bytes_processed < 0 {
+                            bytes_processed = 0;
+                        }
+                        let num_digits = bytes_processed.to_string().len();
+                        let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", num_digits, bytes_processed);
+                        let _ = client.write(response.as_bytes());
                         let _ = client.flush();
                     },
                     None => {
@@ -335,6 +346,14 @@ impl Redis {
             },
             _ => Err("ERR Unknown command".to_string()),
         }
+    }
+
+    pub fn get_bytes_processed(&self) -> u64 {
+        self.bytes_processed.load(Ordering::Relaxed)
+    }
+
+    pub fn incr_bytes_processed(&self, bytes: u64) {
+        self.bytes_processed.fetch_add(bytes, Ordering::Relaxed);
     }
 }
 
