@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 use crate::redis::{Redis, RedisCommand};
 use crate::resp::parse_resp;
 
@@ -50,7 +51,6 @@ impl ClientHandler {
                 // increment bytes read..
                 redis.lock().expect("failed to lock redis").incr_bytes_processed(bytes_read as u64);
 
-                // let command = &commands[0];
                 // iterate over commands
                 'LOOP_REDIS_CMD: for command in commands {
                     if matches!(command, RedisCommand::None) {
@@ -59,24 +59,68 @@ impl ClientHandler {
                     println!("command: {:?}", command);
                     // TODO use the same buffer to write the response.
                     // actually is there benefit in re-using the buffer?
-                    match redis.lock().expect("failed to lock redis").execute_command(&command, Some(&mut client)) {
-                        // TODO check if write! is actually the best performance wise.
-                        Ok(response) => {
-                            println!("response: {}", response);
-                            if !response.is_empty() && !master {
-                                let _ = client.write(response.as_bytes());
-                            }
-                            if master {
-                                println!("master, not writing to client");
-                            }
-                        }, //write!(client, "{}", response).unwrap(),
-                        Err(error) => {
-                            eprintln!("error: {}", error);
-                            if !master {
-                                let _ = client.write(error.as_bytes());
+                    let mut retry_wait = true;
+                    let mut wait_params = None;
+                    let mut start_time = Instant::now();
+                    let mut command = command;
+
+                    while retry_wait {
+                        match redis.lock().expect("failed to lock redis").execute_command(&command, Some(&mut client)) {
+                            Ok(response) => {
+                                println!("response: {}", response);
+                                if !response.is_empty() && !master {
+                                    let _ = client.write(response.as_bytes());
+                                }
+                                if master {
+                                    println!("master, not writing to client");
+                                }
+                                retry_wait = false;
+                            },
+                            Err(error) if error.starts_with("WAIT_RETRY") => {
+                                println!("encountered WAIT_RETRY: {}", error);
+                                let parts: Vec<&str> = error.split_whitespace().collect();
+                                
+                                let last_command_id = parts[1].parse::<u64>().unwrap();
+                                let numreplicas = parts[2].parse::<i64>().unwrap();
+                                let timeout = parts[3].parse::<i64>().unwrap();
+                                wait_params = Some((last_command_id, numreplicas, timeout));
+
+                                println!("WAIT_RETRY: last_command_id: {}, numreplicas: {}, timeout: {}", last_command_id, numreplicas, timeout);
+                                
+                                // Release the lock and sleep for a short duration
+                                // drop(redis.lock().unwrap());
+                            },
+                            Err(error) => {
+                                eprintln!("error: {}", error);
+                                if !master {
+                                    let _ = client.write(error.as_bytes());
+                                }
+                                retry_wait = false;
                             }
                         }
-                    };
+
+                        // If we're retrying a WAIT command, update the command with reduced timeout
+                        if retry_wait {
+                            println!("retrying WAIT command");
+                            if let Some((last_command_id, numreplicas, original_timeout)) = wait_params {
+
+                                thread::sleep(Duration::from_millis(10));
+                                let elapsed = start_time.elapsed().as_millis() as i64;
+                                // let new_timeout = std::cmp::max(0, original_timeout - elapsed);
+                                command = RedisCommand::Wait { numreplicas, timeout: original_timeout, elapsed: elapsed };
+                                
+                                println!("retrying WAIT command with timeout: {} elapsed: {}", original_timeout, elapsed);
+                                // If the new timeout is 0, we should stop retrying
+                                // if new_timeout == 0 {
+                                //     retry_wait = false;
+                                //     let response = format!(":0\r\n");
+                                //     if !master {
+                                //         let _ = client.write(response.as_bytes());
+                                //     }
+                                // }
+                            }
+                        }
+                    }
                     println!("after write");
                 }
 

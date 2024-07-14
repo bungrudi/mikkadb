@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::thread;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -35,7 +35,7 @@ pub enum RedisCommand<'a> {
     Replconf { subcommand: &'a str, params: Vec<&'a str> },
     ReplconfGetack,
     Psync { replica_id: &'a str, offset: i8 },
-    Wait { numreplicas: i64, timeout: i64 },
+    Wait { numreplicas: i64, timeout: i64, elapsed: i64 },
     Error { message: String },
 }
 
@@ -125,7 +125,7 @@ impl RedisCommand<'_> {
             command if command.eq_ignore_ascii_case(Self::WAIT) => {
                 let numreplicas = params[0].parse::<i64>().unwrap();
                 let timeout = params[1].parse::<i64>().unwrap();
-                Some(RedisCommand::Wait { numreplicas, timeout })
+                Some(RedisCommand::Wait { numreplicas, timeout, elapsed: 0 })
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
         }
@@ -170,9 +170,14 @@ pub struct Redis {
     pub(crate) replicas: Mutex<HashMap<String, Replica>>,
     pub(crate) replica_queue: Mutex<VecDeque<String>>,
     bytes_processed: AtomicU64,
+    command_acks: Mutex<VecDeque<(u64, usize)>>,
+    last_command_id: AtomicU64, 
     // pub(crate) master_stream: Option<Arc<Mutex<TcpStream>>>,
 }
 impl Redis {
+
+    const ACKS_CAPACITY: usize = 1000;
+
     pub fn new(config:RedisConfig) -> Self {
         Redis {
             config,
@@ -180,6 +185,8 @@ impl Redis {
             replicas: Mutex::new(HashMap::new()),
             replica_queue: Mutex::new(VecDeque::new()),
             bytes_processed: AtomicU64::new(0),
+            command_acks: Mutex::new(VecDeque::with_capacity(Self::ACKS_CAPACITY)),
+            last_command_id: AtomicU64::new(0),
             // master_stream: None,
         }
     }
@@ -192,6 +199,8 @@ impl Redis {
             replicas: Mutex::new(HashMap::new()),
             replica_queue: Mutex::new(VecDeque::new()),
             bytes_processed: AtomicU64::new(0),
+            command_acks: Mutex::new(VecDeque::with_capacity(Self::ACKS_CAPACITY)),
+            last_command_id: AtomicU64::new(0),
             // master_stream: None,
         }
     }
@@ -281,8 +290,8 @@ impl Redis {
             RedisCommand::Replconf {
                 subcommand,params
             } => {
-                match subcommand {
-                    &"listening-port" => {
+                match subcommand.to_lowercase().as_str() {
+                    "listening-port" => {
                         if let Some(port) = params.get(0) {
                             if let Some(client) = client {
                                 let replica_host = client.peer_addr().unwrap().ip().to_string();
@@ -300,10 +309,15 @@ impl Redis {
                         }
                         Err("-cannot establish replica connection\r\n".to_string())
                     },
-                    &"capa" => {
+                    "capa" => {
                         // TODO: Implement the actual logic for these subcommands
 
                         Ok("+OK\r\n".to_string())
+                    },
+                    "ack" => {
+                        println!("incrementing ack count");
+                        self.increment_ack_count();
+                        Ok("".to_string())
                     }
                     _ => Err(format!("ERR Unknown REPLCONF subcommand: {}\r\n", subcommand)),
                 }
@@ -348,16 +362,25 @@ impl Redis {
                     Err("ERR Unknown PSYNC subcommand".to_string())
                 }
             },
-            RedisCommand::Wait { numreplicas, timeout } => {
-                let replica_count = self.replicas.lock().unwrap().len();
-                if replica_count >= *numreplicas as usize {
-                    Ok(format!(":{}\r\n", replica_count))
+            RedisCommand::Wait { numreplicas, timeout , elapsed} => {
+                println!("executing WAIT command");
+                let last_command_id = self.last_command_id.load(Ordering::SeqCst);
+
+                // let ack_count = self.get_ack_count(last_command_id);
+                let ack_count = self.get_ack_count_latest();
+                let numreplica_internal = self.replicas.lock().unwrap().len();
+                println!("ack_count: {} target ack: {}", ack_count, numreplicas);
+                
+                if ack_count >= *numreplicas as usize {
+                    println!("returning ack_count: {} target ack: {}", ack_count, numreplicas);
+                    // Ok(format!(":{}\r\n", ack_count))
+                    Ok(format!(":{}\r\n", ack_count))
+                } else if *elapsed >= *timeout {
+                    println!("timeout elapsed, returning ack_count: {} target ack: {}", ack_count, numreplicas);
+                    Ok(format!(":{}\r\n", ack_count))
                 } else {
-                    // For simplicity, we're not implementing the actual wait logic here.
-                    // In a real implementation, you'd wait for up to `timeout` milliseconds
-                    // for more replicas to connect.
-                    std::thread::sleep(std::time::Duration::from_millis(*timeout as u64));
-                    Ok(format!(":{}\r\n", replica_count))
+                    // Return a special error to indicate that we need to retry
+                    Err(format!("WAIT_RETRY {} {} {}", last_command_id, numreplicas, timeout))
                 }
             },
             RedisCommand::Error { message } => {
@@ -373,6 +396,49 @@ impl Redis {
 
     pub fn incr_bytes_processed(&self, bytes: u64) {
         self.bytes_processed.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn get_next_command_id(&self) -> u64 {
+        self.last_command_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn increment_ack_count(&self) {
+        // using vecdeque to keep track of the last 1000 command acks
+        // this has its own issues, but for now it is fine.
+        // i.e. if the rate of request is so high we might miss some acks.
+
+        let mut acks = self.command_acks.lock().unwrap();
+
+        // check if there is an entry, if not create one
+        if let Some(last_ack) = acks.back_mut() {
+            last_ack.1 += 1;
+        } else {
+            if acks.len() >= Self::ACKS_CAPACITY {
+                acks.pop_front();
+            }
+            acks.push_back((self.get_next_command_id(), 1));
+        }
+    }
+
+    pub fn start_new_ack_bucket(&self) {
+        let mut acks = self.command_acks.lock().unwrap();
+        if acks.len() >= Self::ACKS_CAPACITY {
+            acks.pop_front();
+        }
+        acks.push_back((self.get_next_command_id(), 0));
+    }
+
+    pub fn get_ack_count(&self, command_id: u64) -> usize {
+        let acks = self.command_acks.lock().unwrap();
+        acks.iter()
+            .find(|(id, _)| *id == command_id)
+            .map(|(_, count)| *count)
+            .unwrap_or(0 as usize)
+    }
+
+    pub fn get_ack_count_latest(&self) -> usize {
+        let acks = self.command_acks.lock().unwrap();
+        acks.back().map(|(_, count)| *count).unwrap_or(0 as usize)
     }
 }
 
