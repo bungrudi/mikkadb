@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::thread;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -163,20 +163,20 @@ pub struct Replica {
     #[allow(dead_code)]
     pub(crate) port: String,
     pub(crate) stream: Arc<Mutex<TcpStream>>,
+    offset: AtomicU64,
+    
 }
 pub struct Redis {
     config: RedisConfig,
     data: Mutex<HashMap<String, ValueWrapper>>,
     pub(crate) replicas: Mutex<HashMap<String, Replica>>,
     pub(crate) replica_queue: Mutex<VecDeque<String>>,
-    bytes_processed: AtomicU64,
-    command_acks: Mutex<VecDeque<(u64, usize)>>,
-    last_command_id: AtomicU64, 
+    bytes_processed: AtomicU64, // total bytes processed for a replica
+    replication_offset: AtomicU64, // total bytes propagated to replicas (if master)
+    pub(crate) enqueue_getack: bool,
     // pub(crate) master_stream: Option<Arc<Mutex<TcpStream>>>,
 }
 impl Redis {
-
-    const ACKS_CAPACITY: usize = 1000;
 
     pub fn new(config:RedisConfig) -> Self {
         Redis {
@@ -185,9 +185,8 @@ impl Redis {
             replicas: Mutex::new(HashMap::new()),
             replica_queue: Mutex::new(VecDeque::new()),
             bytes_processed: AtomicU64::new(0),
-            command_acks: Mutex::new(VecDeque::with_capacity(Self::ACKS_CAPACITY)),
-            last_command_id: AtomicU64::new(0),
-            // master_stream: None,
+            replication_offset: AtomicU64::new(0),
+            enqueue_getack: false,
         }
     }
 
@@ -199,9 +198,8 @@ impl Redis {
             replicas: Mutex::new(HashMap::new()),
             replica_queue: Mutex::new(VecDeque::new()),
             bytes_processed: AtomicU64::new(0),
-            command_acks: Mutex::new(VecDeque::with_capacity(Self::ACKS_CAPACITY)),
-            last_command_id: AtomicU64::new(0),
-            // master_stream: None,
+            replication_offset: AtomicU64::new(0),
+            enqueue_getack: false,
         }
     }
 
@@ -266,7 +264,7 @@ impl Redis {
             },
             RedisCommand::Set { key, value, ttl, original_resp } => {
                 self.set(key, value, *ttl);
-                self.replica_queue.lock().unwrap().push_back(original_resp.clone());
+                self.enqueue_for_replication(original_resp);
                 Ok("+OK\r\n".to_string())
             },
             RedisCommand::Info { subcommand} => {
@@ -294,15 +292,18 @@ impl Redis {
                     "listening-port" => {
                         if let Some(port) = params.get(0) {
                             if let Some(client) = client {
-                                let replica_host = client.peer_addr().unwrap().ip().to_string();
+                                let peer = client.peer_addr().unwrap();
+                                let replica_host = peer.ip().to_string();
+                                let real_port = peer.port();
                                 println!("replica_host: {} replica_port: {}", replica_host, port);
 
                                 let replica = Replica {
                                     host: replica_host.clone(),
                                     port: port.to_string(),
                                     stream: Arc::new(Mutex::new(client.try_clone().unwrap())),
+                                    offset: AtomicU64::new(0),
                                 };
-                                let replica_key = format!("{}:{}", replica_host, port);
+                                let replica_key = format!("{}:{}", replica_host, real_port);
                                 self.replicas.lock().unwrap().insert(replica_key, replica);
                                 return Ok("+OK\r\n".to_string());
                             }
@@ -315,9 +316,17 @@ impl Redis {
                         Ok("+OK\r\n".to_string())
                     },
                     "ack" => {
-                        println!("incrementing ack count");
-                        self.increment_ack_count();
-                        Ok("".to_string())
+                        if let Some(offset_str) = params.get(0) {
+                            if let Ok(offset) = offset_str.parse::<u64>() {
+                                if let Some(client) = client {
+                                    let addr = client.peer_addr().unwrap();
+                                    let replica_key = format!("{}:{}", addr.ip(), addr.port());
+                                    self.update_replica_offset(&replica_key, offset);
+                                    return Ok("+OK\r\n".to_string());
+                                }
+                            }
+                        }
+                        Err("-ERR Invalid ACK format\r\n".to_string())
                     }
                     _ => Err(format!("ERR Unknown REPLCONF subcommand: {}\r\n", subcommand)),
                 }
@@ -325,11 +334,9 @@ impl Redis {
             RedisCommand::ReplconfGetack => {
                 match client {
                     Some(client) => {
-                        let mut bytes_processed = self.get_bytes_processed() - 37;
                         // hacky, temporary way. we need to omit the "REPLCONF GETACK" and we assume it is 37 bytes.
-                        if bytes_processed < 0 {
-                            bytes_processed = 0;
-                        }
+                        let bytes_processed = self.get_bytes_processed() - 37;
+                        
                         let num_digits = bytes_processed.to_string().len();
                         let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", num_digits, bytes_processed);
                         let _ = client.write(response.as_bytes());
@@ -364,30 +371,38 @@ impl Redis {
             },
             RedisCommand::Wait { numreplicas, timeout , elapsed} => {
                 println!("executing WAIT command");
-                let last_command_id = self.last_command_id.load(Ordering::SeqCst);
+                let current_offset = self.replication_offset.load(Ordering::SeqCst);
+                let up_to_date_replicas = self.count_up_to_date_replicas(self.replication_offset.load(Ordering::SeqCst));
 
-                // let ack_count = self.get_ack_count(last_command_id);
-                let ack_count = self.get_ack_count_latest();
-                let numreplica_internal = self.replicas.lock().unwrap().len();
-                println!("ack_count: {} target ack: {}", ack_count, numreplicas);
-                
-                if ack_count >= *numreplicas as usize {
-                    println!("returning ack_count: {} target ack: {}", ack_count, numreplicas);
-                    // Ok(format!(":{}\r\n", ack_count))
-                    Ok(format!(":{}\r\n", ack_count))
-                } else if *elapsed >= *timeout {
-                    println!("timeout elapsed, returning ack_count: {} target ack: {}", ack_count, numreplicas);
-                    Ok(format!(":{}\r\n", ack_count))
+                println!("up_to_date: {} target ack: {} current offset {}", 
+                    up_to_date_replicas, 
+                    numreplicas, 
+                    current_offset);
+
+                if up_to_date_replicas >= *numreplicas as usize {
+                    Ok(format!(":{}\r\n", up_to_date_replicas))
                 } else {
-                    // Return a special error to indicate that we need to retry
-                    Err(format!("WAIT_RETRY {} {} {}", last_command_id, numreplicas, timeout))
-                }
+                    if *elapsed >= *timeout {
+                        println!("timeout elapsed, returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
+                        Ok(format!(":{}\r\n", up_to_date_replicas))
+                    } else {
+                        // Return a special error to indicate that we need to retry 
+                        Err(format!("WAIT_RETRY {} {}", numreplicas, timeout))
+                    }
+                }               
+                
             },
             RedisCommand::Error { message } => {
                 Err(format!("ERR {}", message))
             },
             _ => Err("ERR Unknown command".to_string()),
         }
+    }
+
+    pub fn enqueue_for_replication(&mut self, command: &str) {
+        let mut replica_queue = self.replica_queue.lock().unwrap();
+        replica_queue.push_back(command.to_string());
+        self.increment_replication_offset(command.len() as u64);
     }
 
     pub fn get_bytes_processed(&self) -> u64 {
@@ -398,47 +413,33 @@ impl Redis {
         self.bytes_processed.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    pub fn get_next_command_id(&self) -> u64 {
-        self.last_command_id.fetch_add(1, Ordering::SeqCst)
+    pub fn increment_replication_offset(&self, increment: u64) {
+        self.replication_offset.fetch_add(increment, Ordering::SeqCst);
     }
 
-    pub fn increment_ack_count(&self) {
-        // using vecdeque to keep track of the last 1000 command acks
-        // this has its own issues, but for now it is fine.
-        // i.e. if the rate of request is so high we might miss some acks.
-
-        let mut acks = self.command_acks.lock().unwrap();
-
-        // check if there is an entry, if not create one
-        if let Some(last_ack) = acks.back_mut() {
-            last_ack.1 += 1;
+    pub fn update_replica_offset(&self, replica_key: &str, offset: u64) {
+        let replicas = self.replicas.lock().unwrap();
+        if let Some(replica) = replicas.get(replica_key) {
+            replica.offset.fetch_max(offset, Ordering::SeqCst);
         } else {
-            if acks.len() >= Self::ACKS_CAPACITY {
-                acks.pop_front();
+            eprintln!("replica not found: {}", replica_key);          
+        }
+
+    }
+
+    fn count_up_to_date_replicas(&self, current_offset: u64) -> usize {
+        let replicas = self.replicas.lock().unwrap();
+        let mut count = 0;
+        for replica in replicas.values() {
+            if replica.offset.load(Ordering::SeqCst) >= current_offset {
+                count += 1;
             }
-            acks.push_back((self.get_next_command_id(), 1));
         }
+        count
     }
 
-    pub fn start_new_ack_bucket(&self) {
-        let mut acks = self.command_acks.lock().unwrap();
-        if acks.len() >= Self::ACKS_CAPACITY {
-            acks.pop_front();
-        }
-        acks.push_back((self.get_next_command_id(), 0));
-    }
-
-    pub fn get_ack_count(&self, command_id: u64) -> usize {
-        let acks = self.command_acks.lock().unwrap();
-        acks.iter()
-            .find(|(id, _)| *id == command_id)
-            .map(|(_, count)| *count)
-            .unwrap_or(0 as usize)
-    }
-
-    pub fn get_ack_count_latest(&self) -> usize {
-        let acks = self.command_acks.lock().unwrap();
-        acks.back().map(|(_, count)| *count).unwrap_or(0 as usize)
+    pub fn enque_getack(&mut self) {
+        self.enqueue_getack = true;
     }
 }
 

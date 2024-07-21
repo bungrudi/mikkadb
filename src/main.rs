@@ -74,27 +74,37 @@ fn main() {
         let redis = Arc::clone(&redis);
         let handle = thread::spawn(move || {
             loop {
-                // println!("checking replica queue");
                 {
-                    let redis = redis.lock().unwrap();
-                    let mut replica_queue = redis.replica_queue.lock().unwrap();
-                    if let Some(replica_command) = replica_queue.pop_front() {
-                        redis.start_new_ack_bucket();
-                        let replicas = redis.replicas.lock().unwrap();
-                        println!("replicas size: {}", replicas.values().len());
-                        for replica in replicas.values() {
-                            println!("sending replica command: {} \r\n to {}:{}", replica_command, &replica.host, &replica.port);
+                    let mut redis = redis.lock().unwrap();
+                    { // scope for replica_queue lock
+                        let mut replica_queue = redis.replica_queue.lock().unwrap();
+                        if let Some(replica_command) = replica_queue.pop_front() {
+                            let replicas = redis.replicas.lock().unwrap();
+                            println!("replicas size: {}", replicas.values().len());
+                            for (key, replica) in &*replicas {
+                                println!("sending replica command: {} \r\n to {} {}:{}", replica_command, key, &replica.host, &replica.port);
+                                let mut stream = replica.stream.lock().unwrap();
+                                let result = stream.write(replica_command.as_bytes());
+                                if result.is_err() {
+                                    eprintln!("error writing to replica: {}", result.err().unwrap());
+                                }
+                            }
+                        }
+                    }
+                    // send "REPLCONF GETACK *" after each propagation
+                    if redis.enqueue_getack {
+                        println!("sending GETACK to replicas");
+                        for replica in redis.replicas.lock().unwrap().values() {
                             let mut stream = replica.stream.lock().unwrap();
-                            let result = stream.write(replica_command.as_bytes());
-                            // send "REPLCONF GETACK *" after each propagation
-                            let result = stream.write("*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".as_bytes());
+                            let result = stream.write(b"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n");
                             if result.is_err() {
                                 eprintln!("error writing to replica: {}", result.err().unwrap());
                             }
                         }
+                        redis.enqueue_getack = false;
                     }
                 } // expecting the lock to be dropped here
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(10));
                 // println!("end of replica queue check loop");
             }
         });

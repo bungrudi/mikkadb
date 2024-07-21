@@ -61,8 +61,10 @@ impl ClientHandler {
                     // actually is there benefit in re-using the buffer?
                     let mut retry_wait = true;
                     let mut wait_params = None;
-                    let mut start_time = Instant::now();
+                    let start_time = Instant::now();
                     let mut command = command;
+
+                    let mut retry_count = 0;
 
                     while retry_wait {
                         match redis.lock().expect("failed to lock redis").execute_command(&command, Some(&mut client)) {
@@ -80,12 +82,11 @@ impl ClientHandler {
                                 println!("encountered WAIT_RETRY: {}", error);
                                 let parts: Vec<&str> = error.split_whitespace().collect();
                                 
-                                let last_command_id = parts[1].parse::<u64>().unwrap();
-                                let numreplicas = parts[2].parse::<i64>().unwrap();
-                                let timeout = parts[3].parse::<i64>().unwrap();
-                                wait_params = Some((last_command_id, numreplicas, timeout));
+                                let numreplicas = parts[1].parse::<i64>().unwrap();
+                                let timeout = parts[2].parse::<i64>().unwrap();
+                                wait_params = Some((numreplicas, timeout));
 
-                                println!("WAIT_RETRY: last_command_id: {}, numreplicas: {}, timeout: {}", last_command_id, numreplicas, timeout);
+                                println!("WAIT_RETRY: numreplicas: {}, timeout: {}", numreplicas, timeout);
                                 
                                 // Release the lock and sleep for a short duration
                                 // drop(redis.lock().unwrap());
@@ -102,7 +103,12 @@ impl ClientHandler {
                         // If we're retrying a WAIT command, update the command with reduced timeout
                         if retry_wait {
                             println!("retrying WAIT command");
-                            if let Some((last_command_id, numreplicas, original_timeout)) = wait_params {
+                            if retry_count == 0 {
+                                println!("enqueuing GETACK");
+                                redis.lock().unwrap().enque_getack();
+                            }
+                            retry_count += 1;
+                            if let Some((numreplicas, original_timeout)) = wait_params {
 
                                 thread::sleep(Duration::from_millis(10));
                                 let elapsed = start_time.elapsed().as_millis() as i64;
@@ -110,14 +116,6 @@ impl ClientHandler {
                                 command = RedisCommand::Wait { numreplicas, timeout: original_timeout, elapsed: elapsed };
                                 
                                 println!("retrying WAIT command with timeout: {} elapsed: {}", original_timeout, elapsed);
-                                // If the new timeout is 0, we should stop retrying
-                                // if new_timeout == 0 {
-                                //     retry_wait = false;
-                                //     let response = format!(":0\r\n");
-                                //     if !master {
-                                //         let _ = client.write(response.as_bytes());
-                                //     }
-                                // }
                             }
                         }
                     }
