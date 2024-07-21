@@ -87,9 +87,6 @@ impl ClientHandler {
                                 wait_params = Some((numreplicas, timeout));
 
                                 println!("WAIT_RETRY: numreplicas: {}, timeout: {}", numreplicas, timeout);
-                                
-                                // Release the lock and sleep for a short duration
-                                // drop(redis.lock().unwrap());
                             },
                             Err(error) => {
                                 eprintln!("error: {}", error);

@@ -322,7 +322,7 @@ impl Redis {
                                     let addr = client.peer_addr().unwrap();
                                     let replica_key = format!("{}:{}", addr.ip(), addr.port());
                                     self.update_replica_offset(&replica_key, offset);
-                                    return Ok("+OK\r\n".to_string());
+                                    return Ok("".to_string());
                                 }
                             }
                         }
