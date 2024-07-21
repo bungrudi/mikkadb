@@ -390,6 +390,7 @@ impl Redis {
                         Err(format!("WAIT_RETRY {} {}", numreplicas, timeout))
                     }
                 }               
+                
             },
             RedisCommand::Error { message } => {
                 Err(format!("ERR {}", message))

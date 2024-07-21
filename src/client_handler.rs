@@ -71,13 +71,7 @@ impl ClientHandler {
                             Ok(response) => {
                                 println!("response: {}", response);
                                 if !response.is_empty() && !master {
-                                    // Ensure the response is in the correct RESP format
-                                    let resp_response = if response.starts_with(":") {
-                                        response // Already in RESP format
-                                    } else {
-                                        format!("${}\r\n{}\r\n", response.len(), response)
-                                    };
-                                    let _ = client.write(resp_response.as_bytes());
+                                    let _ = client.write(response.as_bytes());
                                 }
                                 if master {
                                     println!("master, not writing to client");
