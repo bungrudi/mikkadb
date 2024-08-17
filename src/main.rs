@@ -23,40 +23,58 @@ fn main() {
     // let mut replicaof_port: Option<String> = None;
 
     for i in 0..args.len() {
-        if args[i] == "--port" {
-            if i + 1 < args.len() {
-                config.port = args[i + 1].to_string();
-            } else {
-                eprintln!("--port argument provided but no port number was given");
-                std::process::exit(1);
+        match args[i].as_str() {
+            "--port" => {
+                if i + 1 < args.len() {
+                    config.port = args[i + 1].to_string();
+                } else {
+                    eprintln!("--port argument provided but no port number was given");
+                    std::process::exit(1);
+                }
             }
-        }
-        if args[i] == "--addr" {
-            if i + 1 < args.len() {
-                config.addr = args[i + 1].to_string();
-            } else {
-                eprintln!("--addr argument provided but no address was given");
-                std::process::exit(1);
+            "--addr" => {
+                if i + 1 < args.len() {
+                    config.addr = args[i + 1].to_string();
+                } else {
+                    eprintln!("--addr argument provided but no address was given");
+                    std::process::exit(1);
+                }
             }
-        }
-        if args[i] == "--replicaof" {
-            if i + 2 < args.len() {
-                config.replicaof_host = Some(args[i + 1].to_string());
-                config.replicaof_port = Some(args[i + 2].to_string());
-            } else if i + 1 < args.len() {
-                // handle --replicaof "localhost 6379" (host and port as one parameter)
-                let replicaof: Vec<&str> = args[i + 1].split(" ").collect();
-                if replicaof.len() == 2 {
-                    config.replicaof_host = Some(replicaof[0].to_string());
-                    config.replicaof_port = Some(replicaof[1].to_string());
+            "--replicaof" => {
+                if i + 2 < args.len() {
+                    config.replicaof_host = Some(args[i + 1].to_string());
+                    config.replicaof_port = Some(args[i + 2].to_string());
+                } else if i + 1 < args.len() {
+                    let replicaof: Vec<&str> = args[i + 1].split(" ").collect();
+                    if replicaof.len() == 2 {
+                        config.replicaof_host = Some(replicaof[0].to_string());
+                        config.replicaof_port = Some(replicaof[1].to_string());
+                    } else {
+                        eprintln!("--replicaof argument provided but no host or port was given");
+                        std::process::exit(1);
+                    }
                 } else {
                     eprintln!("--replicaof argument provided but no host or port was given");
                     std::process::exit(1);
                 }
-            } else {
-                eprintln!("--replicaof argument provided but no host or port was given");
-                std::process::exit(1);
             }
+            "--dir" => {
+                if i + 1 < args.len() {
+                    config.dir = args[i + 1].to_string();
+                } else {
+                    eprintln!("--dir argument provided but no directory was given");
+                    std::process::exit(1);
+                }
+            }
+            "--dbfilename" => {
+                if i + 1 < args.len() {
+                    config.dbfilename = args[i + 1].to_string();
+                } else {
+                    eprintln!("--dbfilename argument provided but no filename was given");
+                    std::process::exit(1);
+                }
+            }
+            _ => {}
         }
     }
 

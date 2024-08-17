@@ -36,6 +36,7 @@ pub enum RedisCommand<'a> {
     ReplconfGetack,
     Psync { replica_id: &'a str, offset: i8 },
     Wait { numreplicas: i64, timeout: i64, elapsed: i64 },
+    Config { subcommand: &'a str, parameter: &'a str },
     Error { message: String },
 }
 
@@ -48,6 +49,7 @@ impl RedisCommand<'_> {
     const REPLCONF : &'static str = "REPLCONF";
     const PSYNC : &'static str = "PSYNC";
     const WAIT: &'static str = "WAIT";
+    const CONFIG: &'static str = "CONFIG";
 
     /// Create command from the data received from the client.
     /// It should check if the parameters are complete, otherwise return None.
@@ -127,6 +129,15 @@ impl RedisCommand<'_> {
                 let timeout = params[1].parse::<i64>().unwrap();
                 Some(RedisCommand::Wait { numreplicas, timeout, elapsed: 0 })
             },
+            command if command.eq_ignore_ascii_case(Self::CONFIG) => {
+                let subcommand = params[0];
+                let parameter = params[1];
+                if subcommand == "" || parameter == "" {
+                    None
+                } else {
+                    Some(RedisCommand::Config { subcommand, parameter })
+                }
+            },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
         }
     }
@@ -144,6 +155,8 @@ pub struct RedisConfig {
     pub port: String,
     pub replicaof_host: Option<String>,
     pub replicaof_port: Option<String>,
+    pub dir: String,
+    pub dbfilename: String,
 }
 
 impl RedisConfig {
@@ -153,6 +166,8 @@ impl RedisConfig {
             port: "6379".to_string(),
             replicaof_host: None,
             replicaof_port: None,
+            dir: ".".to_string(),
+            dbfilename: "dump.rdb".to_string(),
         }
     }
 }
@@ -391,6 +406,26 @@ impl Redis {
                     }
                 }               
                 
+            },
+            RedisCommand::Config { subcommand, parameter} => {
+                match *subcommand {
+                    "GET" => {
+                        match *parameter {
+                            "dir" => {
+                                // Return the current directory
+                                let dir = self.config.dir.clone();
+                                Ok(format!("*2\r\n$3\r\ndir\r\n${}\r\n{}\r\n", dir.len(), dir))
+                            },
+                            "dbfilename" => {
+                                // Return the current DB filename
+                                let dbfilename = self.config.dbfilename.clone();
+                                Ok(format!("*2\r\n$9\r\ndbfilename\r\n${}\r\n{}\r\n", dbfilename.len(), dbfilename))
+                            },
+                            _ => Err(format!("-ERR unknown config parameter '{}'\r\n", parameter)),
+                        }
+                    },
+                    _ => Err(format!("-ERR unknown subcommand '{}'\r\n", subcommand)),
+                }
             },
             RedisCommand::Error { message } => {
                 Err(format!("ERR {}", message))
