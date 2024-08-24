@@ -1,8 +1,10 @@
+use std::path::Path;
+use std::fs::File;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::thread;
-use std::io::{Read, Write};
+use std::io::{Read, Write, BufReader};
 use std::net::TcpStream;
 use base64;
 use base64::Engine;
@@ -38,6 +40,7 @@ pub enum RedisCommand<'a> {
     Wait { numreplicas: i64, timeout: i64, elapsed: i64 },
     Config { subcommand: &'a str, parameter: &'a str },
     Error { message: String },
+    Keys { pattern: String },
 }
 
 impl RedisCommand<'_> {
@@ -50,6 +53,7 @@ impl RedisCommand<'_> {
     const PSYNC : &'static str = "PSYNC";
     const WAIT: &'static str = "WAIT";
     const CONFIG: &'static str = "CONFIG";
+    const KEYS: &'static str = "KEYS";
 
     /// Create command from the data received from the client.
     /// It should check if the parameters are complete, otherwise return None.
@@ -136,6 +140,13 @@ impl RedisCommand<'_> {
                     None
                 } else {
                     Some(RedisCommand::Config { subcommand, parameter })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::KEYS) => {
+                if params[0].is_empty() {
+                    None
+                } else {
+                    Some(RedisCommand::Keys { pattern: params[0].to_string() })
                 }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
@@ -430,6 +441,14 @@ impl Redis {
             RedisCommand::Error { message } => {
                 Err(format!("ERR {}", message))
             },
+            RedisCommand::Keys { pattern } => {
+                let keys = self.keys(pattern);
+                let mut response = format!("*{}\r\n", keys.len());
+                for key in keys {
+                    response.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
+                }
+                Ok(response)
+            },
             _ => Err("ERR Unknown command".to_string()),
         }
     }
@@ -475,6 +494,178 @@ impl Redis {
 
     pub fn enque_getack(&mut self) {
         self.enqueue_getack = true;
+    }
+
+    pub fn parse_rdb_file(&mut self, dir: &str, dbfilename: &str) -> std::io::Result<()> {
+        let path = Path::new(dir).join(dbfilename);
+        println!("Attempting to open RDB file: {:?}", path);
+        if !path.exists() {
+            println!("RDB file does not exist");
+            return Ok(());
+        }
+
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer)?;
+
+        println!("RDB file size: {} bytes", buffer.len());
+
+        if buffer.len() < 9 || &buffer[0..5] != b"REDIS" {
+            println!("Invalid RDB file format");
+            return Ok(());
+        }
+
+        let mut pos = 9; // Skip the header
+
+        while pos < buffer.len() {
+            println!("Parsing at position: {}", pos);
+            match buffer[pos] {
+                0xFA => {
+                    // Auxiliary field, skip it
+                    println!("Skipping auxiliary field");
+                    pos += 1;
+                    let (_, new_pos) = self.parse_string(&buffer, pos)?;
+                    pos = new_pos;
+                    let (_, new_pos) = self.parse_string(&buffer, pos)?;
+                    pos = new_pos;
+                }
+                0xFE => {
+                    println!("Database selector found");
+                    // Database selector
+                    pos += 1;
+                    // Skip database number and hash table sizes
+                    while buffer[pos] != 0xFB && pos < buffer.len() {
+                        pos += 1;
+                    }
+                    pos += 3;
+                }
+                0xFF => {
+                    println!("End of file marker found");
+                    // End of file
+                    break;
+                }
+                _ => {
+                    println!("Parsing key-value pair");
+                    // Key-value pair
+                    match self.parse_key_value(&buffer, pos) {
+                        Ok((key, value, new_pos)) => {
+                            println!("Parsed key: {}", key);
+                            self.set(&key, &value, None);
+                            pos = new_pos;
+                        }
+                        Err(e) => {
+                            println!("Error parsing key-value pair: {:?}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("RDB file parsing completed");
+        Ok(())
+    }
+
+    fn parse_key_value(&self, buffer: &[u8], mut pos: usize) -> std::io::Result<(String, String, usize)> {
+        // Skip expire info if present
+        if buffer[pos] == 0xFD || buffer[pos] == 0xFC {
+            pos += if buffer[pos] == 0xFD { 5 } else { 9 };
+        }
+
+        // Skip value type
+        pos += 1;
+
+        // Parse key
+        let (key, new_pos) = self.parse_string(buffer, pos)?;
+        pos = new_pos;
+
+        // Parse value
+        let (value, new_pos) = self.parse_string(buffer, pos)?;
+        pos = new_pos;
+
+        Ok((key, value, pos))
+    }
+
+    fn parse_string(&self, buffer: &[u8], mut pos: usize) -> std::io::Result<(String, usize)> {
+        let len = match buffer[pos] >> 6 {
+            0 => {
+                let len = (buffer[pos] & 0x3F) as usize;
+                pos += 1;
+                len
+            }
+            1 => {
+                let len = (((buffer[pos] & 0x3F) as usize) << 8) | buffer[pos + 1] as usize;
+                pos += 2;
+                len
+            }
+            2 => {
+                let len = ((buffer[pos + 1] as usize) << 24)
+                    | ((buffer[pos + 2] as usize) << 16)
+                    | ((buffer[pos + 3] as usize) << 8)
+                    | (buffer[pos + 4] as usize);
+                pos += 5;
+                len
+            }
+            3 => {
+                // Special encoding
+                match buffer[pos] & 0x3F {
+                    0 => {
+                        // 8 bit integer
+                        let value = buffer[pos + 1] as i8;
+                        pos += 2;
+                        return Ok((value.to_string(), pos));
+                    }
+                    1 => {
+                        // 16 bit integer
+                        let value = i16::from_le_bytes([buffer[pos + 1], buffer[pos + 2]]);
+                        pos += 3;
+                        return Ok((value.to_string(), pos));
+                    }
+                    2 => {
+                        // 32 bit integer
+                        let value = i32::from_le_bytes([buffer[pos + 1], buffer[pos + 2], buffer[pos + 3], buffer[pos + 4]]);
+                        pos += 5;
+                        return Ok((value.to_string(), pos));
+                    }
+                    _ => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Unsupported string encoding",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid string encoding",
+                ));
+            }
+        };
+
+        if pos + len > buffer.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "String length exceeds buffer size",
+            ));
+        }
+
+        let s = String::from_utf8_lossy(&buffer[pos..pos + len]).to_string();
+        pos += len;
+
+        Ok((s, pos))
+    }
+
+    pub fn keys(&self, pattern: &str) -> Vec<String> {
+        if pattern == "*" {
+            self.data.lock().unwrap().keys()
+                .filter(|k| !k.starts_with("redis-"))
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        }
     }
 }
 
@@ -730,7 +921,7 @@ mod tests {
     // fn test_read_until_end_of_rdb() {
     //     // Prepare the data to be read
     //     // "$88\r\nREDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfa\x05ctime\xc2m\b\xbce\xfa\bused-mem°\xc4\x10\x00\xfa\baof-base\xc0\x00\xff\xf0n;\xfe\xc0\xffZ\xa2"
-    //     let data = "+FULLRESYNC 75cd7bc10c49047e0d163660f3b90625b1af31dc 0\r\n$88\r\nREDIS0011�       redis-ver7.2.0�\r\nredis-bits�@�ctime��eused-mem°�aof-base���n;���Z�*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
+    //     let data = "+FULLRESYNC 75cd7bc10c49047e0d163660f3b90625b1af31dc 0\r\n$88\r\nREDIS0011       redis-ver7.2.0\r\nredis-bits@ctimeeused-mem°aof-basen;Z*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
     //     let cursor = Cursor::new(data);
     //
     //     // Create a TcpStream from the cursor

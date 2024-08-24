@@ -80,6 +80,9 @@ fn main() {
 
     let redis = Arc::new(Mutex::new(redis::Redis::new(config.clone())));
 
+    // Parse RDB file
+    redis.lock().unwrap().parse_rdb_file(&config.dir, &config.dbfilename).unwrap();
+
     let listener = TcpListener::bind(format!("{}:{}",config.addr,config.port)).unwrap();
 
     init_replica(&mut config, redis.clone());
