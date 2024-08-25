@@ -243,8 +243,8 @@ impl Redis {
         }
     }
 
-    pub fn parse_rdb_file(&mut self, dir: &str, dbfilename: &str) -> std::io::Result<()> {
-        let path = Path::new(dir).join(dbfilename);
+    pub fn parse_rdb_file(&mut self) -> std::io::Result<()> {
+        let path = Path::new(&self.config.dir).join(&self.config.dbfilename);
         println!("Attempting to open RDB file: {:?}", path);
         if !path.exists() {
             println!("RDB file does not exist");
