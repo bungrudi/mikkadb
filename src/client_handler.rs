@@ -49,6 +49,7 @@ impl ClientHandler {
                 let commands = parse_resp(&buffer, bytes_read);
 
                 // increment bytes read..
+                // TODO: only for write commands
                 redis.lock().expect("failed to lock redis").incr_bytes_processed(bytes_read as u64);
 
                 // iterate over commands
@@ -102,12 +103,12 @@ impl ClientHandler {
                             println!("retrying WAIT command");
                             if retry_count == 0 {
                                 println!("enqueuing GETACK");
-                                redis.lock().unwrap().enque_getack();
+                                redis.lock().unwrap().replication.set_enqueue_getack(true);
                             }
                             retry_count += 1;
                             if let Some((numreplicas, original_timeout)) = wait_params {
 
-                                thread::sleep(Duration::from_millis(10));
+                                thread::sleep(Duration::from_millis(300));
                                 let elapsed = start_time.elapsed().as_millis() as i64;
                                 // let new_timeout = std::cmp::max(0, original_timeout - elapsed);
                                 command = RedisCommand::Wait { numreplicas, timeout: original_timeout, elapsed: elapsed };

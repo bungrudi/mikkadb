@@ -229,50 +229,6 @@ impl Redis {
         }
     }
 
-    pub fn set(&mut self, key: &str, value: &str, ttl: Option<usize>) {
-        let expiration =
-            match ttl {
-                Some(ttl) => {
-                    if ttl == 0 {
-                        None
-                    } else {
-                        Some(SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() + ttl as u128)
-                    }
-                },
-                None => None,
-            };
-        let value_with_ttl = ValueWrapper { value: value.to_string(), expiration: expiration };
-        self.data.lock().unwrap().insert(key.to_string(), value_with_ttl);
-    }
-
-    pub fn get(&self, key: &str) -> Option<String> {
-        let mut binding = self.data.lock().unwrap();
-        let value_wrapper = binding.get(key);
-        match value_wrapper {
-            Some(value_with_ttl) => {
-                match value_with_ttl.expiration {
-                    Some(expiration) => {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis();
-                        if now > expiration {
-                            binding.remove(key);
-                            None
-                        } else {
-                            Some(value_with_ttl.value.clone())
-                        }
-                    },
-                    None => Some(value_with_ttl.value.clone()),
-                }
-            },
-            None => None,
-        }
-    }
-
     // TODO client should be a TcpStream not an option.. find how to mock it in tests.
     pub fn execute_command(&mut self, command: &RedisCommand, client: Option<&mut TcpStream>) -> Result<String, String> {
         match command {
@@ -451,49 +407,6 @@ impl Redis {
             },
             _ => Err("ERR Unknown command".to_string()),
         }
-    }
-
-    pub fn enqueue_for_replication(&mut self, command: &str) {
-        let mut replica_queue = self.replica_queue.lock().unwrap();
-        replica_queue.push_back(command.to_string());
-        self.increment_replication_offset(command.len() as u64);
-    }
-
-    pub fn get_bytes_processed(&self) -> u64 {
-        self.bytes_processed.load(Ordering::Relaxed)
-    }
-
-    pub fn incr_bytes_processed(&self, bytes: u64) {
-        self.bytes_processed.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    pub fn increment_replication_offset(&self, increment: u64) {
-        self.replication_offset.fetch_add(increment, Ordering::SeqCst);
-    }
-
-    pub fn update_replica_offset(&self, replica_key: &str, offset: u64) {
-        let replicas = self.replicas.lock().unwrap();
-        if let Some(replica) = replicas.get(replica_key) {
-            replica.offset.fetch_max(offset, Ordering::SeqCst);
-        } else {
-            eprintln!("replica not found: {}", replica_key);          
-        }
-
-    }
-
-    fn count_up_to_date_replicas(&self, current_offset: u64) -> usize {
-        let replicas = self.replicas.lock().unwrap();
-        let mut count = 0;
-        for replica in replicas.values() {
-            if replica.offset.load(Ordering::SeqCst) >= current_offset {
-                count += 1;
-            }
-        }
-        count
-    }
-
-    pub fn enque_getack(&mut self) {
-        self.enqueue_getack = true;
     }
 
     pub fn parse_rdb_file(&mut self, dir: &str, dbfilename: &str) -> std::io::Result<()> {
