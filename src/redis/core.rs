@@ -101,6 +101,10 @@ impl Redis {
                 self.enqueue_for_replication(original_resp);
                 Ok("+OK\r\n".to_string())
             },
+            RedisCommand::Type { key } => {
+                let type_str = self.storage.get_type(key);
+                Ok(format!("+{}\r\n", type_str))
+            },
             RedisCommand::Info { subcommand} => {
                 match subcommand.as_str() {
                     "replication" => {

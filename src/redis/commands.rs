@@ -13,6 +13,7 @@ pub enum RedisCommand<'a> {
     Config { subcommand: &'a str, parameter: &'a str },
     Error { message: String },
     Keys { pattern: String },
+    Type { key: &'a str },
 }
 
 impl RedisCommand<'_> {
@@ -26,6 +27,7 @@ impl RedisCommand<'_> {
     const WAIT: &'static str = "WAIT";
     const CONFIG: &'static str = "CONFIG";
     const KEYS: &'static str = "KEYS";
+    const TYPE: &'static str = "TYPE";
 
     /// Create command from the data received from the client.
     /// It should check if the parameters are complete, otherwise return None.
@@ -119,6 +121,14 @@ impl RedisCommand<'_> {
                     None
                 } else {
                     Some(RedisCommand::Keys { pattern: params[0].to_string() })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::TYPE) => {
+                let key = params[0];
+                if key == "" {
+                    None
+                } else {
+                    Some(RedisCommand::Type { key })
                 }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),

@@ -70,4 +70,13 @@ impl Storage {
             vec![]
         }
     }
+
+    pub fn get_type(&self, key: &str) -> String {
+        let data = self.data.lock().unwrap();
+        if data.contains_key(key) {
+            "string".to_string()
+        } else {
+            "none".to_string()
+        }
+    }
 }
