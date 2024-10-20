@@ -89,13 +89,13 @@ impl Redis {
 
     pub fn execute_command(&mut self, command: &RedisCommand, client: Option<&mut TcpStream>) -> Result<String, String> {
         match command {
-            RedisCommand::Ping  => {
+            RedisCommand::Ping => {
                 Ok("+PONG\r\n".to_string())
             },
-            RedisCommand::Echo { data} => {
+            RedisCommand::Echo { data } => {
                 Ok(format!("${}\r\n{}\r\n", data.len(), data))
             },
-            RedisCommand::Get { key} => {
+            RedisCommand::Get { key } => {
                 match self.get(key) {
                     Some(value) => Ok(format!("${}\r\n{}\r\n", value.len(), value)),
                     None => Ok("$-1\r\n".to_string()),
@@ -114,32 +114,29 @@ impl Redis {
                 match self.xadd(key, id, fields.clone()) {
                     Ok(entry_id) => {
                         self.enqueue_for_replication(original_resp);
-                        Ok(format!("${}\r\n{}\r\n", entry_id.len(), entry_id))
+                        Ok(format!("+{}\r\n", entry_id))
                     },
-                    Err(e) => Err(format!("-ERR {}\r\n", e)),
+                    Err(e) => Err(format!("-{}\r\n", e)),
                 }
             },
-            RedisCommand::Info { subcommand} => {
+            RedisCommand::Info { subcommand } => {
                 match subcommand.as_str() {
                     "replication" => {
-                        let ret:String =
-                            if self.config.replicaof_host.is_some() {
-                                format!("role:slave\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nmaster_host:{}\r\nmaster_port:{}",
-                                        gen_replid(),
-                                        self.config.replicaof_host.as_ref().unwrap(),
-                                        self.config.replicaof_port.as_ref().unwrap())
-                            } else {
-                                format!("role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nconnected_slaves:0",
-                                        gen_replid())
-                            };
+                        let ret = if self.config.replicaof_host.is_some() {
+                            format!("role:slave\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nmaster_host:{}\r\nmaster_port:{}",
+                                    gen_replid(),
+                                    self.config.replicaof_host.as_ref().unwrap(),
+                                    self.config.replicaof_port.as_ref().unwrap())
+                        } else {
+                            format!("role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nconnected_slaves:0",
+                                    gen_replid())
+                        };
                         Ok(format!("${}\r\n{}\r\n", ret.len(), ret))
                     },
-                    _ => Err("ERR Unknown INFO subcommand".to_string()),
+                    _ => Err(format!("-ERR Unknown INFO subcommand: {}\r\n", subcommand)),
                 }
             },
-            RedisCommand::Replconf {
-                subcommand,params
-            } => {
+            RedisCommand::Replconf { subcommand, params } => {
                 match subcommand.to_lowercase().as_str() {
                     "listening-port" => {
                         if let Some(port) = params.get(0) {
@@ -153,7 +150,7 @@ impl Redis {
                                 return Ok("+OK\r\n".to_string());
                             }
                         }
-                        Err("-cannot establish replica connection\r\n".to_string())
+                        Err("-ERR Cannot establish replica connection\r\n".to_string())
                     },
                     "capa" => {
                         // TODO: Implement the actual logic for these subcommands
@@ -172,7 +169,7 @@ impl Redis {
                         }
                         Err("-ERR Invalid ACK format\r\n".to_string())
                     }
-                    _ => Err(format!("ERR Unknown REPLCONF subcommand: {}\r\n", subcommand)),
+                    _ => Err(format!("-ERR Unknown REPLCONF subcommand: {}\r\n", subcommand)),
                 }
             },
             RedisCommand::ReplconfGetack => {
@@ -180,21 +177,18 @@ impl Redis {
                     Some(client) => {
                         // hacky, temporary way. we need to omit the "REPLCONF GETACK" and we assume it is 37 bytes.
                         let bytes_processed = self.get_bytes_processed() - 37;
-                        
                         let num_digits = bytes_processed.to_string().len();
                         let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", num_digits, bytes_processed);
                         let _ = client.write(response.as_bytes());
                         let _ = client.flush();
                     },
                     None => {
-                        return Err("ERR No stream client to send REPLCONF GETACK\r\n".to_string());
+                        return Err("-ERR No stream client to send REPLCONF GETACK\r\n".to_string());
                     }
                 }
                 Ok("".to_string())
             },
-            RedisCommand::Psync {
-                replica_id, offset
-            } => {
+            RedisCommand::Psync { replica_id, offset } => {
                 if *offset == -1 && *replica_id == "?" {
                     if let Some(client) = client {
                         let _ = client.write(format!("+FULLRESYNC {} {}\r\n", gen_replid(), 0).as_bytes());
@@ -210,10 +204,10 @@ impl Redis {
 
                     Ok("".to_string())
                 } else {
-                    Err("ERR Unknown PSYNC subcommand".to_string())
+                    Err("-ERR Unknown PSYNC subcommand\r\n".to_string())
                 }
             },
-            RedisCommand::Wait { numreplicas, timeout , elapsed} => {
+            RedisCommand::Wait { numreplicas, timeout, elapsed } => {
                 println!("executing WAIT command");
                 let current_offset = self.replication.get_replication_offset();
                 let up_to_date_replicas = self.replication.count_up_to_date_replicas();
@@ -235,7 +229,7 @@ impl Redis {
                     }
                 }               
             },
-            RedisCommand::Config { subcommand, parameter} => {
+            RedisCommand::Config { subcommand, parameter } => {
                 match *subcommand {
                     "GET" => {
                         match *parameter {
@@ -249,14 +243,11 @@ impl Redis {
                                 let dbfilename = self.config.dbfilename.clone();
                                 Ok(format!("*2\r\n$9\r\ndbfilename\r\n${}\r\n{}\r\n", dbfilename.len(), dbfilename))
                             },
-                            _ => Err(format!("-ERR unknown config parameter '{}'\r\n", parameter)),
+                            _ => Err(format!("-ERR Unknown config parameter '{}'\r\n", parameter)),
                         }
                     },
-                    _ => Err(format!("-ERR unknown subcommand '{}'\r\n", subcommand)),
+                    _ => Err(format!("-ERR Unknown CONFIG subcommand '{}'\r\n", subcommand)),
                 }
-            },
-            RedisCommand::Error { message } => {
-                Err(format!("ERR {}", message))
             },
             RedisCommand::Keys { pattern } => {
                 let keys = self.keys(pattern);
@@ -266,7 +257,12 @@ impl Redis {
                 }
                 Ok(response)
             },
-            _ => Err("ERR Unknown command".to_string()),
+            RedisCommand::Error { message } => {
+                Err(format!("-{}\r\n", message))
+            },
+            RedisCommand::None => {
+                Err("-ERR Unknown command\r\n".to_string())
+            },
         }
     }
 }

@@ -33,6 +33,22 @@ impl RedisCommand<'_> {
     const TYPE: &'static str = "TYPE";
     const XADD: &'static str = "XADD";
 
+    fn validate_entry_id(id: &str) -> Result<(), String> {
+        let parts: Vec<&str> = id.split('-').collect();
+        if parts.len() != 2 {
+            return Err("ERR Invalid stream ID format".to_string());
+        }
+
+        let milliseconds = parts[0].parse::<u64>().map_err(|_| "ERR Invalid milliseconds in stream ID".to_string())?;
+        let sequence = parts[1].parse::<u64>().map_err(|_| "ERR Invalid sequence number in stream ID".to_string())?;
+
+        if milliseconds == 0 && sequence == 0 {
+            return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
+        }
+
+        Ok(())
+    }
+
     /// Create command from the data received from the client.
     /// It should check if the parameters are complete, otherwise return None.
     /// For example Set requires 2 parameters, key and value. When this method is called for
@@ -141,16 +157,21 @@ impl RedisCommand<'_> {
                 if key == "" || id == "" {
                     None
                 } else {
-                    let mut fields = HashMap::new();
-                    let mut i = 2;
-                    while i < params.len() - 1 && params[i] != "" && params[i+1] != "" {
-                        fields.insert(params[i].to_string(), params[i+1].to_string());
-                        i += 2;
-                    }
-                    if fields.is_empty() {
-                        None
-                    } else {
-                        Some(RedisCommand::XAdd { key, id, fields, original_resp: original_resp.to_string() })
+                    match Self::validate_entry_id(id) {
+                        Ok(_) => {
+                            let mut fields = HashMap::new();
+                            let mut i = 2;
+                            while i < params.len() - 1 && params[i] != "" && params[i+1] != "" {
+                                fields.insert(params[i].to_string(), params[i+1].to_string());
+                                i += 2;
+                            }
+                            if fields.is_empty() {
+                                None
+                            } else {
+                                Some(RedisCommand::XAdd { key, id, fields, original_resp: original_resp.to_string() })
+                            }
+                        },
+                        Err(e) => Some(RedisCommand::Error { message: e }),
                     }
                 }
             },

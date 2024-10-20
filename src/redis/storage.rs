@@ -75,6 +75,22 @@ impl Storage {
         }
     }
 
+    fn compare_stream_ids(id1: &str, id2: &str) -> std::cmp::Ordering {
+        let parts1: Vec<&str> = id1.split('-').collect();
+        let parts2: Vec<&str> = id2.split('-').collect();
+
+        let ms1 = parts1[0].parse::<u64>().unwrap();
+        let ms2 = parts2[0].parse::<u64>().unwrap();
+
+        if ms1 != ms2 {
+            ms1.cmp(&ms2)
+        } else {
+            let seq1 = parts1[1].parse::<u64>().unwrap();
+            let seq2 = parts2[1].parse::<u64>().unwrap();
+            seq1.cmp(&seq2)
+        }
+    }
+
     pub fn xadd(&self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, String> {
         let mut data = self.data.lock().unwrap();
         let entry = StreamEntry {
@@ -86,12 +102,20 @@ impl Storage {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 match occupied.get_mut() {
                     ValueWrapper::Stream { entries } => {
+                        if let Some(last_entry) = entries.last() {
+                            if Self::compare_stream_ids(&entry.id, &last_entry.id) != std::cmp::Ordering::Greater {
+                                return Err("ERR The ID specified in XADD is equal or smaller than the target stream top item".to_string());
+                            }
+                        }
                         entries.push(entry);
                     },
                     _ => return Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
                 }
             },
             std::collections::hash_map::Entry::Vacant(vacant) => {
+                if Self::compare_stream_ids(id, "0-0") != std::cmp::Ordering::Greater {
+                    return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
+                }
                 vacant.insert(ValueWrapper::Stream { entries: vec![entry] });
             },
         }
