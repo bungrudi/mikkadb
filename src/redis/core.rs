@@ -5,6 +5,7 @@ use base64::engine::general_purpose;
 use base64::Engine;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
 
 use crate::redis::config::RedisConfig;
 use crate::redis::storage::Storage;
@@ -39,6 +40,10 @@ impl Redis {
         let result = self.storage.get(key);
         println!("DEBUG: Getting key '{}'. Result: {:?}", key, result);
         result
+    }
+
+    pub fn xadd(&mut self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, String> {
+        self.storage.xadd(key, id, fields)
     }
 
     pub fn enqueue_for_replication(&mut self, command: &str) {
@@ -104,6 +109,15 @@ impl Redis {
             RedisCommand::Type { key } => {
                 let type_str = self.storage.get_type(key);
                 Ok(format!("+{}\r\n", type_str))
+            },
+            RedisCommand::XAdd { key, id, fields, original_resp } => {
+                match self.xadd(key, id, fields.clone()) {
+                    Ok(entry_id) => {
+                        self.enqueue_for_replication(original_resp);
+                        Ok(format!("${}\r\n{}\r\n", entry_id.len(), entry_id))
+                    },
+                    Err(e) => Err(format!("-ERR {}\r\n", e)),
+                }
             },
             RedisCommand::Info { subcommand} => {
                 match subcommand.as_str() {

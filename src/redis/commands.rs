@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 #[derive(Debug)]
 pub enum RedisCommand<'a> {
     None,
@@ -14,6 +16,7 @@ pub enum RedisCommand<'a> {
     Error { message: String },
     Keys { pattern: String },
     Type { key: &'a str },
+    XAdd { key: &'a str, id: &'a str, fields: HashMap<String, String>, original_resp: String },
 }
 
 impl RedisCommand<'_> {
@@ -28,6 +31,7 @@ impl RedisCommand<'_> {
     const CONFIG: &'static str = "CONFIG";
     const KEYS: &'static str = "KEYS";
     const TYPE: &'static str = "TYPE";
+    const XADD: &'static str = "XADD";
 
     /// Create command from the data received from the client.
     /// It should check if the parameters are complete, otherwise return None.
@@ -129,6 +133,25 @@ impl RedisCommand<'_> {
                     None
                 } else {
                     Some(RedisCommand::Type { key })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::XADD) => {
+                let key = params[0];
+                let id = params[1];
+                if key == "" || id == "" {
+                    None
+                } else {
+                    let mut fields = HashMap::new();
+                    let mut i = 2;
+                    while i < params.len() - 1 && params[i] != "" && params[i+1] != "" {
+                        fields.insert(params[i].to_string(), params[i+1].to_string());
+                        i += 2;
+                    }
+                    if fields.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::XAdd { key, id, fields, original_resp: original_resp.to_string() })
+                    }
                 }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
