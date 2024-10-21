@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::net::TcpStream;
 use std::io::Write;
 use base64::engine::general_purpose;
 use base64::Engine;
@@ -9,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::redis::config::RedisConfig;
 use crate::redis::storage::Storage;
-use crate::redis::replication::ReplicationManager;
+use crate::redis::replication::{ReplicationManager, TcpStreamTrait};
 use crate::redis::commands::RedisCommand;
 use crate::redis::utils::gen_replid;
 use crate::redis::rdb::RdbParser;
@@ -28,6 +27,16 @@ impl Redis {
             storage: Storage::new(),
             bytes_processed: AtomicU64::new(0),
             replication: ReplicationManager::new(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_with_replication(replication: ReplicationManager) -> Self {
+        Redis {
+            config: RedisConfig::default(),
+            storage: Storage::new(),
+            bytes_processed: AtomicU64::new(0),
+            replication,
         }
     }
 
@@ -87,7 +96,7 @@ impl Redis {
         Ok(())
     }
 
-    pub fn execute_command(&mut self, command: &RedisCommand, client: Option<&mut TcpStream>) -> Result<String, String> {
+    pub fn execute_command(&mut self, command: &RedisCommand, client: Option<&mut Box<dyn TcpStreamTrait>>) -> Result<String, String> {
         match command {
             RedisCommand::Ping => {
                 Ok("+PONG\r\n".to_string())

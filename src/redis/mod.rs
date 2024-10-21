@@ -2,8 +2,8 @@ mod commands;
 mod config;
 mod replica;
 mod storage;
-mod replication;
-mod core;
+pub mod replication;
+pub mod core;
 mod utils;
 mod rdb;
 

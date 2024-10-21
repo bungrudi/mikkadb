@@ -5,10 +5,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 use crate::redis::{Redis, RedisCommand};
 use crate::resp::parse_resp;
+use crate::redis::replication::TcpStreamTrait;
 
 // ClientHandler should ideally be an actor.
 pub struct ClientHandler {
-    client: Arc<Mutex<TcpStream>>,
+    client: Arc<Mutex<Box<dyn TcpStreamTrait>>>,
     redis: Arc<Mutex<Redis>>,
     master: bool // is this client a master?
 }
@@ -17,7 +18,7 @@ impl ClientHandler {
 
     pub fn new (client: TcpStream, redis: Arc<Mutex<Redis>>) -> Self {
         ClientHandler {
-            client: Arc::new(Mutex::new(client)),
+            client: Arc::new(Mutex::new(Box::new(client) as Box<dyn TcpStreamTrait>)),
             redis,
             master: false
         }
@@ -25,7 +26,7 @@ impl ClientHandler {
 
     pub fn new_master (client: TcpStream, redis: Arc<Mutex<Redis>>) -> Self {
         ClientHandler {
-            client: Arc::new(Mutex::new(client)),
+            client: Arc::new(Mutex::new(Box::new(client) as Box<dyn TcpStreamTrait>)),
             redis,
             master: true
         }
