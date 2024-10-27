@@ -33,20 +33,29 @@ impl RedisCommand<'_> {
     const TYPE: &'static str = "TYPE";
     const XADD: &'static str = "XADD";
 
-    fn validate_entry_id(id: &str) -> Result<(), String> {
+    fn validate_entry_id(id: &str) -> Result<(u64, Option<u64>), String> {
         let parts: Vec<&str> = id.split('-').collect();
         if parts.len() != 2 {
             return Err("ERR Invalid stream ID format".to_string());
         }
 
-        let milliseconds = parts[0].parse::<u64>().map_err(|_| "ERR Invalid milliseconds in stream ID".to_string())?;
-        let sequence = parts[1].parse::<u64>().map_err(|_| "ERR Invalid sequence number in stream ID".to_string())?;
+        let milliseconds = parts[0].parse::<u64>()
+            .map_err(|_| "ERR Invalid milliseconds in stream ID".to_string())?;
 
-        if milliseconds == 0 && sequence == 0 {
-            return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
+        let sequence = if parts[1] == "*" {
+            None
+        } else {
+            Some(parts[1].parse::<u64>()
+                .map_err(|_| "ERR Invalid sequence number in stream ID".to_string())?)
+        };
+
+        if let Some(seq) = sequence {
+            if milliseconds == 0 && seq == 0 {
+                return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
+            }
         }
 
-        Ok(())
+        Ok((milliseconds, sequence))
     }
 
     /// Create command from the data received from the client.
@@ -82,7 +91,6 @@ impl RedisCommand<'_> {
                             false => None,
                         },
                     };
-                    // TODO original_resp.to_string() is not efficient.. find a way to avoid it.
                     Some(RedisCommand::Set { key, value, ttl, original_resp: original_resp.to_string() })
                 }
             },
@@ -107,7 +115,6 @@ impl RedisCommand<'_> {
                 if subcommand == "" {
                     Some(RedisCommand::Error { message: "ERR Wrong number of arguments for 'replconf' command".to_string() })
                 } else {
-                    // check if ReplConf GetAck
                     if subcommand.eq_ignore_ascii_case("getack") {
                         Some(RedisCommand::ReplconfGetack)
                     } else {
