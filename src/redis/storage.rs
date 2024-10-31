@@ -115,7 +115,7 @@ impl Storage {
         Ok(())
     }
 
-    fn get_current_time_ms() -> u64 {
+    pub fn get_current_time_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -176,6 +176,25 @@ impl Storage {
         }
     }
 
+    pub fn xrange(&self, key: &str, start: &str, end: &str) -> Result<Vec<StreamEntry>, String> {
+        let data = self.data.lock().unwrap();
+        
+        match data.get(key) {
+            Some(ValueWrapper::Stream { entries, .. }) => {
+                let filtered_entries: Vec<StreamEntry> = entries.iter()
+                    .filter(|entry| {
+                        Self::compare_stream_ids(&entry.id, start) >= std::cmp::Ordering::Equal &&
+                        Self::compare_stream_ids(&entry.id, end) <= std::cmp::Ordering::Equal
+                    })
+                    .cloned()
+                    .collect();
+                Ok(filtered_entries)
+            },
+            Some(_) => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            None => Ok(vec![]),
+        }
+    }
+
     pub fn keys(&self, pattern: &str) -> Vec<String> {
         let data = self.data.lock().unwrap();
         if pattern == "*" {
@@ -195,110 +214,5 @@ impl Storage {
             Some(ValueWrapper::Stream { .. }) => "stream".to_string(),
             None => "none".to_string(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_xadd_auto_sequence_zero_time() {
-        let storage = Storage::new();
-        let mut fields = HashMap::new();
-        fields.insert("foo".to_string(), "bar".to_string());
-        
-        // When time part is 0, first sequence should be 1
-        let result = storage.xadd("mystream", "0-*", fields.clone());
-        assert_eq!(result.unwrap(), "0-1");
-    }
-
-    #[test]
-    fn test_xadd_auto_sequence_new_time() {
-        let storage = Storage::new();
-        let mut fields = HashMap::new();
-        fields.insert("foo".to_string(), "bar".to_string());
-        
-        // For a new time part, sequence should start at 0
-        let result = storage.xadd("mystream", "5-*", fields.clone());
-        assert_eq!(result.unwrap(), "5-0");
-    }
-
-    #[test]
-    fn test_xadd_auto_sequence_increment() {
-        let storage = Storage::new();
-        let mut fields = HashMap::new();
-        fields.insert("foo".to_string(), "bar".to_string());
-        
-        // First entry with time part 5
-        let result1 = storage.xadd("mystream", "5-*", fields.clone());
-        assert_eq!(result1.unwrap(), "5-0");
-
-        // Second entry with same time part should increment sequence
-        fields.insert("bar".to_string(), "baz".to_string());
-        let result2 = storage.xadd("mystream", "5-*", fields.clone());
-        assert_eq!(result2.unwrap(), "5-1");
-    }
-
-    #[test]
-    fn test_xadd_auto_sequence_multiple_time_parts() {
-        let storage = Storage::new();
-        let mut fields = HashMap::new();
-        fields.insert("foo".to_string(), "bar".to_string());
-        
-        // Add entries with different time parts
-        let result1 = storage.xadd("mystream", "5-*", fields.clone());
-        assert_eq!(result1.unwrap(), "5-0");
-
-        let result2 = storage.xadd("mystream", "6-*", fields.clone());
-        assert_eq!(result2.unwrap(), "6-0");
-
-        // Going back to time part 5 should fail since it's less than 6
-        let result3 = storage.xadd("mystream", "5-*", fields.clone());
-        assert!(result3.is_err());
-    }
-
-    #[test]
-    fn test_xadd_auto_sequence_error_cases() {
-        let storage = Storage::new();
-        let mut fields = HashMap::new();
-        fields.insert("foo".to_string(), "bar".to_string());
-        
-        // Add first entry
-        let _ = storage.xadd("mystream", "5-0", fields.clone());
-
-        // Trying to add entry with same ID should fail
-        let result = storage.xadd("mystream", "5-0", fields.clone());
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "ERR The ID specified in XADD is equal or smaller than the target stream top item"
-        );
-
-        // Trying to add entry with lower time part should fail
-        let result = storage.xadd("mystream", "4-0", fields.clone());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_xadd_auto_generate_full_id() {
-        let storage = Storage::new();
-        let mut fields = HashMap::new();
-        fields.insert("foo".to_string(), "bar".to_string());
-        
-        let result = storage.xadd("mystream", "*", fields.clone());
-        assert!(result.is_ok());
-        
-        let id = result.unwrap();
-        let parts: Vec<&str> = id.split('-').collect();
-        assert_eq!(parts.len(), 2);
-        
-        // Time part should be current time
-        let time_part = parts[0].parse::<u64>().unwrap();
-        let current_time = Storage::get_current_time_ms();
-        assert!(time_part > 0 && time_part <= current_time);
-        
-        // Sequence should start at 0
-        assert_eq!(parts[1], "0");
     }
 }

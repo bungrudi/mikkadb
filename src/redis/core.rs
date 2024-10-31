@@ -4,7 +4,7 @@ use base64::engine::general_purpose;
 use base64::Engine;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 
 use crate::redis::config::RedisConfig;
 use crate::redis::storage::Storage;
@@ -124,6 +124,31 @@ impl Redis {
                     Ok(entry_id) => {
                         self.enqueue_for_replication(original_resp);
                         Ok(format!("${}\r\n{}\r\n", entry_id.len(), entry_id))
+                    },
+                    Err(e) => Err(format!("-{}\r\n", e)),
+                }
+            },
+            RedisCommand::XRange { key, start, end } => {
+                match self.storage.xrange(key, start, end) {
+                    Ok(entries) => {
+                        let mut response = format!("*{}\r\n", entries.len());
+                        for entry in entries {
+                            // Format each entry as an array containing the ID and field-value pairs
+                            response.push_str("*2\r\n"); // Entry array has 2 elements: ID and fields array
+                            response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id)); // ID
+
+                            // Convert HashMap to BTreeMap to ensure consistent ordering
+                            let ordered_fields: BTreeMap<_, _> = entry.fields.into_iter().collect();
+
+                            // Format field-value pairs as an array
+                            let field_count = ordered_fields.len() * 2; // Each field has a key and value
+                            response.push_str(&format!("*{}\r\n", field_count));
+                            for (key, value) in ordered_fields {
+                                response.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
+                                response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
+                            }
+                        }
+                        Ok(response)
                     },
                     Err(e) => Err(format!("-{}\r\n", e)),
                 }

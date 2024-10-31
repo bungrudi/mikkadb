@@ -1,11 +1,11 @@
-mod commands;
-mod config;
-mod replica;
-mod storage;
+pub mod commands;
+pub mod config;
+pub mod replica;
+pub mod storage;
 pub mod replication;
 pub mod core;
-mod utils;
-mod rdb;
+pub mod utils;
+pub mod rdb;
 
 pub use config::RedisConfig;
 pub use commands::RedisCommand;

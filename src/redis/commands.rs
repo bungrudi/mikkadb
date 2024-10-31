@@ -17,6 +17,7 @@ pub enum RedisCommand<'a> {
     Keys { pattern: String },
     Type { key: &'a str },
     XAdd { key: &'a str, id: &'a str, fields: HashMap<String, String>, original_resp: String },
+    XRange { key: &'a str, start: &'a str, end: &'a str },
 }
 
 impl RedisCommand<'_> {
@@ -32,6 +33,7 @@ impl RedisCommand<'_> {
     const KEYS: &'static str = "KEYS";
     const TYPE: &'static str = "TYPE";
     const XADD: &'static str = "XADD";
+    const XRANGE: &'static str = "XRANGE";
 
     fn validate_entry_id(id: &str) -> Result<(Option<u64>, Option<u64>), String> {
         if id == "*" {
@@ -183,6 +185,19 @@ impl RedisCommand<'_> {
                             }
                         },
                         Err(e) => Some(RedisCommand::Error { message: e }),
+                    }
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::XRANGE) => {
+                let key = params[0];
+                let start = params[1];
+                let end = params[2];
+                if key == "" || start == "" || end == "" {
+                    None
+                } else {
+                    match (Self::validate_entry_id(start), Self::validate_entry_id(end)) {
+                        (Ok(_), Ok(_)) => Some(RedisCommand::XRange { key, start, end }),
+                        (Err(e), _) | (_, Err(e)) => Some(RedisCommand::Error { message: e }),
                     }
                 }
             },
