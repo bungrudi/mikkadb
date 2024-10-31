@@ -115,24 +115,31 @@ impl Storage {
         Ok(())
     }
 
+    fn get_current_time_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
     pub fn xadd(&self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, String> {
         let mut data = self.data.lock().unwrap();
         
-        // Parse the ID
-        let parts: Vec<&str> = id.split('-').collect();
-        let time_part = parts[0].parse::<u64>().unwrap();
-        let is_auto_seq = parts[1] == "*";
+        // Handle auto-generation of ID
+        let (time_part, sequence) = if id == "*" {
+            (Self::get_current_time_ms(), None)
+        } else {
+            let parts: Vec<&str> = id.split('-').collect();
+            let time = parts[0].parse::<u64>().unwrap();
+            let is_auto_seq = parts[1] == "*";
+            (time, if is_auto_seq { None } else { Some(parts[1].parse::<u64>().unwrap()) })
+        };
 
         match data.entry(key.to_string()) {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 match occupied.get_mut() {
                     ValueWrapper::Stream { entries, metadata } => {
-                        let sequence = if is_auto_seq {
-                            Self::get_next_sequence(metadata, time_part)
-                        } else {
-                            parts[1].parse::<u64>().unwrap()
-                        };
-
+                        let sequence = sequence.unwrap_or_else(|| Self::get_next_sequence(metadata, time_part));
                         let new_id = format!("{}-{}", time_part, sequence);
                         
                         self.validate_new_id(entries, &new_id)?;
@@ -149,13 +156,9 @@ impl Storage {
             },
             std::collections::hash_map::Entry::Vacant(vacant) => {
                 let mut metadata = StreamMetadata::default();
-                let sequence = if is_auto_seq {
-                    Self::get_next_sequence(&mut metadata, time_part)
-                } else {
-                    parts[1].parse::<u64>().unwrap()
-                };
-
+                let sequence = sequence.unwrap_or_else(|| Self::get_next_sequence(&mut metadata, time_part));
                 let new_id = format!("{}-{}", time_part, sequence);
+
                 if Self::compare_stream_ids(&new_id, "0-0") != std::cmp::Ordering::Greater {
                     return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
                 }
@@ -275,5 +278,27 @@ mod tests {
         // Trying to add entry with lower time part should fail
         let result = storage.xadd("mystream", "4-0", fields.clone());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_xadd_auto_generate_full_id() {
+        let storage = Storage::new();
+        let mut fields = HashMap::new();
+        fields.insert("foo".to_string(), "bar".to_string());
+        
+        let result = storage.xadd("mystream", "*", fields.clone());
+        assert!(result.is_ok());
+        
+        let id = result.unwrap();
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 2);
+        
+        // Time part should be current time
+        let time_part = parts[0].parse::<u64>().unwrap();
+        let current_time = Storage::get_current_time_ms();
+        assert!(time_part > 0 && time_part <= current_time);
+        
+        // Sequence should start at 0
+        assert_eq!(parts[1], "0");
     }
 }

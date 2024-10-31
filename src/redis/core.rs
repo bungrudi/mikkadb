@@ -123,7 +123,7 @@ impl Redis {
                 match self.xadd(key, id, fields.clone()) {
                     Ok(entry_id) => {
                         self.enqueue_for_replication(original_resp);
-                        Ok(format!("+{}\r\n", entry_id))
+                        Ok(format!("${}\r\n{}\r\n", entry_id.len(), entry_id))
                     },
                     Err(e) => Err(format!("-{}\r\n", e)),
                 }

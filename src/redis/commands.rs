@@ -33,7 +33,11 @@ impl RedisCommand<'_> {
     const TYPE: &'static str = "TYPE";
     const XADD: &'static str = "XADD";
 
-    fn validate_entry_id(id: &str) -> Result<(u64, Option<u64>), String> {
+    fn validate_entry_id(id: &str) -> Result<(Option<u64>, Option<u64>), String> {
+        if id == "*" {
+            return Ok((None, None));
+        }
+
         let parts: Vec<&str> = id.split('-').collect();
         if parts.len() != 2 {
             return Err("ERR Invalid stream ID format".to_string());
@@ -55,7 +59,7 @@ impl RedisCommand<'_> {
             }
         }
 
-        Ok((milliseconds, sequence))
+        Ok((Some(milliseconds), sequence))
     }
 
     /// Create command from the data received from the client.
