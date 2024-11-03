@@ -18,6 +18,7 @@ pub enum RedisCommand<'a> {
     Type { key: &'a str },
     XAdd { key: &'a str, id: &'a str, fields: HashMap<String, String>, original_resp: String },
     XRange { key: &'a str, start: &'a str, end: &'a str },
+    XRead { key: &'a str, id: &'a str },
 }
 
 impl RedisCommand<'_> {
@@ -34,8 +35,9 @@ impl RedisCommand<'_> {
     const TYPE: &'static str = "TYPE";
     const XADD: &'static str = "XADD";
     const XRANGE: &'static str = "XRANGE";
+    const XREAD: &'static str = "XREAD";
 
-    fn validate_entry_id(id: &str) -> Result<(Option<u64>, Option<u64>), String> {
+    fn validate_entry_id(id: &str, is_xadd: bool) -> Result<(Option<u64>, Option<u64>), String> {
         // Special cases for XRANGE parameters
         if id == "*" || id == "-" || id == "+" {
             return Ok((None, None));
@@ -56,9 +58,12 @@ impl RedisCommand<'_> {
                 .map_err(|_| "ERR Invalid sequence number in stream ID".to_string())?)
         };
 
-        if let Some(seq) = sequence {
-            if milliseconds == 0 && seq == 0 {
-                return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
+        // Only validate 0-0 for XADD
+        if is_xadd {
+            if let Some(seq) = sequence {
+                if milliseconds == 0 && seq == 0 {
+                    return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
+                }
             }
         }
 
@@ -171,7 +176,7 @@ impl RedisCommand<'_> {
                 if key == "" || id == "" {
                     None
                 } else {
-                    match Self::validate_entry_id(id) {
+                    match Self::validate_entry_id(id, true) {
                         Ok(_) => {
                             let mut fields = HashMap::new();
                             let mut i = 2;
@@ -196,9 +201,20 @@ impl RedisCommand<'_> {
                 if key == "" || start == "" || end == "" {
                     None
                 } else {
-                    match (Self::validate_entry_id(start), Self::validate_entry_id(end)) {
+                    match (Self::validate_entry_id(start, false), Self::validate_entry_id(end, false)) {
                         (Ok(_), Ok(_)) => Some(RedisCommand::XRange { key, start, end }),
                         (Err(e), _) | (_, Err(e)) => Some(RedisCommand::Error { message: e }),
+                    }
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::XREAD) => {
+                // XREAD streams key id
+                if params[0] != "streams" || params[1] == "" || params[2] == "" {
+                    Some(RedisCommand::Error { message: "ERR wrong number of arguments for 'xread' command".to_string() })
+                } else {
+                    match Self::validate_entry_id(params[2], false) {
+                        Ok(_) => Some(RedisCommand::XRead { key: params[1], id: params[2] }),
+                        Err(e) => Some(RedisCommand::Error { message: e }),
                     }
                 }
             },

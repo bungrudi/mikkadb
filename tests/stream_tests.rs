@@ -308,3 +308,157 @@ fn test_xrange_resp_format() {
 
     assert_eq!(result, expected);
 }
+
+#[test]
+fn test_xread_basic() {
+    let mut redis = test_redis();
+    
+    // Add test entry
+    let mut fields = BTreeMap::new();
+    fields.insert("temperature".to_string(), "96".to_string());
+    let _ = redis.storage.xadd("stream_key", "1-1", fields.into_iter().collect());
+
+    // Test XREAD command
+    let xread = test_command(
+        "XREAD",
+        &["streams", "stream_key", "1-0"],
+        ""
+    );
+
+    let result = redis.execute_command(&xread, None).unwrap();
+    
+    let expected = "*1\r\n\
+                   *2\r\n\
+                   $10\r\nstream_key\r\n\
+                   *1\r\n\
+                   *2\r\n\
+                   $3\r\n1-1\r\n\
+                   *2\r\n\
+                   $11\r\ntemperature\r\n\
+                   $2\r\n96\r\n";
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_xread_exclusive() {
+    let mut redis = test_redis();
+    
+    // Add test entries with ordered fields
+    let mut fields1 = BTreeMap::new();
+    fields1.insert("humidity".to_string(), "95".to_string());
+    fields1.insert("temperature".to_string(), "36".to_string());
+    
+    let mut fields2 = BTreeMap::new();
+    fields2.insert("humidity".to_string(), "94".to_string());
+    fields2.insert("temperature".to_string(), "37".to_string());
+
+    // Add entries
+    let _ = redis.storage.xadd("mystream", "1526985054069-0", fields1.into_iter().collect());
+    let _ = redis.storage.xadd("mystream", "1526985054079-0", fields2.into_iter().collect());
+
+    // Test XREAD - should only return entries after the given ID
+    let xread = test_command(
+        "XREAD",
+        &["streams", "mystream", "1526985054069-0"],
+        ""
+    );
+
+    let result = redis.execute_command(&xread, None).unwrap();
+    
+    let expected = "*1\r\n\
+                   *2\r\n\
+                   $8\r\nmystream\r\n\
+                   *1\r\n\
+                   *2\r\n\
+                   $15\r\n1526985054079-0\r\n\
+                   *4\r\n\
+                   $8\r\nhumidity\r\n\
+                   $2\r\n94\r\n\
+                   $11\r\ntemperature\r\n\
+                   $2\r\n37\r\n";
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_xread_empty_stream() {
+    let mut redis = test_redis();
+    
+    // Test XREAD on non-existent stream
+    let xread = test_command(
+        "XREAD",
+        &["streams", "nonexistent", "1-0"],
+        ""
+    );
+
+    let result = redis.execute_command(&xread, None).unwrap();
+    
+    // Should return an array with one element (stream key) and empty entries array
+    let expected = "*1\r\n\
+                   *2\r\n\
+                   $11\r\nnonexistent\r\n\
+                   *0\r\n";
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_xread_wrong_type() {
+    let mut redis = test_redis();
+    
+    // Set a string value
+    redis.storage.set("string_key", "some_value", None);
+
+    // Try XREAD on string key
+    let xread = test_command(
+        "XREAD",
+        &["streams", "string_key", "1-0"],
+        ""
+    );
+
+    let result = redis.execute_command(&xread, None);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err(),
+        "-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+    );
+}
+
+#[test]
+fn test_xread_invalid_id() {
+    let mut redis = test_redis();
+    
+    // Try XREAD with invalid ID format
+    let xread = test_command(
+        "XREAD",
+        &["streams", "mystream", "invalid-id"],
+        ""
+    );
+
+    let result = redis.execute_command(&xread, None);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err(),
+        "-ERR Invalid milliseconds in stream ID\r\n"
+    );
+}
+
+#[test]
+fn test_xread_missing_parameters() {
+    let mut redis = test_redis();
+    
+    // Try XREAD without required parameters
+    let xread = test_command(
+        "XREAD",
+        &["streams"],
+        ""
+    );
+
+    let result = redis.execute_command(&xread, None);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err(),
+        "-ERR wrong number of arguments for 'xread' command\r\n"
+    );
+}

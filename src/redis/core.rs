@@ -153,6 +153,40 @@ impl Redis {
                     Err(e) => Err(format!("-{}\r\n", e)),
                 }
             },
+            RedisCommand::XRead { key, id } => {
+                match self.storage.xread(key, id) {
+                    Ok(entries) => {
+                        // Format as array with one element (since we only support one stream for now)
+                        let mut response = "*1\r\n".to_string();
+                        
+                        // Add stream key and entries array
+                        response.push_str("*2\r\n"); // Stream array has 2 elements: key and entries array
+                        response.push_str(&format!("${}\r\n{}\r\n", key.len(), key)); // Stream key
+                        
+                        // Format entries array
+                        response.push_str(&format!("*{}\r\n", entries.len())); // Number of entries
+                        
+                        for entry in entries {
+                            // Format each entry as an array containing the ID and field-value pairs
+                            response.push_str("*2\r\n"); // Entry array has 2 elements: ID and fields array
+                            response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id)); // ID
+
+                            // Convert HashMap to BTreeMap to ensure consistent ordering
+                            let ordered_fields: BTreeMap<_, _> = entry.fields.into_iter().collect();
+
+                            // Format field-value pairs as an array
+                            let field_count = ordered_fields.len() * 2; // Each field has a key and value
+                            response.push_str(&format!("*{}\r\n", field_count));
+                            for (key, value) in ordered_fields {
+                                response.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
+                                response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
+                            }
+                        }
+                        Ok(response)
+                    },
+                    Err(e) => Err(format!("-{}\r\n", e)),
+                }
+            },
             RedisCommand::Info { subcommand } => {
                 match subcommand.as_str() {
                     "replication" => {
@@ -255,7 +289,7 @@ impl Redis {
                     Ok(format!(":{}\r\n", up_to_date_replicas))
                 } else {
                     if *elapsed >= *timeout {
-                        println!("timeout elapsed, returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
+                        println!("timeout elapsed returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
                         Ok(format!(":{}\r\n", up_to_date_replicas))
                     } else {
                         // Return a special error to indicate that we need to retry 

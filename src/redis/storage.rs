@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -148,12 +148,20 @@ impl Storage {
             (time, if is_auto_seq { None } else { Some(parts[1].parse::<u64>().unwrap()) })
         };
 
+        // Only validate 0-0 for explicit IDs (not auto-generated)
+        if id != "*" && !id.ends_with("-*") {
+            let new_id = format!("{}-{}", time_part, sequence.unwrap_or(0));
+            if Self::compare_stream_ids(&new_id, "0-0") != std::cmp::Ordering::Greater {
+                return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
+            }
+        }
+
         match data.entry(key.to_string()) {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 match occupied.get_mut() {
                     ValueWrapper::Stream { entries, metadata } => {
-                        let sequence = sequence.unwrap_or_else(|| Self::get_next_sequence(metadata, time_part));
-                        let new_id = format!("{}-{}", time_part, sequence);
+                        let new_sequence = sequence.unwrap_or_else(|| Self::get_next_sequence(metadata, time_part));
+                        let new_id = format!("{}-{}", time_part, new_sequence);
                         
                         self.validate_new_id(entries, &new_id)?;
 
@@ -169,12 +177,8 @@ impl Storage {
             },
             std::collections::hash_map::Entry::Vacant(vacant) => {
                 let mut metadata = StreamMetadata::default();
-                let sequence = sequence.unwrap_or_else(|| Self::get_next_sequence(&mut metadata, time_part));
-                let new_id = format!("{}-{}", time_part, sequence);
-
-                if Self::compare_stream_ids(&new_id, "0-0") != std::cmp::Ordering::Greater {
-                    return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
-                }
+                let new_sequence = sequence.unwrap_or_else(|| Self::get_next_sequence(&mut metadata, time_part));
+                let new_id = format!("{}-{}", time_part, new_sequence);
 
                 let entry = StreamEntry {
                     id: new_id.clone(),
@@ -200,6 +204,34 @@ impl Storage {
                         Self::compare_stream_ids(&entry.id, end) <= std::cmp::Ordering::Equal
                     })
                     .cloned()
+                    .collect();
+                Ok(filtered_entries)
+            },
+            Some(_) => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            None => Ok(vec![]),
+        }
+    }
+
+    pub fn xread(&self, key: &str, id: &str) -> Result<Vec<StreamEntry>, String> {
+        let data = self.data.lock().unwrap();
+        
+        match data.get(key) {
+            Some(ValueWrapper::Stream { entries, .. }) => {
+                let filtered_entries: Vec<StreamEntry> = entries.iter()
+                    .filter(|entry| {
+                        // XREAD is exclusive, so we only want entries with ID greater than the given ID
+                        Self::compare_stream_ids(&entry.id, id) == std::cmp::Ordering::Greater
+                    })
+                    .map(|entry| {
+                        // Convert HashMap to BTreeMap to ensure consistent field ordering
+                        let ordered_fields: BTreeMap<_, _> = entry.fields.iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        StreamEntry {
+                            id: entry.id.clone(),
+                            fields: ordered_fields.into_iter().collect(),
+                        }
+                    })
                     .collect();
                 Ok(filtered_entries)
             },
