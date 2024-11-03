@@ -462,3 +462,46 @@ fn test_xread_missing_parameters() {
         "-ERR wrong number of arguments for 'xread' command\r\n"
     );
 }
+
+#[test]
+fn test_xread_multiple_streams() {
+    let mut redis = test_redis();
+    
+    // Add entries to two different streams
+    let mut fields1 = BTreeMap::new();
+    fields1.insert("temperature".to_string(), "95".to_string());
+    let _ = redis.storage.xadd("stream_key", "0-1", fields1.into_iter().collect());
+
+    let mut fields2 = BTreeMap::new();
+    fields2.insert("humidity".to_string(), "97".to_string());
+    let _ = redis.storage.xadd("other_stream_key", "0-2", fields2.into_iter().collect());
+
+    // Test XREAD with multiple streams
+    let xread = test_command(
+        "XREAD",
+        &["streams", "stream_key", "other_stream_key", "0-0", "0-1"],
+        ""
+    );
+
+    let result = redis.execute_command(&xread, None).unwrap();
+    
+    let expected = "*2\r\n\
+                   *2\r\n\
+                   $10\r\nstream_key\r\n\
+                   *1\r\n\
+                   *2\r\n\
+                   $3\r\n0-1\r\n\
+                   *2\r\n\
+                   $11\r\ntemperature\r\n\
+                   $2\r\n95\r\n\
+                   *2\r\n\
+                   $16\r\nother_stream_key\r\n\
+                   *1\r\n\
+                   *2\r\n\
+                   $3\r\n0-2\r\n\
+                   *2\r\n\
+                   $8\r\nhumidity\r\n\
+                   $2\r\n97\r\n";
+
+    assert_eq!(result, expected);
+}

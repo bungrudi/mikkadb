@@ -18,7 +18,7 @@ pub enum RedisCommand<'a> {
     Type { key: &'a str },
     XAdd { key: &'a str, id: &'a str, fields: HashMap<String, String>, original_resp: String },
     XRange { key: &'a str, start: &'a str, end: &'a str },
-    XRead { key: &'a str, id: &'a str },
+    XRead { keys: Vec<&'a str>, ids: Vec<&'a str> },
 }
 
 impl RedisCommand<'_> {
@@ -208,14 +208,36 @@ impl RedisCommand<'_> {
                 }
             },
             command if command.eq_ignore_ascii_case(Self::XREAD) => {
-                // XREAD streams key id
-                if params[0] != "streams" || params[1] == "" || params[2] == "" {
+                // XREAD streams key1 key2 id1 id2
+                if params[0] != "streams" {
+                    return Some(RedisCommand::Error { message: "ERR wrong number of arguments for 'xread' command".to_string() });
+                }
+
+                // Parse all non-empty parameters
+                let all_params: Vec<&str> = params.iter().copied().filter(|&p| !p.is_empty()).collect();
+                
+                if all_params.len() <= 1 {
+                    return Some(RedisCommand::Error { message: "ERR wrong number of arguments for 'xread' command".to_string() });
+                }
+
+                // Find midpoint (where IDs start)
+                let midpoint = (all_params.len() - 1) / 2 + 1;
+                
+                // Split into keys and ids
+                let keys = all_params[1..midpoint].to_vec();
+                let ids = all_params[midpoint..].to_vec();
+
+                // Validate all IDs
+                for id in &ids {
+                    if let Err(e) = Self::validate_entry_id(id, false) {
+                        return Some(RedisCommand::Error { message: e });
+                    }
+                }
+
+                if keys.is_empty() || ids.is_empty() || keys.len() != ids.len() {
                     Some(RedisCommand::Error { message: "ERR wrong number of arguments for 'xread' command".to_string() })
                 } else {
-                    match Self::validate_entry_id(params[2], false) {
-                        Ok(_) => Some(RedisCommand::XRead { key: params[1], id: params[2] }),
-                        Err(e) => Some(RedisCommand::Error { message: e }),
-                    }
+                    Some(RedisCommand::XRead { keys, ids })
                 }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),

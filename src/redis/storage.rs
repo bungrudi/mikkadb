@@ -211,32 +211,36 @@ impl Storage {
         }
     }
 
-    pub fn xread(&self, key: &str, id: &str) -> Result<Vec<StreamEntry>, Cow<'static, str>> {
+    pub fn xread(&self, keys: &[&str], ids: &[&str]) -> Result<Vec<(String, Vec<StreamEntry>)>, Cow<'static, str>> {
         let data = self.data.lock().unwrap();
+        let mut result = Vec::new();
         
-        match data.get(key) {
-            Some(ValueWrapper::Stream { entries, .. }) => {
-                let filtered_entries: Vec<StreamEntry> = entries.iter()
-                    .filter(|entry| {
-                        Self::compare_stream_ids(&entry.id, id) == std::cmp::Ordering::Greater
-                    })
-                    .map(|entry| {
-                        let ordered_fields: BTreeMap<_, _> = entry.fields.iter()
-                            .map(|(k, v)| (k.as_str(), v.as_str()))
-                            .collect();
-                        StreamEntry {
-                            id: entry.id.clone(),
-                            fields: ordered_fields.into_iter()
-                                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                                .collect(),
-                        }
-                    })
-                    .collect();
-                Ok(filtered_entries)
-            },
-            Some(_) => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
-            None => Ok(vec![]),
+        for (&key, &id) in keys.iter().zip(ids.iter()) {
+            match data.get(key) {
+                Some(ValueWrapper::Stream { entries, .. }) => {
+                    let filtered_entries: Vec<StreamEntry> = entries.iter()
+                        .filter(|entry| {
+                            Self::compare_stream_ids(&entry.id, id) == std::cmp::Ordering::Greater
+                        })
+                        .map(|entry| {
+                            let ordered_fields: BTreeMap<_, _> = entry.fields.iter()
+                                .map(|(k, v)| (k.as_str(), v.as_str()))
+                                .collect();
+                            StreamEntry {
+                                id: entry.id.clone(),
+                                fields: ordered_fields.into_iter()
+                                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                                    .collect(),
+                            }
+                        })
+                        .collect();
+                    result.push((key.to_string(), filtered_entries));
+                },
+                Some(_) => return Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
+                None => result.push((key.to_string(), vec![])),
+            }
         }
+        Ok(result)
     }
 
     pub fn keys(&self, pattern: &str) -> Vec<String> {

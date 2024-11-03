@@ -153,33 +153,35 @@ impl Redis {
                     Err(e) => Err(format!("-{}\r\n", e)),
                 }
             },
-            RedisCommand::XRead { key, id } => {
-                match self.storage.xread(key, id) {
-                    Ok(entries) => {
-                        // Format as array with one element (since we only support one stream for now)
-                        let mut response = "*1\r\n".to_string();
+            RedisCommand::XRead { keys, ids } => {
+                match self.storage.xread(keys, ids) {
+                    Ok(stream_entries) => {
+                        // Format as array with number of streams
+                        let mut response = format!("*{}\r\n", stream_entries.len());
                         
-                        // Add stream key and entries array
-                        response.push_str("*2\r\n"); // Stream array has 2 elements: key and entries array
-                        response.push_str(&format!("${}\r\n{}\r\n", key.len(), key)); // Stream key
-                        
-                        // Format entries array
-                        response.push_str(&format!("*{}\r\n", entries.len())); // Number of entries
-                        
-                        for entry in entries {
-                            // Format each entry as an array containing the ID and field-value pairs
-                            response.push_str("*2\r\n"); // Entry array has 2 elements: ID and fields array
-                            response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id)); // ID
+                        for (stream_key, entries) in stream_entries {
+                            // Add stream key and entries array
+                            response.push_str("*2\r\n"); // Stream array has 2 elements: key and entries array
+                            response.push_str(&format!("${}\r\n{}\r\n", stream_key.len(), stream_key)); // Stream key
+                            
+                            // Format entries array
+                            response.push_str(&format!("*{}\r\n", entries.len())); // Number of entries
+                            
+                            for entry in entries {
+                                // Format each entry as an array containing the ID and field-value pairs
+                                response.push_str("*2\r\n"); // Entry array has 2 elements: ID and fields array
+                                response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id)); // ID
 
-                            // Convert HashMap to BTreeMap to ensure consistent ordering
-                            let ordered_fields: BTreeMap<_, _> = entry.fields.into_iter().collect();
+                                // Convert HashMap to BTreeMap to ensure consistent ordering
+                                let ordered_fields: BTreeMap<_, _> = entry.fields.into_iter().collect();
 
-                            // Format field-value pairs as an array
-                            let field_count = ordered_fields.len() * 2; // Each field has a key and value
-                            response.push_str(&format!("*{}\r\n", field_count));
-                            for (key, value) in ordered_fields {
-                                response.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
-                                response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
+                                // Format field-value pairs as an array
+                                let field_count = ordered_fields.len() * 2; // Each field has a key and value
+                                response.push_str(&format!("*{}\r\n", field_count));
+                                for (key, value) in ordered_fields {
+                                    response.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
+                                    response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
+                                }
                             }
                         }
                         Ok(response)
