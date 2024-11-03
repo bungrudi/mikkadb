@@ -88,6 +88,12 @@ impl Storage {
         if id2 == "-" {
             return std::cmp::Ordering::Greater;
         }
+        if id1 == "+" {
+            return std::cmp::Ordering::Greater;
+        }
+        if id2 == "+" {
+            return std::cmp::Ordering::Less;
+        }
 
         let parts1: Vec<&str> = id1.split('-').collect();
         let parts2: Vec<&str> = id2.split('-').collect();

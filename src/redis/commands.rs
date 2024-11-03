@@ -36,12 +36,8 @@ impl RedisCommand<'_> {
     const XRANGE: &'static str = "XRANGE";
 
     fn validate_entry_id(id: &str) -> Result<(Option<u64>, Option<u64>), String> {
-        if id == "*" {
-            return Ok((None, None));
-        }
-        
-        // Special case for XRANGE's "-" parameter
-        if id == "-" {
+        // Special cases for XRANGE parameters
+        if id == "*" || id == "-" || id == "+" {
             return Ok((None, None));
         }
 
