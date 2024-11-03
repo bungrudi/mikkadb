@@ -1,13 +1,13 @@
-mod parser;
-mod command;
-mod context;
-mod state;
+pub mod context;
+pub mod parser;
+pub mod command;
+pub mod state;
 
-pub use parser::parse_resp;
+pub use self::parser::parse_resp;
 
 #[macro_export]
 macro_rules! process_command {
-    ($self:ident) => {
+    ($self:expr) => {
         match &$self.current_command {
             Some(command) => {
                 let command_ = command.command;
@@ -21,17 +21,15 @@ macro_rules! process_command {
                             $self.current_command = None;
                             $self.command_index += 1;
                         } else{
-                            $self.error_reason = "Too many commands".to_string();
+                            $self.error_reason = "Too many commands".into();
                         }
                     },
-                    None => { // we treat None as error. This should not happen.
-                        $self.error_reason = Context::PARSE_ERROR.to_string();
+                    None => {
+                        $self.error_reason = Context::PARSE_ERROR.into();
                     }
                 }
             },
-            None => {
-                // $self.error_reason = Context::STATE_ERROR.to_string();
-            }
+            None => (),
         }
     };
 }

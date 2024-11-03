@@ -1,6 +1,7 @@
 use std::collections::{HashMap, BTreeMap};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::borrow::Cow;
 
 #[derive(Clone, Debug)]
 pub struct StreamEntry {
@@ -119,10 +120,10 @@ impl Storage {
         next_seq
     }
 
-    fn validate_new_id(&self, entries: &[StreamEntry], new_id: &str) -> Result<(), String> {
+    fn validate_new_id(&self, entries: &[StreamEntry], new_id: &str) -> Result<(), Cow<'static, str>> {
         if let Some(last_entry) = entries.last() {
             if Self::compare_stream_ids(new_id, &last_entry.id) != std::cmp::Ordering::Greater {
-                return Err("ERR The ID specified in XADD is equal or smaller than the target stream top item".to_string());
+                return Err("ERR The ID specified in XADD is equal or smaller than the target stream top item".into());
             }
         }
         Ok(())
@@ -135,10 +136,9 @@ impl Storage {
             .as_millis() as u64
     }
 
-    pub fn xadd(&self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, String> {
+    pub fn xadd(&self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, Cow<'static, str>> {
         let mut data = self.data.lock().unwrap();
         
-        // Handle auto-generation of ID
         let (time_part, sequence) = if id == "*" {
             (Self::get_current_time_ms(), None)
         } else {
@@ -148,11 +148,10 @@ impl Storage {
             (time, if is_auto_seq { None } else { Some(parts[1].parse::<u64>().unwrap()) })
         };
 
-        // Only validate 0-0 for explicit IDs (not auto-generated)
         if id != "*" && !id.ends_with("-*") {
             let new_id = format!("{}-{}", time_part, sequence.unwrap_or(0));
             if Self::compare_stream_ids(&new_id, "0-0") != std::cmp::Ordering::Greater {
-                return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
+                return Err("ERR The ID specified in XADD must be greater than 0-0".into());
             }
         }
 
@@ -172,7 +171,7 @@ impl Storage {
                         entries.push(entry);
                         Ok(new_id)
                     },
-                    _ => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+                    _ => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
                 }
             },
             std::collections::hash_map::Entry::Vacant(vacant) => {
@@ -193,7 +192,7 @@ impl Storage {
         }
     }
 
-    pub fn xrange(&self, key: &str, start: &str, end: &str) -> Result<Vec<StreamEntry>, String> {
+    pub fn xrange(&self, key: &str, start: &str, end: &str) -> Result<Vec<StreamEntry>, Cow<'static, str>> {
         let data = self.data.lock().unwrap();
         
         match data.get(key) {
@@ -207,35 +206,35 @@ impl Storage {
                     .collect();
                 Ok(filtered_entries)
             },
-            Some(_) => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            Some(_) => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
             None => Ok(vec![]),
         }
     }
 
-    pub fn xread(&self, key: &str, id: &str) -> Result<Vec<StreamEntry>, String> {
+    pub fn xread(&self, key: &str, id: &str) -> Result<Vec<StreamEntry>, Cow<'static, str>> {
         let data = self.data.lock().unwrap();
         
         match data.get(key) {
             Some(ValueWrapper::Stream { entries, .. }) => {
                 let filtered_entries: Vec<StreamEntry> = entries.iter()
                     .filter(|entry| {
-                        // XREAD is exclusive, so we only want entries with ID greater than the given ID
                         Self::compare_stream_ids(&entry.id, id) == std::cmp::Ordering::Greater
                     })
                     .map(|entry| {
-                        // Convert HashMap to BTreeMap to ensure consistent field ordering
                         let ordered_fields: BTreeMap<_, _> = entry.fields.iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .map(|(k, v)| (k.as_str(), v.as_str()))
                             .collect();
                         StreamEntry {
                             id: entry.id.clone(),
-                            fields: ordered_fields.into_iter().collect(),
+                            fields: ordered_fields.into_iter()
+                                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                                .collect(),
                         }
                     })
                     .collect();
                 Ok(filtered_entries)
             },
-            Some(_) => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            Some(_) => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
             None => Ok(vec![]),
         }
     }
@@ -252,12 +251,12 @@ impl Storage {
         }
     }
 
-    pub fn get_type(&self, key: &str) -> String {
+    pub fn get_type(&self, key: &str) -> Cow<'static, str> {
         let data = self.data.lock().unwrap();
         match data.get(key) {
-            Some(ValueWrapper::String { .. }) => "string".to_string(),
-            Some(ValueWrapper::Stream { .. }) => "stream".to_string(),
-            None => "none".to_string(),
+            Some(ValueWrapper::String { .. }) => "string".into(),
+            Some(ValueWrapper::Stream { .. }) => "stream".into(),
+            None => "none".into(),
         }
     }
 }

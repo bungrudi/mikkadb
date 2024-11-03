@@ -52,7 +52,7 @@ impl Redis {
     }
 
     pub fn xadd(&mut self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, String> {
-        self.storage.xadd(key, id, fields)
+        self.storage.xadd(key, id, fields).map_err(|e| e.into_owned())
     }
 
     pub fn enqueue_for_replication(&mut self, command: &str) {
@@ -116,7 +116,7 @@ impl Redis {
                 Ok("+OK\r\n".to_string())
             },
             RedisCommand::Type { key } => {
-                let type_str = self.storage.get_type(key);
+                let type_str = self.storage.get_type(key).into_owned();
                 Ok(format!("+{}\r\n", type_str))
             },
             RedisCommand::XAdd { key, id, fields, original_resp } => {

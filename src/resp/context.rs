@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use super::state::RespState;
 use super::command::Command;
 use crate::redis::RedisCommand;
@@ -12,7 +13,7 @@ pub struct Context<'a> {
     pub current_command: Option<Command<'a>>,
     pub command_index: u8,
     pub commands: [RedisCommand<'a>;25],
-    pub error_reason: String,
+    pub error_reason: Cow<'static, str>,
 }
 
 impl Context<'_> {
@@ -58,7 +59,7 @@ impl Context<'_> {
                         self.current_command = Some(current_command);
                         return;
                     } else {
-                        self.error_reason = Context::PARSE_ERROR.to_string();
+                        self.error_reason = Cow::Borrowed(Context::PARSE_ERROR);
                         return;
                     }
                 } else {
@@ -68,7 +69,7 @@ impl Context<'_> {
                     return;
                 }
             },
-            _ => self.error_reason = Context::STATE_ERROR.to_string(),
+            _ => self.error_reason = Cow::Borrowed(Context::STATE_ERROR),
         }
     }
 
@@ -94,7 +95,7 @@ impl Context<'_> {
                     self.resp_state = RespState::BulkData;
                 } else {
                     self.resp_state = RespState::Error;
-                    self.error_reason = format!("parse error at position {}", self.current_pos);
+                    self.error_reason = Cow::Owned(format!("parse error at position {}", self.current_pos));
                     return;
                 }
 
@@ -158,7 +159,7 @@ impl Context<'_> {
                                                     self.current_command = None;
                                                     self.command_index += 1;
                                                 } else{
-                                                    self.error_reason = "Too many commands".to_string();
+                                                    self.error_reason = Cow::Borrowed("Too many commands");
                                                 }
                                             },
                                             None => {
@@ -175,12 +176,12 @@ impl Context<'_> {
                         }
                     },
                     _ => {
-                        self.error_reason = Context::STATE_ERROR.to_string();
+                        self.error_reason = Cow::Borrowed(Context::STATE_ERROR);
                         return;
                     }
                 }
             },
-            _ => self.error_reason = Context::STATE_ERROR.to_string(),
+            _ => self.error_reason = Cow::Borrowed(Context::STATE_ERROR),
         }
     }
 
@@ -193,10 +194,10 @@ impl Context<'_> {
                     self.current_pos += 1;
                     self.resp_state = RespState::Idle;
                 } else {
-                    self.error_reason = Context::PARSE_ERROR.to_string();
+                    self.error_reason = Cow::Borrowed(Context::PARSE_ERROR);
                 }
             },
-            _ => self.error_reason = Context::STATE_ERROR.to_string(),
+            _ => self.error_reason = Cow::Borrowed(Context::STATE_ERROR),
         }
     }
 
@@ -241,7 +242,7 @@ impl Context<'_> {
 
             process_command!(self);
         } else {
-            self.error_reason = Context::PARSE_ERROR.to_string();
+            self.error_reason = Cow::Borrowed(Context::PARSE_ERROR);
         }
     }
 }
