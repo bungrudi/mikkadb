@@ -209,6 +209,34 @@ fn test_xrange_partial_range() {
 }
 
 #[test]
+fn test_xrange_with_minus() {
+    let redis = test_redis();
+    
+    // Add test entries
+    let entries = vec![
+        ("1000-0", "1"),
+        ("2000-0", "2"),
+        ("3000-0", "3"),
+    ];
+
+    for (id, value) in entries {
+        let mut fields = HashMap::new();
+        fields.insert("value".to_string(), value.to_string());
+        let _ = redis.storage.xadd("stream", id, fields);
+    }
+
+    // Query from beginning to specific ID
+    let result = redis.storage.xrange("stream", "-", "2000-0").unwrap();
+    assert_eq!(result.len(), 2);
+    
+    // Verify entries
+    assert_eq!(result[0].id, "1000-0");
+    assert_eq!(result[0].fields.get("value").unwrap(), "1");
+    assert_eq!(result[1].id, "2000-0");
+    assert_eq!(result[1].fields.get("value").unwrap(), "2");
+}
+
+#[test]
 fn test_xrange_resp_format() {
     let mut redis = test_redis();
     

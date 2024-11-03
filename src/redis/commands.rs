@@ -39,6 +39,11 @@ impl RedisCommand<'_> {
         if id == "*" {
             return Ok((None, None));
         }
+        
+        // Special case for XRANGE's "-" parameter
+        if id == "-" {
+            return Ok((None, None));
+        }
 
         let parts: Vec<&str> = id.split('-').collect();
         if parts.len() != 2 {

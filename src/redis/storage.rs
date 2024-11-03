@@ -82,6 +82,13 @@ impl Storage {
     }
 
     fn compare_stream_ids(id1: &str, id2: &str) -> std::cmp::Ordering {
+        if id1 == "-" {
+            return std::cmp::Ordering::Less;
+        }
+        if id2 == "-" {
+            return std::cmp::Ordering::Greater;
+        }
+
         let parts1: Vec<&str> = id1.split('-').collect();
         let parts2: Vec<&str> = id2.split('-').collect();
 
