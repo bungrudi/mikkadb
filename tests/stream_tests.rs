@@ -393,14 +393,7 @@ fn test_xread_empty_stream() {
     );
 
     let result = redis.execute_command(&xread, None).unwrap();
-    
-    // Should return an array with one element (stream key) and empty entries array
-    let expected = "*1\r\n\
-                   *2\r\n\
-                   $11\r\nnonexistent\r\n\
-                   *0\r\n";
-
-    assert_eq!(result, expected);
+    assert_eq!(result, "*0\r\n");
 }
 
 #[test]

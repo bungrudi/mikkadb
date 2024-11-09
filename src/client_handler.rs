@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,8 +14,7 @@ pub struct ClientHandler {
 }
 
 impl ClientHandler {
-
-    pub fn new (client: TcpStream, redis: Arc<Mutex<Redis>>) -> Self {
+    pub fn new<T: TcpStreamTrait + 'static>(client: T, redis: Arc<Mutex<Redis>>) -> Self {
         ClientHandler {
             client: Arc::new(Mutex::new(Box::new(client) as Box<dyn TcpStreamTrait>)),
             redis,
@@ -24,7 +22,7 @@ impl ClientHandler {
         }
     }
 
-    pub fn new_master (client: TcpStream, redis: Arc<Mutex<Redis>>) -> Self {
+    pub fn new_master<T: TcpStreamTrait + 'static>(client: T, redis: Arc<Mutex<Redis>>) -> Self {
         ClientHandler {
             client: Arc::new(Mutex::new(Box::new(client) as Box<dyn TcpStreamTrait>)),
             redis,
@@ -119,7 +117,7 @@ impl ClientHandler {
                                 if elapsed >= timeout {
                                     println!("DEBUG: XREAD timeout expired, sending null string");
                                     if !master {
-                                        let _ = client.write(b"$-1\r\n");
+                                        let _ = client.write(b"*0\r\n");
                                     }
                                     should_retry = false;
                                 } else {
