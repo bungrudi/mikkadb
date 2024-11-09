@@ -1,4 +1,7 @@
 use std::collections::{HashMap, BTreeMap};
+use std::thread;
+use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use redis_starter_rust::redis::{
     core::Redis,
@@ -495,6 +498,59 @@ fn test_xread_multiple_streams() {
                    *2\r\n\
                    $8\r\nhumidity\r\n\
                    $2\r\n97\r\n";
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_xread_block_zero() {
+    let redis = Arc::new(Mutex::new(test_redis()));
+    
+    // Create a thread that will add an entry after a delay
+    let redis_clone = Arc::clone(&redis);
+    let handle = thread::spawn(move || {
+        // Wait a bit before adding the entry
+        thread::sleep(Duration::from_millis(500));
+        
+        // Add test entry
+        let mut fields = BTreeMap::new();
+        fields.insert("temperature".to_string(), "95".to_string());
+        let redis = redis_clone.lock().unwrap();
+        redis.storage.xadd("stream_key", "0-2", fields.into_iter().collect()).unwrap();
+    });
+
+    // Test XREAD command with BLOCK 0
+    let xread = test_command(
+        "XREAD",
+        &["BLOCK", "0", "STREAMS", "stream_key", "0-0"],
+        ""
+    );
+
+    // Keep retrying until we get a result
+    let mut result = redis.lock().unwrap().execute_command(&xread, None);
+    while let Err(ref e) = result {
+        if e.starts_with("-XREAD_RETRY") {
+            thread::sleep(Duration::from_millis(50));
+            result = redis.lock().unwrap().execute_command(&xread, None);
+        } else {
+            panic!("Unexpected error: {}", e);
+        }
+    }
+
+    let result = result.unwrap();
+    
+    // Wait for the thread to complete
+    handle.join().unwrap();
+    
+    let expected = "*1\r\n\
+                   *2\r\n\
+                   $10\r\nstream_key\r\n\
+                   *1\r\n\
+                   *2\r\n\
+                   $3\r\n0-2\r\n\
+                   *2\r\n\
+                   $11\r\ntemperature\r\n\
+                   $2\r\n95\r\n";
 
     assert_eq!(result, expected);
 }

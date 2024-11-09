@@ -121,22 +121,30 @@ impl ClientHandler {
                                 let parts: Vec<&str> = error.split_whitespace().collect();
                                 let timeout = parts[1].parse::<u64>().unwrap();
                                 
-                                let elapsed = start_time.elapsed().as_millis() as u64;
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: XREAD - timeout: {}, elapsed: {}ms", timeout, elapsed);
-                                
-                                if elapsed >= timeout {
+                                // For timeout=0, keep retrying indefinitely
+                                if timeout == 0 {
                                     #[cfg(debug_assertions)]
-                                    println!("DEBUG: XREAD timeout expired, sending null string");
-                                    if !master {
-                                        let _ = client.write(b"$-1\r\n"); // Return null bulk string when timeout
-                                    }
-                                    should_retry = false;
-                                } else {
-                                    #[cfg(debug_assertions)]
-                                    println!("DEBUG: XREAD continuing to wait for data");
+                                    println!("DEBUG: XREAD with timeout 0, continuing to wait for data");
                                     thread::sleep(Duration::from_millis(50));
                                     should_retry = true;
+                                } else {
+                                    let elapsed = start_time.elapsed().as_millis() as u64;
+                                    #[cfg(debug_assertions)]
+                                    println!("DEBUG: XREAD - timeout: {}, elapsed: {}ms", timeout, elapsed);
+                                    
+                                    if elapsed >= timeout {
+                                        #[cfg(debug_assertions)]
+                                        println!("DEBUG: XREAD timeout expired, sending null string");
+                                        if !master {
+                                            let _ = client.write(b"$-1\r\n"); // Return null bulk string when timeout
+                                        }
+                                        should_retry = false;
+                                    } else {
+                                        #[cfg(debug_assertions)]
+                                        println!("DEBUG: XREAD continuing to wait for data");
+                                        thread::sleep(Duration::from_millis(50));
+                                        should_retry = true;
+                                    }
                                 }
                             },
                             Err(error) => {

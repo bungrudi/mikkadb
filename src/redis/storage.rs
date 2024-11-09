@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::borrow::Cow;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct StreamEntry {
     pub id: String,
     pub fields: HashMap<String, String>,
@@ -243,7 +243,10 @@ impl Storage {
                         Self::compare_stream_ids(&entry.id, start) >= std::cmp::Ordering::Equal &&
                         Self::compare_stream_ids(&entry.id, end) <= std::cmp::Ordering::Equal
                     })
-                    .cloned()
+                    .map(|entry| StreamEntry {
+                        id: entry.id.clone(),
+                        fields: entry.fields.clone(),
+                    })
                     .collect();
                 Ok(filtered_entries)
             },
@@ -277,7 +280,10 @@ impl Storage {
                                 println!("DEBUG: XREAD comparing entry {} with last_id {}: {:?}", entry.id, id, comparison);
                                 comparison > std::cmp::Ordering::Equal
                             })
-                            .cloned()
+                            .map(|entry| StreamEntry {
+                                id: entry.id.clone(),
+                                fields: entry.fields.clone(),
+                            })
                             .collect::<Vec<StreamEntry>>()
                     },
                     Some(_) => return Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
@@ -309,12 +315,12 @@ impl Storage {
         }
 
         match block {
-            Some(timeout) if timeout > 0 => {
+            Some(timeout) => {
                 #[cfg(debug_assertions)]
                 println!("DEBUG: XREAD requesting retry with timeout: {}", timeout);
                 Err(format!("{} {}", crate::redis::XREAD_RETRY_PREFIX, timeout).into())
             }
-            _ => {
+            None => {
                 #[cfg(debug_assertions)]
                 println!("DEBUG: XREAD returning empty result (non-blocking)");
                 Ok(vec![])
