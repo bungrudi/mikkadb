@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::borrow::Cow;
@@ -83,16 +83,22 @@ impl Storage {
     }
 
     fn compare_stream_ids(id1: &str, id2: &str) -> std::cmp::Ordering {
+        println!("DEBUG: Comparing stream IDs: {} and {}", id1, id2);
+        
         if id1 == "-" {
+            println!("DEBUG: First ID is '-', returning Less");
             return std::cmp::Ordering::Less;
         }
         if id2 == "-" {
+            println!("DEBUG: Second ID is '-', returning Greater");
             return std::cmp::Ordering::Greater;
         }
         if id1 == "+" {
+            println!("DEBUG: First ID is '+', returning Greater");
             return std::cmp::Ordering::Greater;
         }
         if id2 == "+" {
+            println!("DEBUG: Second ID is '+', returning Less");
             return std::cmp::Ordering::Less;
         }
 
@@ -101,13 +107,19 @@ impl Storage {
 
         let ms1 = parts1[0].parse::<u64>().unwrap();
         let ms2 = parts2[0].parse::<u64>().unwrap();
+        println!("DEBUG: Comparing timestamps: {} and {}", ms1, ms2);
 
         if ms1 != ms2 {
-            ms1.cmp(&ms2)
+            let result = ms1.cmp(&ms2);
+            println!("DEBUG: Timestamps differ, returning {:?}", result);
+            result
         } else {
             let seq1 = parts1[1].parse::<u64>().unwrap();
             let seq2 = parts2[1].parse::<u64>().unwrap();
-            seq1.cmp(&seq2)
+            println!("DEBUG: Comparing sequences: {} and {}", seq1, seq2);
+            let result = seq1.cmp(&seq2);
+            println!("DEBUG: Sequences comparison result: {:?}", result);
+            result
         }
     }
 
@@ -137,7 +149,9 @@ impl Storage {
     }
 
     pub fn xadd(&self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, Cow<'static, str>> {
+        println!("DEBUG: XADD acquiring lock...");
         let mut data = self.data.lock().unwrap();
+        println!("DEBUG: XADD acquired lock");
         
         let (time_part, sequence) = if id == "*" {
             (Self::get_current_time_ms(), None)
@@ -151,24 +165,28 @@ impl Storage {
         if id != "*" && !id.ends_with("-*") {
             let new_id = format!("{}-{}", time_part, sequence.unwrap_or(0));
             if Self::compare_stream_ids(&new_id, "0-0") != std::cmp::Ordering::Greater {
+                println!("DEBUG: XADD releasing lock (error case)");
                 return Err("ERR The ID specified in XADD must be greater than 0-0".into());
             }
         }
 
-        match data.entry(key.to_string()) {
+        let result = match data.entry(key.to_string()) {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 match occupied.get_mut() {
                     ValueWrapper::Stream { entries, metadata } => {
                         let new_sequence = sequence.unwrap_or_else(|| Self::get_next_sequence(metadata, time_part));
                         let new_id = format!("{}-{}", time_part, new_sequence);
                         
-                        self.validate_new_id(entries, &new_id)?;
+                        if let Err(e) = self.validate_new_id(entries, &new_id) {
+                            return Err(e);
+                        }
 
                         let entry = StreamEntry {
                             id: new_id.clone(),
                             fields,
                         };
                         entries.push(entry);
+                        println!("DEBUG: XADD added new entry with id: {}", new_id);
                         Ok(new_id)
                     },
                     _ => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
@@ -187,9 +205,13 @@ impl Storage {
                     entries: vec![entry],
                     metadata,
                 });
+                println!("DEBUG: XADD created new stream with id: {}", new_id);
                 Ok(new_id)
             },
-        }
+        };
+
+        println!("DEBUG: XADD releasing lock");
+        result
     }
 
     pub fn xrange(&self, key: &str, start: &str, end: &str) -> Result<Vec<StreamEntry>, Cow<'static, str>> {
@@ -211,36 +233,62 @@ impl Storage {
         }
     }
 
-    pub fn xread(&self, keys: &[&str], ids: &[&str]) -> Result<Vec<(String, Vec<StreamEntry>)>, Cow<'static, str>> {
-        let data = self.data.lock().unwrap();
+    pub fn xread(&self, keys: &[&str], ids: &[&str], block: Option<u64>) -> Result<Vec<(String, Vec<StreamEntry>)>, Cow<'static, str>> {
+        println!("DEBUG: XREAD called with keys: {:?}, ids: {:?}, block: {:?}", keys, ids, block);
         let mut result = Vec::new();
-        
+
+        // Check for new entries
         for (&key, &id) in keys.iter().zip(ids.iter()) {
-            match data.get(key) {
-                Some(ValueWrapper::Stream { entries, .. }) => {
-                    let filtered_entries: Vec<StreamEntry> = entries.iter()
-                        .filter(|entry| {
-                            Self::compare_stream_ids(&entry.id, id) == std::cmp::Ordering::Greater
-                        })
-                        .map(|entry| {
-                            let ordered_fields: BTreeMap<_, _> = entry.fields.iter()
-                                .map(|(k, v)| (k.as_str(), v.as_str()))
-                                .collect();
-                            StreamEntry {
-                                id: entry.id.clone(),
-                                fields: ordered_fields.into_iter()
-                                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                                    .collect(),
-                            }
-                        })
-                        .collect();
-                    result.push((key.to_string(), filtered_entries));
-                },
-                Some(_) => return Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
-                None => result.push((key.to_string(), vec![])),
+            println!("DEBUG: XREAD acquiring lock for key: {}", key);
+            let entries = {
+                let data = self.data.lock().unwrap();
+                println!("DEBUG: XREAD acquired lock for key: {}", key);
+                
+                let entries = match data.get(key) {
+                    Some(ValueWrapper::Stream { entries, .. }) => {
+                        println!("DEBUG: XREAD found stream for key: {} with {} entries", key, entries.len());
+                        entries.iter()
+                            .filter(|entry| {
+                                let comparison = Self::compare_stream_ids(&entry.id, id);
+                                println!("DEBUG: XREAD comparing entry {} with last_id {}: {:?}", entry.id, id, comparison);
+                                comparison > std::cmp::Ordering::Equal
+                            })
+                            .cloned()
+                            .collect::<Vec<StreamEntry>>()
+                    },
+                    Some(_) => return Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
+                    None => {
+                        println!("DEBUG: XREAD no stream found for key: {}", key);
+                        Vec::new()
+                    },
+                };
+                println!("DEBUG: XREAD releasing lock for key: {}", key);
+                entries
+            };
+
+            if !entries.is_empty() {
+                println!("DEBUG: XREAD found {} new entries for key: {}", entries.len(), key);
+                result.push((key.to_string(), entries));
+            } else {
+                println!("DEBUG: XREAD found no new entries for key: {}", key);
             }
         }
-        Ok(result)
+
+        if !result.is_empty() {
+            println!("DEBUG: XREAD returning results immediately");
+            return Ok(result);
+        }
+
+        match block {
+            Some(timeout) if timeout > 0 => {
+                println!("DEBUG: XREAD requesting retry with timeout: {}", timeout);
+                Err(format!("{} {}", crate::redis::XREAD_RETRY_PREFIX, timeout).into())
+            }
+            _ => {
+                println!("DEBUG: XREAD returning empty result (non-blocking)");
+                Ok(vec![])
+            }
+        }
     }
 
     pub fn keys(&self, pattern: &str) -> Vec<String> {

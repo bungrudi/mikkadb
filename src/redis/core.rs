@@ -148,18 +148,34 @@ impl Redis {
                                 response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
                             }
                         }
-                        Ok(response)
+                        if response.contains("*") {
+                            Ok(response)
+                        } else {
+                            Ok("$-1\r\n".to_string()) // Return null bulk string for empty results
+                        }
                     },
                     Err(e) => Err(format!("-{}\r\n", e)),
                 }
             },
-            RedisCommand::XRead { keys, ids } => {
-                match self.storage.xread(keys, ids) {
+            RedisCommand::XRead { keys, ids, block } => {
+                match self.storage.xread(keys, ids, *block) {
                     Ok(stream_entries) => {
+                        if stream_entries.is_empty() {
+                            return Ok("*0\r\n".to_string());
+                        }
+
                         // Format as array with number of streams
-                        let mut response = format!("*{}\r\n", stream_entries.len());
+                        let non_empty_entries: Vec<_> = stream_entries.into_iter()
+                            .filter(|(_, entries)| !entries.is_empty())
+                            .collect();
+
+                        if non_empty_entries.is_empty() {
+                            return Ok("*0\r\n".to_string());
+                        }
+
+                        let mut response = format!("*{}\r\n", non_empty_entries.len());
                         
-                        for (stream_key, entries) in stream_entries {
+                        for (stream_key, entries) in non_empty_entries {
                             // Add stream key and entries array
                             response.push_str("*2\r\n"); // Stream array has 2 elements: key and entries array
                             response.push_str(&format!("${}\r\n{}\r\n", stream_key.len(), stream_key)); // Stream key

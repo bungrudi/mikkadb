@@ -12,6 +12,10 @@ pub use commands::RedisCommand;
 pub use core::Redis;
 pub use utils::*;
 
+// Error responses that signal retry behavior
+pub const WAIT_RETRY_PREFIX: &str = "WAIT_RETRY";
+pub const XREAD_RETRY_PREFIX: &str = "XREAD_RETRY"; 
+
 use std::net::TcpStream;
 use std::thread;
 use std::sync::{Arc, Mutex};

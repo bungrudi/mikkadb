@@ -18,7 +18,7 @@ pub enum RedisCommand<'a> {
     Type { key: &'a str },
     XAdd { key: &'a str, id: &'a str, fields: HashMap<String, String>, original_resp: String },
     XRange { key: &'a str, start: &'a str, end: &'a str },
-    XRead { keys: Vec<&'a str>, ids: Vec<&'a str> },
+    XRead { keys: Vec<&'a str>, ids: Vec<&'a str>, block: Option<u64> },
 }
 
 impl RedisCommand<'_> {
@@ -208,23 +208,34 @@ impl RedisCommand<'_> {
                 }
             },
             command if command.eq_ignore_ascii_case(Self::XREAD) => {
-                // XREAD streams key1 key2 id1 id2
-                if params[0] != "streams" {
+                let mut all_params: Vec<&str> = params.iter().copied().filter(|&p| !p.is_empty()).collect();
+                let mut block = None;
+
+                // Check for BLOCK option
+                if all_params.len() >= 2 && all_params[0].eq_ignore_ascii_case("BLOCK") {
+                    if let Ok(timeout) = all_params[1].parse::<u64>() {
+                        block = Some(timeout);
+                        all_params.drain(0..2); // Remove BLOCK and timeout
+                    }
+                }
+
+                // Check for STREAMS keyword
+                if all_params.is_empty() || !all_params[0].eq_ignore_ascii_case("STREAMS") {
+                    return Some(RedisCommand::Error { message: "ERR wrong number of arguments for 'xread' command".to_string() });
+                }
+                all_params.remove(0); // Remove STREAMS
+
+                if all_params.is_empty() {
                     return Some(RedisCommand::Error { message: "ERR wrong number of arguments for 'xread' command".to_string() });
                 }
 
-                // Parse all non-empty parameters
-                let all_params: Vec<&str> = params.iter().copied().filter(|&p| !p.is_empty()).collect();
-                
-                if all_params.len() <= 1 {
+                let midpoint = all_params.len() / 2;
+                if midpoint == 0 || all_params.len() % 2 != 0 {
                     return Some(RedisCommand::Error { message: "ERR wrong number of arguments for 'xread' command".to_string() });
                 }
 
-                // Find midpoint (where IDs start)
-                let midpoint = (all_params.len() - 1) / 2 + 1;
-                
                 // Split into keys and ids
-                let keys = all_params[1..midpoint].to_vec();
+                let keys = all_params[..midpoint].to_vec();
                 let ids = all_params[midpoint..].to_vec();
 
                 // Validate all IDs
@@ -234,11 +245,7 @@ impl RedisCommand<'_> {
                     }
                 }
 
-                if keys.is_empty() || ids.is_empty() || keys.len() != ids.len() {
-                    Some(RedisCommand::Error { message: "ERR wrong number of arguments for 'xread' command".to_string() })
-                } else {
-                    Some(RedisCommand::XRead { keys, ids })
-                }
+                Some(RedisCommand::XRead { keys, ids, block })
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
         }
