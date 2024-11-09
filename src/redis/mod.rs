@@ -47,13 +47,16 @@ pub fn init_replica(config: &mut RedisConfig, redis: Arc<Mutex<Redis>>) {
 
                     let mut buffer = [0; 512];
                     for (command, validate) in commands {
+                        #[cfg(debug_assertions)]
                         println!("sending command: {}", command);
                         if send_command(&mut stream, command).is_err() {
                             eprintln!("error executing command: {}", command);
                             std::process::exit(1);
                         }
+                        #[cfg(debug_assertions)]
                         println!("reading response..");
                         let response = read_response(&mut stream, &mut buffer).unwrap();
+                        #[cfg(debug_assertions)]
                         println!("response: {}", response);
                         if !validate(&response, &mut stream) {
                             eprintln!("unexpected response: {}", response);
@@ -65,6 +68,7 @@ pub fn init_replica(config: &mut RedisConfig, redis: Arc<Mutex<Redis>>) {
                         eprintln!("error executing PSYNC command");
                         std::process::exit(1);
                     }
+                    #[cfg(debug_assertions)]
                     println!("psync sent");
                     // Read fullresync and RDB file, and no more.
                     // leave the rest to the event loop.
@@ -73,6 +77,7 @@ pub fn init_replica(config: &mut RedisConfig, redis: Arc<Mutex<Redis>>) {
 
                     let mut client_handler = crate::client_handler::ClientHandler::new_master(stream, redis.clone());
                     client_handler.start();
+                    #[cfg(debug_assertions)]
                     println!("replicaof host and port is valid");
                 }
                 Err(e) => {

@@ -32,12 +32,15 @@ pub fn read_until_end_of_rdb(stream: &mut TcpStream, buffer: &mut [u8; 512]) {
     let mut count = 0;
     'LOOP_PEEK: while let Ok(peek_size) = stream.peek(buffer) {
         thread::sleep(Duration::from_millis(200));
+        #[cfg(debug_assertions)]
         println!("peek_size: {}", peek_size);
         
         // Zero-copy string conversion for debug output
+        #[cfg(debug_assertions)]
         println!("peeked: {}", String::from_utf8_lossy(&buffer[0..peek_size]));
         
         if count > 10 {
+            #[cfg(debug_assertions)]
             println!("count exceeded");
             break;
         }
@@ -61,12 +64,14 @@ pub fn read_until_end_of_rdb(stream: &mut TcpStream, buffer: &mut [u8; 512]) {
                     j += 1;
                 }
                 if found {
+                    #[cfg(debug_assertions)]
                     println!("found RDB length: {}", length);
                     
                     // Pre-allocate buffer with exact size needed
                     let mut rdb_buffer = vec![0; i + length + 5];
                     if let Ok(_) = stream.read_exact(&mut rdb_buffer) {
                         // Zero-copy string conversion for debug output
+                        #[cfg(debug_assertions)]
                         println!("rdb_file: {}", String::from_utf8_lossy(&rdb_buffer));
                     }
                     break 'LOOP_PEEK;

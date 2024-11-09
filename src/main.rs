@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 * This is an implementation of a key value store that immitates Redis.
 */
 fn main() {
+    #[cfg(debug_assertions)]
     println!("Logs from your program will appear here!");
     let args: Vec<String> = std::env::args().collect();
     let mut config = RedisConfig::new();
@@ -91,12 +92,14 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut _stream) => {
+                #[cfg(debug_assertions)]
                 println!("accepted new connection");
                 let mut client_handler = client_handler::ClientHandler::new(_stream, redis.clone());
                 client_handler.start();
             }
-            Err(e) => {
-                println!("error: {}", e);
+            Err(_e) => {
+                #[cfg(debug_assertions)]
+                println!("error: {}", _e);
             }
         }
     }

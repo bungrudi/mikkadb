@@ -41,12 +41,14 @@ impl Redis {
     }
 
     pub fn set(&mut self, key: &str, value: &str, ttl: Option<usize>) {
+        #[cfg(debug_assertions)]
         println!("DEBUG: Setting key '{}' with value '{}' and TTL {:?}", key, value, ttl);
         self.storage.set(key, value, ttl);
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
         let result = self.storage.get(key);
+        #[cfg(debug_assertions)]
         println!("DEBUG: Getting key '{}'. Result: {:?}", key, result);
         result
     }
@@ -161,7 +163,7 @@ impl Redis {
                 match self.storage.xread(keys, ids, *block) {
                     Ok(stream_entries) => {
                         if stream_entries.is_empty() {
-                            return Ok("*0\r\n".to_string());
+                            return Ok("$-1\r\n".to_string()); // Return null bulk string when no entries
                         }
 
                         // Format as array with number of streams
@@ -170,7 +172,7 @@ impl Redis {
                             .collect();
 
                         if non_empty_entries.is_empty() {
-                            return Ok("*0\r\n".to_string());
+                            return Ok("$-1\r\n".to_string()); // Return null bulk string when no entries
                         }
 
                         let mut response = format!("*{}\r\n", non_empty_entries.len());
@@ -225,12 +227,13 @@ impl Redis {
             RedisCommand::Replconf { subcommand, params } => {
                 match subcommand.to_lowercase().as_str() {
                     "listening-port" => {
-                        if let Some(port) = params.get(0) {
+                        if let Some(_port) = params.get(0) {
                             if let Some(client) = client {
                                 let peer = client.peer_addr().unwrap();
                                 let replica_host = peer.ip().to_string();
                                 let real_port = peer.port();
-                                println!("replica_host: {} replica_port: {}", replica_host, port);
+                                #[cfg(debug_assertions)]
+                                println!("replica_host: {} replica_port: {}", replica_host, _port);
 
                                 self.replication.add_replica(replica_host, real_port.to_string(), client.try_clone().unwrap());
                                 return Ok("+OK\r\n".to_string());
@@ -294,19 +297,22 @@ impl Redis {
                 }
             },
             RedisCommand::Wait { numreplicas, timeout, elapsed } => {
+                #[cfg(debug_assertions)]
                 println!("executing WAIT command");
-                let current_offset = self.replication.get_replication_offset();
+                let _current_offset = self.replication.get_replication_offset();
                 let up_to_date_replicas = self.replication.count_up_to_date_replicas();
 
+                #[cfg(debug_assertions)]
                 println!("up_to_date: {} target ack: {} current offset {}", 
                     up_to_date_replicas, 
                     numreplicas, 
-                    current_offset);
+                    _current_offset);
 
                 if up_to_date_replicas >= *numreplicas as usize {
                     Ok(format!(":{}\r\n", up_to_date_replicas))
                 } else {
                     if *elapsed >= *timeout {
+                        #[cfg(debug_assertions)]
                         println!("timeout elapsed returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
                         Ok(format!(":{}\r\n", up_to_date_replicas))
                     } else {

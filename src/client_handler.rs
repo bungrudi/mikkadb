@@ -37,9 +37,10 @@ impl ClientHandler {
         let master = self.master;
         thread::spawn(move || {
             let mut client = client.lock().unwrap();
-            let addr = client.peer_addr().unwrap();
+            let _addr = client.peer_addr().unwrap();
             'LOOP_READ_NETWORK: while let Ok(bytes_read) = client.read(&mut buffer) {
                 // TODO disconnection hook.. this is handy when we want to do cleanup i.e. in a replica setup
+                #[cfg(debug_assertions)]
                 println!("read {} bytes", bytes_read);
                 if bytes_read == 0 {
                     break 'LOOP_READ_NETWORK;
@@ -56,6 +57,7 @@ impl ClientHandler {
                     if matches!(command, RedisCommand::None) {
                         break 'LOOP_REDIS_CMD;
                     }
+                    #[cfg(debug_assertions)]
                     println!("DEBUG: Starting to process command: {:?}", command);
                     // TODO use the same buffer to write the response.
                     // actually is there benefit in re-using the buffer?
@@ -67,6 +69,7 @@ impl ClientHandler {
 
                     // Store the original XREAD command if this is an XREAD
                     if let RedisCommand::XRead { keys, ids, block } = &command {
+                        #[cfg(debug_assertions)]
                         println!("DEBUG: Storing original XREAD command - keys: {:?}, ids: {:?}, block: {:?}", keys, ids, block);
                         original_xread_command = Some((keys.clone(), ids.clone(), *block));
                     }
@@ -74,6 +77,7 @@ impl ClientHandler {
                     let mut retry_count = 0;
 
                     while should_retry {
+                        #[cfg(debug_assertions)]
                         println!("DEBUG: Executing command (retry #{}) - Current command: {:?}", retry_count, command);
                         let result = {
                             // Scope the Redis lock to ensure it's released after the execute_command
@@ -82,17 +86,21 @@ impl ClientHandler {
 
                         match result {
                             Ok(response) => {
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: Command successful, response: {}", response);
                                 if !response.is_empty() && !master {
+                                    #[cfg(debug_assertions)]
                                     println!("DEBUG: Writing response to client");
                                     let _ = client.write(response.as_bytes());
                                 }
                                 if master {
+                                    #[cfg(debug_assertions)]
                                     println!("DEBUG: Master mode, not writing response");
                                 }
                                 should_retry = false;
                             },
                             Err(error) if error.starts_with(crate::redis::WAIT_RETRY_PREFIX) => {
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: WAIT retry requested: {}", error);
                                 let parts: Vec<&str> = error.split_whitespace().collect();
                                 
@@ -101,32 +109,38 @@ impl ClientHandler {
                                 wait_params = Some((numreplicas, timeout));
                                 should_retry = true;
 
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: WAIT retry params - numreplicas: {}, timeout: {}", numreplicas, timeout);
                                 
                                 // Sleep without holding the lock
                                 thread::sleep(Duration::from_millis(300));
                             },
                             Err(error) if error.starts_with(&format!("-{}", crate::redis::XREAD_RETRY_PREFIX)) => {
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: XREAD retry requested: {}", error);
                                 let parts: Vec<&str> = error.split_whitespace().collect();
                                 let timeout = parts[1].parse::<u64>().unwrap();
                                 
                                 let elapsed = start_time.elapsed().as_millis() as u64;
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: XREAD - timeout: {}, elapsed: {}ms", timeout, elapsed);
                                 
                                 if elapsed >= timeout {
+                                    #[cfg(debug_assertions)]
                                     println!("DEBUG: XREAD timeout expired, sending null string");
                                     if !master {
-                                        let _ = client.write(b"*0\r\n");
+                                        let _ = client.write(b"$-1\r\n"); // Return null bulk string when timeout
                                     }
                                     should_retry = false;
                                 } else {
+                                    #[cfg(debug_assertions)]
                                     println!("DEBUG: XREAD continuing to wait for data");
                                     thread::sleep(Duration::from_millis(50));
                                     should_retry = true;
                                 }
                             },
                             Err(error) => {
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: Command error: {}", error);
                                 if !master {
                                     let _ = client.write(error.as_bytes());
@@ -138,15 +152,18 @@ impl ClientHandler {
                         // Handle retries for both WAIT and XREAD
                         if should_retry {
                             retry_count += 1;
+                            #[cfg(debug_assertions)]
                             println!("DEBUG: Preparing for retry #{}", retry_count);
                             
                             // Handle WAIT command retry
                             if let Some((numreplicas, original_timeout)) = wait_params {
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: Preparing WAIT command retry");
                                 if retry_count == 1 {
                                     // Scope the Redis lock
                                     {
                                         let redis = redis.lock().unwrap();
+                                        #[cfg(debug_assertions)]
                                         println!("DEBUG: Setting GETACK flag");
                                         redis.replication.set_enqueue_getack(true);
                                     }
@@ -154,12 +171,15 @@ impl ClientHandler {
 
                                 let elapsed = start_time.elapsed().as_millis() as i64;
                                 command = RedisCommand::Wait { numreplicas, timeout: original_timeout, elapsed: elapsed };
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: Updated WAIT command with elapsed time: {}", elapsed);
                             }
                             
                             // Re-create XREAD command for retry
                             if let Some((keys, ids, block)) = &original_xread_command {
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: Re-creating XREAD command for retry");
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: Using keys: {:?}, ids: {:?}, block: {:?}", keys, ids, block);
                                 command = RedisCommand::XRead {
                                     keys: keys.clone(),
@@ -168,13 +188,16 @@ impl ClientHandler {
                                 };
                             }
                         } else {
+                            #[cfg(debug_assertions)]
                             println!("DEBUG: Command completed, no retry needed");
                         }
                     }
+                    #[cfg(debug_assertions)]
                     println!("DEBUG: Command processing complete");
                 }
             }
-            println!("DEBUG: Closing connection {}", addr);
+            #[cfg(debug_assertions)]
+            println!("DEBUG: Closing connection {}", _addr);
         });
     }
 }

@@ -45,6 +45,7 @@ impl Storage {
                 .as_millis() as u64
                 + ttl as u64
         });
+        #[cfg(debug_assertions)]
         println!("DEBUG: Setting key '{}' with value '{}' and expiration {:?}", key, value, expiration);
         data.insert(
             key.to_string(),
@@ -66,38 +67,46 @@ impl Storage {
                             .unwrap()
                             .as_millis() as u64;
                         if now > *expiration {
+                            #[cfg(debug_assertions)]
                             println!("DEBUG: Key '{}' has expired. Current time: {}, Expiration: {}", key, now, expiration);
                             data.remove(key);
                             return None;
                         }
                     }
+                    #[cfg(debug_assertions)]
                     println!("DEBUG: Retrieved key '{}' with value '{}'", key, value);
                     Some(value.clone())
                 },
                 ValueWrapper::Stream { .. } => None,
             }
         } else {
+            #[cfg(debug_assertions)]
             println!("DEBUG: Key '{}' not found", key);
             None
         }
     }
 
     fn compare_stream_ids(id1: &str, id2: &str) -> std::cmp::Ordering {
+        #[cfg(debug_assertions)]
         println!("DEBUG: Comparing stream IDs: {} and {}", id1, id2);
         
         if id1 == "-" {
+            #[cfg(debug_assertions)]
             println!("DEBUG: First ID is '-', returning Less");
             return std::cmp::Ordering::Less;
         }
         if id2 == "-" {
+            #[cfg(debug_assertions)]
             println!("DEBUG: Second ID is '-', returning Greater");
             return std::cmp::Ordering::Greater;
         }
         if id1 == "+" {
+            #[cfg(debug_assertions)]
             println!("DEBUG: First ID is '+', returning Greater");
             return std::cmp::Ordering::Greater;
         }
         if id2 == "+" {
+            #[cfg(debug_assertions)]
             println!("DEBUG: Second ID is '+', returning Less");
             return std::cmp::Ordering::Less;
         }
@@ -107,17 +116,21 @@ impl Storage {
 
         let ms1 = parts1[0].parse::<u64>().unwrap();
         let ms2 = parts2[0].parse::<u64>().unwrap();
+        #[cfg(debug_assertions)]
         println!("DEBUG: Comparing timestamps: {} and {}", ms1, ms2);
 
         if ms1 != ms2 {
             let result = ms1.cmp(&ms2);
+            #[cfg(debug_assertions)]
             println!("DEBUG: Timestamps differ, returning {:?}", result);
             result
         } else {
             let seq1 = parts1[1].parse::<u64>().unwrap();
             let seq2 = parts2[1].parse::<u64>().unwrap();
+            #[cfg(debug_assertions)]
             println!("DEBUG: Comparing sequences: {} and {}", seq1, seq2);
             let result = seq1.cmp(&seq2);
+            #[cfg(debug_assertions)]
             println!("DEBUG: Sequences comparison result: {:?}", result);
             result
         }
@@ -149,8 +162,10 @@ impl Storage {
     }
 
     pub fn xadd(&self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, Cow<'static, str>> {
+        #[cfg(debug_assertions)]
         println!("DEBUG: XADD acquiring lock...");
         let mut data = self.data.lock().unwrap();
+        #[cfg(debug_assertions)]
         println!("DEBUG: XADD acquired lock");
         
         let (time_part, sequence) = if id == "*" {
@@ -165,6 +180,7 @@ impl Storage {
         if id != "*" && !id.ends_with("-*") {
             let new_id = format!("{}-{}", time_part, sequence.unwrap_or(0));
             if Self::compare_stream_ids(&new_id, "0-0") != std::cmp::Ordering::Greater {
+                #[cfg(debug_assertions)]
                 println!("DEBUG: XADD releasing lock (error case)");
                 return Err("ERR The ID specified in XADD must be greater than 0-0".into());
             }
@@ -186,6 +202,7 @@ impl Storage {
                             fields,
                         };
                         entries.push(entry);
+                        #[cfg(debug_assertions)]
                         println!("DEBUG: XADD added new entry with id: {}", new_id);
                         Ok(new_id)
                     },
@@ -205,11 +222,13 @@ impl Storage {
                     entries: vec![entry],
                     metadata,
                 });
+                #[cfg(debug_assertions)]
                 println!("DEBUG: XADD created new stream with id: {}", new_id);
                 Ok(new_id)
             },
         };
 
+        #[cfg(debug_assertions)]
         println!("DEBUG: XADD releasing lock");
         result
     }
@@ -234,22 +253,27 @@ impl Storage {
     }
 
     pub fn xread(&self, keys: &[&str], ids: &[&str], block: Option<u64>) -> Result<Vec<(String, Vec<StreamEntry>)>, Cow<'static, str>> {
+        #[cfg(debug_assertions)]
         println!("DEBUG: XREAD called with keys: {:?}, ids: {:?}, block: {:?}", keys, ids, block);
         let mut result = Vec::new();
 
         // Check for new entries
         for (&key, &id) in keys.iter().zip(ids.iter()) {
+            #[cfg(debug_assertions)]
             println!("DEBUG: XREAD acquiring lock for key: {}", key);
             let entries = {
                 let data = self.data.lock().unwrap();
+                #[cfg(debug_assertions)]
                 println!("DEBUG: XREAD acquired lock for key: {}", key);
                 
                 let entries = match data.get(key) {
                     Some(ValueWrapper::Stream { entries, .. }) => {
+                        #[cfg(debug_assertions)]
                         println!("DEBUG: XREAD found stream for key: {} with {} entries", key, entries.len());
                         entries.iter()
                             .filter(|entry| {
                                 let comparison = Self::compare_stream_ids(&entry.id, id);
+                                #[cfg(debug_assertions)]
                                 println!("DEBUG: XREAD comparing entry {} with last_id {}: {:?}", entry.id, id, comparison);
                                 comparison > std::cmp::Ordering::Equal
                             })
@@ -258,33 +282,40 @@ impl Storage {
                     },
                     Some(_) => return Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
                     None => {
+                        #[cfg(debug_assertions)]
                         println!("DEBUG: XREAD no stream found for key: {}", key);
                         Vec::new()
                     },
                 };
+                #[cfg(debug_assertions)]
                 println!("DEBUG: XREAD releasing lock for key: {}", key);
                 entries
             };
 
             if !entries.is_empty() {
+                #[cfg(debug_assertions)]
                 println!("DEBUG: XREAD found {} new entries for key: {}", entries.len(), key);
                 result.push((key.to_string(), entries));
             } else {
+                #[cfg(debug_assertions)]
                 println!("DEBUG: XREAD found no new entries for key: {}", key);
             }
         }
 
         if !result.is_empty() {
+            #[cfg(debug_assertions)]
             println!("DEBUG: XREAD returning results immediately");
             return Ok(result);
         }
 
         match block {
             Some(timeout) if timeout > 0 => {
+                #[cfg(debug_assertions)]
                 println!("DEBUG: XREAD requesting retry with timeout: {}", timeout);
                 Err(format!("{} {}", crate::redis::XREAD_RETRY_PREFIX, timeout).into())
             }
             _ => {
+                #[cfg(debug_assertions)]
                 println!("DEBUG: XREAD returning empty result (non-blocking)");
                 Ok(vec![])
             }

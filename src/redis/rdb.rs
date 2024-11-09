@@ -6,8 +6,10 @@ pub struct RdbParser;
 
 impl RdbParser {
     pub fn parse(path: &Path) -> std::io::Result<Vec<(String, String, Option<u64>)>> {
+        #[cfg(debug_assertions)]
         println!("Attempting to open RDB file: {:?}", path);
         if !path.exists() {
+            #[cfg(debug_assertions)]
             println!("RDB file does not exist");
             return Ok(vec![]);
         }
@@ -17,9 +19,11 @@ impl RdbParser {
         let mut buffer = Vec::new();
         reader.read_to_end(&mut buffer)?;
 
+        #[cfg(debug_assertions)]
         println!("RDB file size: {} bytes", buffer.len());
 
         if buffer.len() < 9 || &buffer[0..5] != b"REDIS" {
+            #[cfg(debug_assertions)]
             println!("Invalid RDB file format");
             return Err(Error::new(ErrorKind::InvalidData, "Invalid RDB file format"));
         }
@@ -28,10 +32,12 @@ impl RdbParser {
         let mut result = Vec::new();
 
         while pos < buffer.len() {
+            #[cfg(debug_assertions)]
             println!("Parsing at position: {}", pos);
             match buffer[pos] {
                 0xFA => {
                     // Auxiliary field, skip it
+                    #[cfg(debug_assertions)]
                     println!("Skipping auxiliary field");
                     pos += 1;
                     let (_, new_pos) = Self::parse_string(&buffer, pos)?;
@@ -40,6 +46,7 @@ impl RdbParser {
                     pos = new_pos;
                 }
                 0xFE => {
+                    #[cfg(debug_assertions)]
                     println!("Database selector found");
                     // Database selector
                     pos += 1;
@@ -50,20 +57,24 @@ impl RdbParser {
                     pos += 3;
                 }
                 0xFF => {
+                    #[cfg(debug_assertions)]
                     println!("End of file marker found");
                     // End of file
                     break;
                 }
                 _ => {
+                    #[cfg(debug_assertions)]
                     println!("Parsing key-value pair");
                     // Key-value pair
                     match Self::parse_key_value(&buffer, pos) {
                         Ok((key, value, expiry, new_pos)) => {
+                            #[cfg(debug_assertions)]
                             println!("Parsed key: {} with expiry: {:?}", key, expiry);
                             result.push((key, value, expiry));
                             pos = new_pos;
                         }
                         Err(e) => {
+                            #[cfg(debug_assertions)]
                             println!("Error parsing key-value pair: {:?}", e);
                             return Err(e);
                         }
@@ -72,6 +83,7 @@ impl RdbParser {
             }
         }
 
+        #[cfg(debug_assertions)]
         println!("RDB file parsing completed");
         Ok(result)
     }

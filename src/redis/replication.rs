@@ -47,9 +47,11 @@ impl ReplicationManager {
 
     pub fn update_replica_offset(&self, replica_key: &str, offset: u64) {
         if let Some(replica) = self.replicas.lock().unwrap().get_mut(replica_key) {
+            #[cfg(debug_assertions)]
             println!("updating offset for replica: {} offset: {}", replica_key, offset);
             replica.offset.store(offset, Ordering::SeqCst);
         } else {
+            #[cfg(debug_assertions)]
             println!("Replica not found: {}", replica_key);
         }
     }
@@ -71,6 +73,7 @@ impl ReplicationManager {
     pub fn add_replica(&mut self, host: String, port: String, stream: Box<dyn TcpStreamTrait>) {
         let replica_key = format!("{}:{}", host, port);
         let replica = Replica::new(host, port, stream);
+        #[cfg(debug_assertions)]
         println!("adding replica: {}", replica_key);
         self.replicas.lock().unwrap().insert(replica_key, replica);
     }
@@ -96,12 +99,15 @@ impl ReplicationManager {
                         let mut replica_queue = redis.replication.replica_queue.lock().unwrap();
                         while let Some(replica_command) = replica_queue.pop_front() {
                             let replicas = redis.replication.replicas.lock().unwrap();
+                            #[cfg(debug_assertions)]
                             println!("replicas size: {}", replicas.values().len());
-                            for (key, replica) in &*replicas {
-                                println!("sending replica command: {} \r\n to {} {}:{}", replica_command, key, &replica.host, &replica.port);
+                            for (_key, replica) in &*replicas {
+                                #[cfg(debug_assertions)]
+                                println!("sending replica command: {} \r\n to {} {}:{}", replica_command, _key, &replica.host, &replica.port);
                                 let mut stream = replica.stream.lock().unwrap();
                                 let result = stream.write(replica_command.as_bytes());
                                 if result.is_err() {
+                                    #[cfg(debug_assertions)]
                                     eprintln!("error writing to replica: {}", result.err().unwrap());
                                 }
                             }
@@ -109,11 +115,13 @@ impl ReplicationManager {
                     }
                     // send "REPLCONF GETACK *" after each propagation
                     if redis.replication.should_send_getack() {
+                        #[cfg(debug_assertions)]
                         println!("sending GETACK to replicas");
                         for replica in redis.replication.get_replicas().values() {
                             let mut stream = replica.stream.lock().unwrap();
                             let result = stream.write(b"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n");
                             if result.is_err() {
+                                #[cfg(debug_assertions)]
                                 eprintln!("error writing to replica: {}", result.err().unwrap());
                             }
                         }

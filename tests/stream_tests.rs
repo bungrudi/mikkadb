@@ -393,7 +393,7 @@ fn test_xread_empty_stream() {
     );
 
     let result = redis.execute_command(&xread, None).unwrap();
-    assert_eq!(result, "*0\r\n");
+    assert_eq!(result, "$-1\r\n");
 }
 
 #[test]
