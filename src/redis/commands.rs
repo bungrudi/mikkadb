@@ -43,6 +43,11 @@ impl RedisCommand<'_> {
             return Ok((None, None));
         }
 
+        // Special case for XREAD
+        if !is_xadd && id == "$" {
+            return Ok((None, None));
+        }
+
         let parts: Vec<&str> = id.split('-').collect();
         if parts.len() != 2 {
             return Err("ERR Invalid stream ID format".to_string());

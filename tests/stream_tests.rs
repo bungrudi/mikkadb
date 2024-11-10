@@ -183,6 +183,45 @@ fn test_xrange_wrong_type() {
 }
 
 #[test]
+fn test_xread_dollar_id() {
+    let redis = test_redis();
+    
+    // Add initial entries
+    let mut fields1 = HashMap::new();
+    fields1.insert("sensor".to_string(), "1".to_string());
+    fields1.insert("value".to_string(), "100".to_string());
+    let _ = redis.storage.xadd("mystream", "1000-0", fields1);
+
+    let mut fields2 = HashMap::new();
+    fields2.insert("sensor".to_string(), "2".to_string());
+    fields2.insert("value".to_string(), "200".to_string());
+    let _ = redis.storage.xadd("mystream", "2000-0", fields2);
+
+    // First XREAD with $ should return no entries since we want only new ones
+    let result = redis.storage.xread(&["mystream"], &["$"], None).unwrap();
+    assert!(result.is_empty(), "Expected no entries for initial $ read");
+
+    // Add a new entry after the $ read
+    let mut fields3 = HashMap::new();
+    fields3.insert("sensor".to_string(), "3".to_string());
+    fields3.insert("value".to_string(), "300".to_string());
+    let _ = redis.storage.xadd("mystream", "3000-0", fields3);
+
+    // Second XREAD with $ should return only the new entry
+    let result = redis.storage.xread(&["mystream"], &["$"], None).unwrap();
+    assert_eq!(result.len(), 1, "Expected one stream in results");
+    
+    let (stream_name, entries) = &result[0];
+    assert_eq!(stream_name, "mystream");
+    assert_eq!(entries.len(), 1, "Expected one entry");
+    
+    let entry = &entries[0];
+    assert_eq!(entry.id, "3000-0");
+    assert_eq!(entry.fields.get("sensor").unwrap(), "3");
+    assert_eq!(entry.fields.get("value").unwrap(), "300");
+}
+
+#[test]
 fn test_xrange_partial_range() {
     let redis = test_redis();
     

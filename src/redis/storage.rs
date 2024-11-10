@@ -12,6 +12,7 @@ pub struct StreamEntry {
 #[derive(Default)]
 pub struct StreamMetadata {
     last_sequences: HashMap<u64, u64>, // Maps time_part to its last sequence
+    last_dollar_id: Option<String>,    // Stores the last ID seen when $ was used
 }
 
 pub enum ValueWrapper {
@@ -122,7 +123,7 @@ impl Storage {
         if ms1 != ms2 {
             let result = ms1.cmp(&ms2);
             #[cfg(debug_assertions)]
-            println!("DEBUG: Timestamps differ, returning {:?}", result);
+            println!("DEBUG: Timestamps differ returning {:?}", result);
             result
         } else {
             let seq1 = parts1[1].parse::<u64>().unwrap();
@@ -257,54 +258,49 @@ impl Storage {
 
     pub fn xread(&self, keys: &[&str], ids: &[&str], block: Option<u64>) -> Result<Vec<(String, Vec<StreamEntry>)>, Cow<'static, str>> {
         #[cfg(debug_assertions)]
-        println!("DEBUG: XREAD called with keys: {:?}, ids: {:?}, block: {:?}", keys, ids, block);
+        println!("DEBUG: XREAD called with keys: {:?} ids: {:?} block: {:?}", keys, ids, block);
         let mut result = Vec::new();
 
+        let mut data = self.data.lock().unwrap();
+        
         // Check for new entries
         for (&key, &id) in keys.iter().zip(ids.iter()) {
-            #[cfg(debug_assertions)]
-            println!("DEBUG: XREAD acquiring lock for key: {}", key);
-            let entries = {
-                let data = self.data.lock().unwrap();
-                #[cfg(debug_assertions)]
-                println!("DEBUG: XREAD acquired lock for key: {}", key);
-                
-                let entries = match data.get(key) {
-                    Some(ValueWrapper::Stream { entries, .. }) => {
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: XREAD found stream for key: {} with {} entries", key, entries.len());
-                        entries.iter()
-                            .filter(|entry| {
-                                let comparison = Self::compare_stream_ids(&entry.id, id);
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: XREAD comparing entry {} with last_id {}: {:?}", entry.id, id, comparison);
-                                comparison > std::cmp::Ordering::Equal
-                            })
-                            .map(|entry| StreamEntry {
-                                id: entry.id.clone(),
-                                fields: entry.fields.clone(),
-                            })
-                            .collect::<Vec<StreamEntry>>()
-                    },
-                    Some(_) => return Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
-                    None => {
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: XREAD no stream found for key: {}", key);
-                        Vec::new()
-                    },
-                };
-                #[cfg(debug_assertions)]
-                println!("DEBUG: XREAD releasing lock for key: {}", key);
-                entries
-            };
+            match data.get_mut(key) {
+                Some(ValueWrapper::Stream { entries, metadata }) => {
+                    #[cfg(debug_assertions)]
+                    println!("DEBUG: XREAD found stream for key: {} with {} entries", key, entries.len());
+                    
+                    let effective_id = if id == "$" {
+                        if metadata.last_dollar_id.is_none() {
+                            // First time seeing $, store the current last ID
+                            if let Some(last_entry) = entries.last() {
+                                metadata.last_dollar_id = Some(last_entry.id.clone());
+                            }
+                        }
+                        metadata.last_dollar_id.as_deref().unwrap_or("0-0")
+                    } else {
+                        id
+                    };
 
-            if !entries.is_empty() {
-                #[cfg(debug_assertions)]
-                println!("DEBUG: XREAD found {} new entries for key: {}", entries.len(), key);
-                result.push((key.to_string(), entries));
-            } else {
-                #[cfg(debug_assertions)]
-                println!("DEBUG: XREAD found no new entries for key: {}", key);
+                    let new_entries: Vec<StreamEntry> = entries.iter()
+                        .filter(|entry| {
+                            let comparison = Self::compare_stream_ids(&entry.id, effective_id);
+                            #[cfg(debug_assertions)]
+                            println!("DEBUG: XREAD comparing entry {} with effective_id {}: {:?}", entry.id, effective_id, comparison);
+                            comparison == std::cmp::Ordering::Greater
+                        })
+                        .map(|entry| StreamEntry {
+                            id: entry.id.clone(),
+                            fields: entry.fields.clone(),
+                        })
+                        .collect();
+
+                    if !new_entries.is_empty() {
+                        result.push((key.to_string(), new_entries));
+                    }
+                },
+                Some(_) => return Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
+                None => (),
             }
         }
 
