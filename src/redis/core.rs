@@ -100,6 +100,9 @@ impl Redis {
 
     pub fn execute_command(&mut self, command: &RedisCommand, client: Option<&mut Box<dyn TcpStreamTrait>>) -> Result<String, String> {
         match command {
+            RedisCommand::None => {
+                Err("-ERR Unknown command\r\n".to_string())
+            },
             RedisCommand::Ping => {
                 Ok("+PONG\r\n".to_string())
             },
@@ -120,6 +123,12 @@ impl Redis {
             RedisCommand::Type { key } => {
                 let type_str = self.storage.get_type(key).into_owned();
                 Ok(format!("+{}\r\n", type_str))
+            },
+            RedisCommand::Incr { key } => {
+                match self.storage.incr(key) {
+                    Ok(value) => Ok(format!(":{}\r\n", value)),
+                    Err(e) => Err(format!("-{}\r\n", e)),
+                }
             },
             RedisCommand::XAdd { key, id, fields, original_resp } => {
                 match self.xadd(key, id, fields.clone()) {
@@ -351,9 +360,6 @@ impl Redis {
             },
             RedisCommand::Error { message } => {
                 Err(format!("-{}\r\n", message))
-            },
-            RedisCommand::None => {
-                Err("-ERR Unknown command\r\n".to_string())
             },
         }
     }

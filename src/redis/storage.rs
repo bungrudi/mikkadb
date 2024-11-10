@@ -3,18 +3,19 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::borrow::Cow;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StreamEntry {
     pub id: String,
     pub fields: HashMap<String, String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]  // Added Clone
 pub struct StreamMetadata {
-    last_sequences: HashMap<u64, u64>, // Maps time_part to its last sequence
-    last_dollar_id: Option<String>,    // Stores the last ID seen when $ was used
+    pub last_sequences: HashMap<u64, u64>,  // This is already Clone
+    pub last_dollar_id: Option<String>,     // This is already Clone
 }
 
+#[derive(Clone)]
 pub enum ValueWrapper {
     String {
         value: String,
@@ -84,6 +85,39 @@ impl Storage {
             #[cfg(debug_assertions)]
             println!("DEBUG: Key '{}' not found", key);
             None
+        }
+    }
+
+    pub fn incr(&self, key: &str) -> Result<i64, String> {
+        let mut data = self.data.lock().unwrap();
+        
+        // First, check if the key exists and get its value
+        let wrapper = match data.get(key) {
+            Some(w) => w.clone(),  // Clone the wrapper to avoid borrow issues
+            None => return Err("ERR key does not exist".to_string()),
+        };
+
+        // Now process the value
+        match wrapper {
+            ValueWrapper::String { value, expiration } => {
+                match value.parse::<i64>() {
+                    Ok(num) => {
+                        let new_value = num + 1;
+                        data.insert(
+                            key.to_string(),
+                            ValueWrapper::String {
+                                value: new_value.to_string(),
+                                expiration,
+                            },
+                        );
+                        Ok(new_value)
+                    },
+                    Err(_) => Err("ERR value is not an integer or out of range".to_string()),
+                }
+            },
+            ValueWrapper::Stream { .. } => {
+                Err("ERR value is not an integer or out of range".to_string())
+            },
         }
     }
 

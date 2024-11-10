@@ -26,6 +26,49 @@ fn test_command<'a>(command: &'a str, params: &[&'a str], original_resp: &'a str
 }
 
 #[test]
+fn test_incr_numeric_value() {
+    let mut redis = test_redis();
+    
+    // Set initial value
+    redis.storage.set("counter", "41", None);
+
+    // Test INCR command
+    let incr = test_command("INCR", &["counter"], "");
+    let result = redis.execute_command(&incr, None).unwrap();
+    assert_eq!(result, ":42\r\n");
+
+    // Verify the value was actually incremented
+    let get = test_command("GET", &["counter"], "");
+    let result = redis.execute_command(&get, None).unwrap();
+    assert_eq!(result, "$2\r\n42\r\n");
+}
+
+#[test]
+fn test_incr_non_numeric() {
+    let mut redis = test_redis();
+    
+    // Set non-numeric value
+    redis.storage.set("key", "abc", None);
+
+    // Test INCR command
+    let incr = test_command("INCR", &["key"], "");
+    let result = redis.execute_command(&incr, None);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), "-ERR value is not an integer or out of range\r\n");
+}
+
+#[test]
+fn test_incr_non_existent() {
+    let mut redis = test_redis();
+    
+    // Test INCR command on non-existent key
+    let incr = test_command("INCR", &["nonexistent"], "");
+    let result = redis.execute_command(&incr, None);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), "-ERR key does not exist\r\n");
+}
+
+#[test]
 fn test_xadd_auto_sequence_zero_time() {
     let redis = test_redis();
     let mut fields = HashMap::new();

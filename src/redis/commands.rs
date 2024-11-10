@@ -19,6 +19,7 @@ pub enum RedisCommand<'a> {
     XAdd { key: &'a str, id: &'a str, fields: HashMap<String, String>, original_resp: String },
     XRange { key: &'a str, start: &'a str, end: &'a str },
     XRead { keys: Vec<&'a str>, ids: Vec<&'a str>, block: Option<u64> },
+    Incr { key: &'a str },
 }
 
 impl RedisCommand<'_> {
@@ -36,6 +37,7 @@ impl RedisCommand<'_> {
     const XADD: &'static str = "XADD";
     const XRANGE: &'static str = "XRANGE";
     const XREAD: &'static str = "XREAD";
+    const INCR: &'static str = "INCR";
 
     fn validate_entry_id(id: &str, is_xadd: bool) -> Result<(Option<u64>, Option<u64>), String> {
         // Special cases for XRANGE parameters
@@ -251,6 +253,14 @@ impl RedisCommand<'_> {
                 }
 
                 Some(RedisCommand::XRead { keys, ids, block })
+            },
+            command if command.eq_ignore_ascii_case(Self::INCR) => {
+                let key = params[0];
+                if key == "" {
+                    None
+                } else {
+                    Some(RedisCommand::Incr { key })
+                }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),
         }
