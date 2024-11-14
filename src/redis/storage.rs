@@ -91,13 +91,23 @@ impl Storage {
     pub fn incr(&self, key: &str) -> Result<i64, String> {
         let mut data = self.data.lock().unwrap();
         
-        // First, check if the key exists and get its value
+        // Get the current value or create new if doesn't exist
         let wrapper = match data.get(key) {
             Some(w) => w.clone(),  // Clone the wrapper to avoid borrow issues
-            None => return Err("ERR key does not exist".to_string()),
+            None => {
+                // Key doesn't exist - create it with value "1"
+                data.insert(
+                    key.to_string(), 
+                    ValueWrapper::String {
+                        value: "1".to_string(),
+                        expiration: None,
+                    }
+                );
+                return Ok(1);
+            }
         };
 
-        // Now process the value
+        // Process existing value
         match wrapper {
             ValueWrapper::String { value, expiration } => {
                 match value.parse::<i64>() {
