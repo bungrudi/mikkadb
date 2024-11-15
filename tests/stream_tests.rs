@@ -57,16 +57,6 @@ fn test_incr_non_numeric() {
     assert_eq!(result.unwrap_err(), "-ERR value is not an integer or out of range\r\n");
 }
 
-#[test]
-fn test_incr_non_existent() {
-    let mut redis = test_redis();
-    
-    // Test INCR command on non-existent key
-    let incr = test_command("INCR", &["nonexistent"], "");
-    let result = redis.execute_command(&incr, None);
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), "-ERR key does not exist\r\n");
-}
 
 #[test]
 fn test_xadd_auto_sequence_zero_time() {
@@ -582,6 +572,21 @@ fn test_xread_multiple_streams() {
                    $2\r\n97\r\n";
 
     assert_eq!(result, expected);
+}
+
+#[test]
+fn test_incr_nonexistent_key() {
+    let mut redis = test_redis();
+    
+    // Test INCR command on non-existent key
+    let incr = test_command("INCR", &["nonexistent"], "");
+    let result = redis.execute_command(&incr, None).unwrap();
+    assert_eq!(result, ":1\r\n");
+    
+    // Verify the key was created with value "1"
+    let get = test_command("GET", &["nonexistent"], "");
+    let result = redis.execute_command(&get, None).unwrap();
+    assert_eq!(result, "$1\r\n1\r\n");
 }
 
 #[test]

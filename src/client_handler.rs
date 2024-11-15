@@ -136,13 +136,24 @@ impl ClientHandler {
                                         #[cfg(debug_assertions)]
                                         println!("DEBUG: XREAD timeout expired, sending null string");
                                         if !master {
-                                            let _ = client.write(b"$-1\r\n"); // Return null bulk string when timeout
+                                            match client.write(b"$-1\r\n") {
+                                                Ok(_) => {
+                                                    if let Err(_e) = client.flush() {
+                                                        #[cfg(debug_assertions)]
+                                                        println!("DEBUG: Error flushing response: {:?}", _e);
+                                                    }
+                                                },
+                                                Err(_e) => {
+                                                    #[cfg(debug_assertions)]
+                                                    println!("DEBUG: Error writing response: {:?}", _e);
+                                                }
+                                            }
                                         }
-                                        should_retry = false;
+                                        break 'LOOP_REDIS_CMD; // Exit command processing after timeout
                                     } else {
                                         #[cfg(debug_assertions)]
                                         println!("DEBUG: XREAD continuing to wait for data");
-                                        thread::sleep(Duration::from_millis(50));
+                                        thread::sleep(Duration::from_millis(10));
                                         should_retry = true;
                                     }
                                 }
