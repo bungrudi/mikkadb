@@ -18,6 +18,7 @@ pub struct Redis {
     pub storage: Storage,
     pub bytes_processed: AtomicU64, // bytes processed by the server. important for a replica    
     pub replication: ReplicationManager,
+    in_transaction: bool,
 }
 
 impl Redis {
@@ -27,6 +28,7 @@ impl Redis {
             storage: Storage::new(),
             bytes_processed: AtomicU64::new(0),
             replication: ReplicationManager::new(),
+            in_transaction: false,
         }
     }
 
@@ -37,6 +39,7 @@ impl Redis {
             storage: Storage::new(),
             bytes_processed: AtomicU64::new(0),
             replication,
+            in_transaction: false,
         }
     }
 
@@ -104,10 +107,16 @@ impl Redis {
                 Err("-ERR Unknown command\r\n".to_string())
             },
             RedisCommand::Multi => {
+                self.in_transaction = true;
                 Ok("+OK\r\n".to_string())
             },
             RedisCommand::Exec => {
-                Err("-ERR EXEC without MULTI\r\n".to_string())
+                if self.in_transaction {
+                    self.in_transaction = false;
+                    Ok("*0\r\n".to_string())
+                } else {
+                    Err("-ERR EXEC without MULTI\r\n".to_string())
+                }
             },
             RedisCommand::Ping => {
                 Ok("+PONG\r\n".to_string())
