@@ -3,6 +3,7 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub enum RedisCommand<'a> {
     None,
+    Multi,
     Echo { data: &'a str },
     Ping,
     Set { key: &'a str, value: &'a str, ttl: Option<usize>, original_resp: String },
@@ -23,6 +24,7 @@ pub enum RedisCommand<'a> {
 }
 
 impl RedisCommand<'_> {
+    const MULTI : &'static str = "MULTI";
     const PING : &'static str = "PING";
     const ECHO : &'static str = "ECHO";
     const SET : &'static str = "SET";
@@ -83,6 +85,7 @@ impl RedisCommand<'_> {
     /// a Set command, the first time it will return true to indicate that it expects another.
     pub fn data<'a>(command: &'a str, params: [&'a str;5], original_resp: &'a str) -> Option<RedisCommand<'a>> {
         match command {
+            command if command.eq_ignore_ascii_case(Self::MULTI) => Some(RedisCommand::Multi),
             command if command.eq_ignore_ascii_case(Self::PING) => Some(RedisCommand::Ping),
             command if command.eq_ignore_ascii_case(Self::ECHO) => {
                 if params[0] == "" {

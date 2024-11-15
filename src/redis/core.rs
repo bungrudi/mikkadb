@@ -103,6 +103,9 @@ impl Redis {
             RedisCommand::None => {
                 Err("-ERR Unknown command\r\n".to_string())
             },
+            RedisCommand::Multi => {
+                Ok("+OK\r\n".to_string())
+            },
             RedisCommand::Ping => {
                 Ok("+PONG\r\n".to_string())
             },
