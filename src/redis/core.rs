@@ -106,6 +106,9 @@ impl Redis {
             RedisCommand::Multi => {
                 Ok("+OK\r\n".to_string())
             },
+            RedisCommand::Exec => {
+                Err("-ERR EXEC without MULTI\r\n".to_string())
+            },
             RedisCommand::Ping => {
                 Ok("+PONG\r\n".to_string())
             },
