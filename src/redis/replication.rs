@@ -83,7 +83,7 @@ impl ReplicationManager {
     }
 
     pub fn set_enqueue_getack(&self, value: bool) {
-        self.enqueue_getack.store(value, Ordering::SeqCst)
+        self.enqueue_getack.store(value, Ordering::SeqCst);
     }
 
     pub fn get_replicas(&self) -> std::sync::MutexGuard<HashMap<String, Replica>> {
@@ -113,7 +113,7 @@ impl ReplicationManager {
                             }
                         }
                     }
-                    // send "REPLCONF GETACK *" after each propagation
+                    // send "REPLCONF GETACK *" only when enqueue_getack is true
                     if redis.replication.should_send_getack() {
                         #[cfg(debug_assertions)]
                         println!("sending GETACK to replicas");

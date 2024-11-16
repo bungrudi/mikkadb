@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::collections::VecDeque;
 use crate::redis::{Redis, RedisCommand};
 use crate::resp::parse_resp;
 use crate::redis::replication::TcpStreamTrait;
@@ -10,7 +11,9 @@ use crate::redis::replication::TcpStreamTrait;
 pub struct ClientHandler {
     client: Arc<Mutex<Box<dyn TcpStreamTrait>>>,
     redis: Arc<Mutex<Redis>>,
-    master: bool // is this client a master?
+    master: bool, // is this client a master?
+    in_transaction: Arc<Mutex<bool>>,
+    queued_commands: Arc<Mutex<VecDeque<RedisCommand<'static>>>>,
 }
 
 impl ClientHandler {
@@ -18,7 +21,9 @@ impl ClientHandler {
         ClientHandler {
             client: Arc::new(Mutex::new(Box::new(client) as Box<dyn TcpStreamTrait>)),
             redis,
-            master: false
+            master: false,
+            in_transaction: Arc::new(Mutex::new(false)),
+            queued_commands: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -26,7 +31,87 @@ impl ClientHandler {
         ClientHandler {
             client: Arc::new(Mutex::new(Box::new(client) as Box<dyn TcpStreamTrait>)),
             redis,
-            master: true
+            master: true,
+            in_transaction: Arc::new(Mutex::new(false)),
+            queued_commands: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    pub fn execute_command(&mut self, command: &RedisCommand) -> String {
+        match command {
+            RedisCommand::Multi => {
+                let mut in_transaction = self.in_transaction.lock().unwrap();
+                if *in_transaction {
+                    "-ERR MULTI calls can not be nested\r\n".to_string()
+                } else {
+                    *in_transaction = true;
+                    "+OK\r\n".to_string()
+                }
+            },
+            RedisCommand::Exec => {
+                let mut in_transaction = self.in_transaction.lock().unwrap();
+                if !*in_transaction {
+                    "-ERR EXEC without MULTI\r\n".to_string()
+                } else {
+                    *in_transaction = false;
+                    let mut responses = Vec::new();
+                    let mut queued_commands = self.queued_commands.lock().unwrap();
+                    let mut client = self.client.lock().unwrap();
+                    
+                    // Execute all queued commands
+                    while let Some(cmd) = queued_commands.pop_front() {
+                        let result = self.redis.lock()
+                            .expect("failed to lock redis")
+                            .execute_command(&cmd, Some(&mut client));
+                        match result {
+                            Ok(response) => responses.push(response),
+                            Err(err) => responses.push(err),
+                        }
+                    }
+
+                    // Format response array
+                    let mut result = format!("*{}\r\n", responses.len());
+                    for response in responses {
+                        result.push_str(&response);
+                    }
+                    result
+                }
+            },
+            _ => {
+                let in_transaction = self.in_transaction.lock().unwrap();
+                if *in_transaction {
+                    // Queue command and return QUEUED
+                    let owned_command = match command {
+                        RedisCommand::Set { key, value, ttl, original_resp } => {
+                            RedisCommand::Set {
+                                key: Box::leak(key.to_string().into_boxed_str()),
+                                value: Box::leak(value.to_string().into_boxed_str()),
+                                ttl: *ttl,
+                                original_resp: original_resp.clone(),
+                            }
+                        },
+                        RedisCommand::Get { key } => {
+                            RedisCommand::Get {
+                                key: Box::leak(key.to_string().into_boxed_str()),
+                            }
+                        },
+                        RedisCommand::Incr { key } => {
+                            RedisCommand::Incr {
+                                key: Box::leak(key.to_string().into_boxed_str()),
+                            }
+                        },
+                        _ => return "-ERR Command not supported in transaction\r\n".to_string(),
+                    };
+                    self.queued_commands.lock().unwrap().push_back(owned_command);
+                    "+QUEUED\r\n".to_string()
+                } else {
+                    let mut client = self.client.lock().unwrap();
+                    match self.redis.lock().unwrap().execute_command(command, Some(&mut client)) {
+                        Ok(response) => response,
+                        Err(error) => error,
+                    }
+                }
+            }
         }
     }
 
@@ -35,17 +120,36 @@ impl ClientHandler {
         let client = Arc::clone(&self.client);
         let redis = Arc::clone(&self.redis);
         let master = self.master;
+        let in_transaction = Arc::clone(&self.in_transaction);
+        let queued_commands = Arc::clone(&self.queued_commands);
+
         thread::spawn(move || {
-            let mut client = client.lock().unwrap();
-            let _addr = client.peer_addr().unwrap();
-            'LOOP_READ_NETWORK: while let Ok(bytes_read) = client.read(&mut buffer) {
-                // TODO disconnection hook.. this is handy when we want to do cleanup i.e. in a replica setup
-                #[cfg(debug_assertions)]
-                println!("read {} bytes", bytes_read);
+            let mut handler = ClientHandler {
+                client: client.clone(),
+                redis: redis.clone(),
+                master,
+                in_transaction,
+                queued_commands,
+            };
+
+            let _addr = {
+                let client = client.lock().unwrap();
+                client.peer_addr().unwrap()
+            };
+
+            loop {
+                let bytes_read = {
+                    let mut client = client.lock().unwrap();
+                    match client.read(&mut buffer) {
+                        Ok(n) => n,
+                        Err(_) => break,
+                    }
+                };
+
                 if bytes_read == 0 {
-                    break 'LOOP_READ_NETWORK;
+                    break;
                 }
-                // TODO refactor this to use a buffer pool.
+
                 let commands = parse_resp(&buffer, bytes_read);
 
                 // increment bytes read..
@@ -53,170 +157,80 @@ impl ClientHandler {
                 redis.lock().expect("failed to lock redis").incr_bytes_processed(bytes_read as u64);
 
                 // iterate over commands
-                'LOOP_REDIS_CMD: for command in commands {
+                for command in commands {
                     if matches!(command, RedisCommand::None) {
-                        break 'LOOP_REDIS_CMD;
+                        break;
                     }
-                    #[cfg(debug_assertions)]
-                    println!("DEBUG: Starting to process command: {:?}", command);
-                    // TODO use the same buffer to write the response.
-                    // actually is there benefit in re-using the buffer?
-                    let mut should_retry = true;
-                    let mut wait_params = None;
-                    let start_time = Instant::now();
+
                     let mut command = command;
-                    let mut original_xread_command = None;
-
-                    // Store the original XREAD command if this is an XREAD
-                    if let RedisCommand::XRead { keys, ids, block } = &command {
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: Storing original XREAD command - keys: {:?}, ids: {:?}, block: {:?}", keys, ids, block);
-                        original_xread_command = Some((keys.clone(), ids.clone(), *block));
-                    }
-
-                    let mut retry_count = 0;
+                    let mut should_retry = true;
+                    let start_time = Instant::now();
 
                     while should_retry {
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: Executing command (retry #{}) - Current command: {:?}", retry_count, command);
-                        let result = {
-                            // Scope the Redis lock to ensure it's released after the execute_command
-                            redis.lock().expect("failed to lock redis").execute_command(&command, Some(&mut client))
-                        };
+                        let response = handler.execute_command(&command);
 
-                        match result {
-                            Ok(response) => {
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: Command successful, response: {}", response);
-                                if !response.is_empty() && !master {
-                                    #[cfg(debug_assertions)]
-                                    println!("DEBUG: Writing response to client");
-                                    let _ = client.write(response.as_bytes());
-                                }
-                                if master {
-                                    #[cfg(debug_assertions)]
-                                    println!("DEBUG: Master mode, not writing response");
-                                }
-                                should_retry = false;
-                            },
-                            Err(error) if error.starts_with(crate::redis::WAIT_RETRY_PREFIX) => {
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: WAIT retry requested: {}", error);
-                                let parts: Vec<&str> = error.split_whitespace().collect();
-                                
-                                let numreplicas = parts[1].parse::<i64>().unwrap();
-                                let timeout = parts[2].parse::<i64>().unwrap();
-                                wait_params = Some((numreplicas, timeout));
-                                should_retry = true;
-
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: WAIT retry params - numreplicas: {}, timeout: {}", numreplicas, timeout);
-                                
-                                // Sleep without holding the lock
-                                thread::sleep(Duration::from_millis(300));
-                            },
-                            Err(error) if error.starts_with(&format!("-{}", crate::redis::XREAD_RETRY_PREFIX)) => {
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: XREAD retry requested: {}", error);
-                                let parts: Vec<&str> = error.split_whitespace().collect();
-                                let timeout = parts[1].parse::<u64>().unwrap();
-                                
-                                // For timeout=0, keep retrying indefinitely
-                                if timeout == 0 {
-                                    #[cfg(debug_assertions)]
-                                    println!("DEBUG: XREAD with timeout 0, continuing to wait for data");
-                                    thread::sleep(Duration::from_millis(50));
-                                    should_retry = true;
-                                } else {
-                                    let elapsed = start_time.elapsed().as_millis() as u64;
-                                    #[cfg(debug_assertions)]
-                                    println!("DEBUG: XREAD - timeout: {}, elapsed: {}ms", timeout, elapsed);
-                                    
-                                    if elapsed >= timeout {
-                                        #[cfg(debug_assertions)]
-                                        println!("DEBUG: XREAD timeout expired, sending null string");
-                                        if !master {
-                                            match client.write(b"$-1\r\n") {
-                                                Ok(_) => {
-                                                    if let Err(_e) = client.flush() {
-                                                        #[cfg(debug_assertions)]
-                                                        println!("DEBUG: Error flushing response: {:?}", _e);
-                                                    }
-                                                },
-                                                Err(_e) => {
-                                                    #[cfg(debug_assertions)]
-                                                    println!("DEBUG: Error writing response: {:?}", _e);
-                                                }
-                                            }
-                                        }
-                                        break 'LOOP_REDIS_CMD; // Exit command processing after timeout
-                                    } else {
-                                        #[cfg(debug_assertions)]
-                                        println!("DEBUG: XREAD continuing to wait for data");
-                                        thread::sleep(Duration::from_millis(10));
-                                        should_retry = true;
-                                    }
-                                }
-                            },
-                            Err(error) => {
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: Command error: {}", error);
-                                if !master {
-                                    let _ = client.write(error.as_bytes());
-                                }
-                                should_retry = false;
-                            }
+                        // Handle empty response (content sent directly)
+                        if response.is_empty() {
+                            should_retry = false;
+                            continue;
                         }
 
-                        // Handle retries for both WAIT and XREAD
-                        if should_retry {
-                            retry_count += 1;
-                            #[cfg(debug_assertions)]
-                            println!("DEBUG: Preparing for retry #{}", retry_count);
-                            
-                            // Handle WAIT command retry
-                            if let Some((numreplicas, original_timeout)) = wait_params {
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: Preparing WAIT command retry");
-                                if retry_count == 1 {
-                                    // Scope the Redis lock
-                                    {
-                                        let redis = redis.lock().unwrap();
-                                        #[cfg(debug_assertions)]
-                                        println!("DEBUG: Setting GETACK flag");
-                                        redis.replication.set_enqueue_getack(true);
-                                    }
-                                }
+                        // Handle retry cases
+                        if response.starts_with("-XREAD_RETRY") {
+                            let parts: Vec<&str> = response.split_whitespace().collect();
+                            let timeout = parts[1].parse::<u64>().unwrap();
+                            let elapsed = start_time.elapsed().as_millis() as u64;
 
-                                let elapsed = start_time.elapsed().as_millis() as i64;
-                                command = RedisCommand::Wait { numreplicas, timeout: original_timeout, elapsed: elapsed };
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: Updated WAIT command with elapsed time: {}", elapsed);
+                            if timeout > 0 && elapsed >= timeout {
+                                if !master {
+                                    let mut client = client.lock().unwrap();
+                                    let _ = client.write(b"$-1\r\n");
+                                    let _ = client.flush();
+                                }
+                                should_retry = false;
+                            } else {
+                                should_retry = true;
+                                if let RedisCommand::XRead { keys, ids, block } = &command {
+                                    command = RedisCommand::XRead {
+                                        keys: keys.clone(),
+                                        ids: ids.clone(),
+                                        block: *block,
+                                    };
+                                }
                             }
-                            
-                            // Re-create XREAD command for retry
-                            if let Some((keys, ids, block)) = &original_xread_command {
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: Re-creating XREAD command for retry");
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: Using keys: {:?}, ids: {:?}, block: {:?}", keys, ids, block);
-                                command = RedisCommand::XRead {
-                                    keys: keys.clone(),
-                                    ids: ids.clone(),
-                                    block: *block,
-                                };
+                        } else if response == "WAIT_RETRY" {
+                            if let RedisCommand::Wait { numreplicas, timeout, .. } = command {
+                                let elapsed = start_time.elapsed().as_millis() as i64;
+                                if elapsed >= timeout {
+                                    let up_to_date_replicas = redis.lock().unwrap().replication.count_up_to_date_replicas();
+                                    let mut client = client.lock().unwrap();
+                                    let _ = client.write(format!(":{}\r\n", up_to_date_replicas).as_bytes());
+                                    should_retry = false;
+                                } else {
+                                    should_retry = true;
+                                    command = RedisCommand::Wait { numreplicas, timeout, elapsed };
+                                }
                             }
                         } else {
-                            #[cfg(debug_assertions)]
-                            println!("DEBUG: Command completed, no retry needed");
+                            // Handle normal response
+                            if !master && !response.is_empty() {
+                                let mut client = client.lock().unwrap();
+                                let _ = client.write(response.as_bytes());
+                            }
+                            should_retry = false;
+                        }
+
+                        // Sleep at the end of the loop if we need to retry
+                        if should_retry {
+                            if response.starts_with("-XREAD_RETRY") {
+                                thread::sleep(Duration::from_millis(50));
+                            } else if response == "WAIT_RETRY" {
+                                thread::sleep(Duration::from_millis(300));
+                            }
                         }
                     }
-                    #[cfg(debug_assertions)]
-                    println!("DEBUG: Command processing complete");
                 }
             }
-            #[cfg(debug_assertions)]
-            println!("DEBUG: Closing connection {}", _addr);
         });
     }
 }

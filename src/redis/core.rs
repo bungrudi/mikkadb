@@ -18,7 +18,6 @@ pub struct Redis {
     pub storage: Storage,
     pub bytes_processed: AtomicU64, // bytes processed by the server. important for a replica    
     pub replication: ReplicationManager,
-    in_transaction: bool,
 }
 
 impl Redis {
@@ -28,7 +27,6 @@ impl Redis {
             storage: Storage::new(),
             bytes_processed: AtomicU64::new(0),
             replication: ReplicationManager::new(),
-            in_transaction: false,
         }
     }
 
@@ -39,7 +37,6 @@ impl Redis {
             storage: Storage::new(),
             bytes_processed: AtomicU64::new(0),
             replication,
-            in_transaction: false,
         }
     }
 
@@ -103,27 +100,10 @@ impl Redis {
 
     pub fn execute_command(&mut self, command: &RedisCommand, client: Option<&mut Box<dyn TcpStreamTrait>>) -> Result<String, String> {
         match command {
-            RedisCommand::None => {
-                Err("-ERR Unknown command\r\n".to_string())
-            },
-            RedisCommand::Multi => {
-                self.in_transaction = true;
-                Ok("+OK\r\n".to_string())
-            },
-            RedisCommand::Exec => {
-                if self.in_transaction {
-                    self.in_transaction = false;
-                    Ok("*0\r\n".to_string())
-                } else {
-                    Err("-ERR EXEC without MULTI\r\n".to_string())
-                }
-            },
-            RedisCommand::Ping => {
-                Ok("+PONG\r\n".to_string())
-            },
-            RedisCommand::Echo { data } => {
-                Ok(format!("${}\r\n{}\r\n", data.len(), data))
-            },
+            RedisCommand::Multi => Ok("+OK\r\n".to_string()),
+            RedisCommand::Exec => Ok("*0\r\n".to_string()),
+            RedisCommand::Ping => Ok("+PONG\r\n".to_string()),
+            RedisCommand::Echo { data } => Ok(format!("${}\r\n{}\r\n", data.len(), data)),
             RedisCommand::Get { key } => {
                 match self.get(key) {
                     Some(value) => Ok(format!("${}\r\n{}\r\n", value.len(), value)),
@@ -286,20 +266,17 @@ impl Redis {
                 }
             },
             RedisCommand::ReplconfGetack => {
-                match client {
-                    Some(client) => {
-                        // hacky, temporary way. we need to omit the "REPLCONF GETACK" and we assume it is 37 bytes.
-                        let bytes_processed = self.get_bytes_processed() - 37;
-                        let num_digits = bytes_processed.to_string().len();
-                        let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", num_digits, bytes_processed);
-                        let _ = client.write(response.as_bytes());
-                        let _ = client.flush();
-                    },
-                    None => {
-                        return Err("-ERR No stream client to send REPLCONF GETACK\r\n".to_string());
-                    }
+                if let Some(client) = client {
+                    // hacky, temporary way. we need to omit the "REPLCONF GETACK" and we assume it is 37 bytes.
+                    let bytes_processed = self.get_bytes_processed() - 37;
+                    let num_digits = bytes_processed.to_string().len();
+                    let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", num_digits, bytes_processed);
+                    let _ = client.write(response.as_bytes());
+                    let _ = client.flush();
+                    Ok("".to_string())  // Return empty string to indicate response was sent directly
+                } else {
+                    Err("-ERR No stream client to send REPLCONF GETACK\r\n".to_string())
                 }
-                Ok("".to_string())
             },
             RedisCommand::Psync { replica_id, offset } => {
                 if *offset == -1 && *replica_id == "?" {
@@ -315,7 +292,7 @@ impl Redis {
                         let _ = client.flush();
                     }
 
-                    Ok("".to_string())
+                    Ok("".to_string())  // Return empty string to indicate response was sent directly
                 } else {
                     Err("-ERR Unknown PSYNC subcommand\r\n".to_string())
                 }
@@ -340,8 +317,10 @@ impl Redis {
                         println!("timeout elapsed returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
                         Ok(format!(":{}\r\n", up_to_date_replicas))
                     } else {
+                        // Set GETACK flag to true when we need to wait for replica acknowledgments
+                        self.replication.set_enqueue_getack(true);
                         // Return a special error to indicate that we need to retry 
-                        Err(format!("WAIT_RETRY {} {}", numreplicas, timeout))
+                        Err("WAIT_RETRY".to_string())
                     }
                 }               
             },
@@ -375,6 +354,9 @@ impl Redis {
             },
             RedisCommand::Error { message } => {
                 Err(format!("-{}\r\n", message))
+            },
+            RedisCommand::None => {
+                Err("-ERR Unknown command\r\n".to_string())
             },
         }
     }
