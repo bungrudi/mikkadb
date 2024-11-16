@@ -25,6 +25,9 @@ pub enum ValueWrapper {
         entries: Vec<StreamEntry>,
         metadata: StreamMetadata,
     },
+    List {
+        values: Vec<String>,
+    },
 }
 
 pub struct Storage {
@@ -80,10 +83,203 @@ impl Storage {
                     Some(value.clone())
                 },
                 ValueWrapper::Stream { .. } => None,
+                ValueWrapper::List { .. } => None,
             }
         } else {
             #[cfg(debug_assertions)]
             println!("DEBUG: Key '{}' not found", key);
+            None
+        }
+    }
+
+    pub fn lpush(&self, key: &str, value: &str) -> Result<i64, String> {
+        let mut data = self.data.lock().unwrap();
+        match data.entry(key.to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                match entry.get_mut() {
+                    ValueWrapper::List { values } => {
+                        values.insert(0, value.to_string());
+                        Ok(values.len() as i64)
+                    },
+                    _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+                }
+            },
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ValueWrapper::List {
+                    values: vec![value.to_string()],
+                });
+                Ok(1)
+            },
+        }
+    }
+
+    pub fn rpush(&self, key: &str, value: &str) -> Result<i64, String> {
+        let mut data = self.data.lock().unwrap();
+        match data.entry(key.to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                match entry.get_mut() {
+                    ValueWrapper::List { values } => {
+                        values.push(value.to_string());
+                        Ok(values.len() as i64)
+                    },
+                    _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+                }
+            },
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ValueWrapper::List {
+                    values: vec![value.to_string()],
+                });
+                Ok(1)
+            },
+        }
+    }
+
+    pub fn lpop(&self, key: &str) -> Option<String> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(wrapper) = data.get_mut(key) {
+            match wrapper {
+                ValueWrapper::List { values } => {
+                    if values.is_empty() {
+                        None
+                    } else {
+                        Some(values.remove(0))
+                    }
+                },
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn rpop(&self, key: &str) -> Option<String> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(wrapper) = data.get_mut(key) {
+            match wrapper {
+                ValueWrapper::List { values } => {
+                    if values.is_empty() {
+                        None
+                    } else {
+                        values.pop()
+                    }
+                },
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn llen(&self, key: &str) -> i64 {
+        let data = self.data.lock().unwrap();
+        match data.get(key) {
+            Some(ValueWrapper::List { values }) => values.len() as i64,
+            _ => 0,
+        }
+    }
+
+    pub fn lrange(&self, key: &str, start: i64, stop: i64) -> Vec<String> {
+        let data = self.data.lock().unwrap();
+        if let Some(ValueWrapper::List { values }) = data.get(key) {
+            let len = values.len() as i64;
+            let (start, stop) = normalize_indices(start, stop, len);
+            values[start as usize..=stop as usize].to_vec()
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn ltrim(&self, key: &str, start: i64, stop: i64) -> Result<(), String> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(wrapper) = data.get_mut(key) {
+            match wrapper {
+                ValueWrapper::List { values } => {
+                    let len = values.len() as i64;
+                    let (start, stop) = normalize_indices(start, stop, len);
+                    *values = values[start as usize..=stop as usize].to_vec();
+                    Ok(())
+                },
+                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn lpos(&self, key: &str, element: &str, count: Option<i64>) -> Vec<i64> {
+        let data = self.data.lock().unwrap();
+        if let Some(ValueWrapper::List { values }) = data.get(key) {
+            let mut positions = Vec::new();
+            for (i, value) in values.iter().enumerate() {
+                if value == element {
+                    positions.push(i as i64);
+                    if let Some(count) = count {
+                        if positions.len() == count as usize {
+                            break;
+                        }
+                    }
+                }
+            }
+            positions
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn linsert(&self, key: &str, before: bool, pivot: &str, element: &str) -> Result<i64, String> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(wrapper) = data.get_mut(key) {
+            match wrapper {
+                ValueWrapper::List { values } => {
+                    if let Some(pos) = values.iter().position(|x| x == pivot) {
+                        if before {
+                            values.insert(pos, element.to_string());
+                        } else {
+                            values.insert(pos + 1, element.to_string());
+                        }
+                        Ok(values.len() as i64)
+                    } else {
+                        Ok(-1)
+                    }
+                },
+                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            }
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub fn lset(&self, key: &str, index: i64, element: &str) -> Result<(), String> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(wrapper) = data.get_mut(key) {
+            match wrapper {
+                ValueWrapper::List { values } => {
+                    let len = values.len() as i64;
+                    let real_index = if index < 0 { len + index } else { index };
+                    if real_index < 0 || real_index >= len {
+                        return Err("ERR index out of range".to_string());
+                    }
+                    values[real_index as usize] = element.to_string();
+                    Ok(())
+                },
+                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            }
+        } else {
+            Err("ERR no such key".to_string())
+        }
+    }
+
+    pub fn lindex(&self, key: &str, index: i64) -> Option<String> {
+        let data = self.data.lock().unwrap();
+        if let Some(ValueWrapper::List { values }) = data.get(key) {
+            let len = values.len() as i64;
+            let real_index = if index < 0 { len + index } else { index };
+            if real_index < 0 || real_index >= len {
+                None
+            } else {
+                Some(values[real_index as usize].clone())
+            }
+        } else {
             None
         }
     }
@@ -125,7 +321,7 @@ impl Storage {
                     Err(_) => Err("ERR value is not an integer or out of range".to_string()),
                 }
             },
-            ValueWrapper::Stream { .. } => {
+            ValueWrapper::Stream { .. } | ValueWrapper::List { .. } => {
                 Err("ERR value is not an integer or out of range".to_string())
             },
         }
@@ -196,6 +392,27 @@ impl Storage {
                 return Err("ERR The ID specified in XADD is equal or smaller than the target stream top item".into());
             }
         }
+        Ok(())
+    }
+
+    fn validate_stream_id(id: &str) -> Result<(), Cow<'static, str>> {
+        if id == "$" {
+            return Ok(());
+        }
+        
+        let parts: Vec<&str> = id.split('-').collect();
+        if parts.len() != 2 {
+            return Err("ERR Invalid milliseconds in stream ID".into());
+        }
+
+        if let Err(_) = parts[0].parse::<u64>() {
+            return Err("ERR Invalid milliseconds in stream ID".into());
+        }
+
+        if let Err(_) = parts[1].parse::<u64>() {
+            return Err("ERR Invalid milliseconds in stream ID".into());
+        }
+
         Ok(())
     }
 
@@ -303,8 +520,15 @@ impl Storage {
     pub fn xread(&self, keys: &[&str], ids: &[&str], block: Option<u64>) -> Result<Vec<(String, Vec<StreamEntry>)>, Cow<'static, str>> {
         #[cfg(debug_assertions)]
         println!("DEBUG: XREAD called with keys: {:?} ids: {:?} block: {:?}", keys, ids, block);
-        let mut result = Vec::new();
 
+        // Validate all IDs first
+        for &id in ids {
+            if let Err(e) = Self::validate_stream_id(id) {
+                return Err(e);
+            }
+        }
+
+        let mut result = Vec::new();
         let mut data = self.data.lock().unwrap();
         
         // Check for new entries
@@ -385,7 +609,16 @@ impl Storage {
         match data.get(key) {
             Some(ValueWrapper::String { .. }) => "string".into(),
             Some(ValueWrapper::Stream { .. }) => "stream".into(),
+            Some(ValueWrapper::List { .. }) => "list".into(),
             None => "none".into(),
         }
     }
+}
+
+fn normalize_indices(start: i64, stop: i64, len: i64) -> (i64, i64) {
+    let start = if start < 0 { len + start } else { start };
+    let stop = if stop < 0 { len + stop } else { stop };
+    let start = start.max(0).min(len - 1);
+    let stop = stop.max(0).min(len - 1);
+    (start, stop)
 }

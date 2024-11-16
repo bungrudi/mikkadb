@@ -23,6 +23,18 @@ pub enum RedisCommand<'a> {
     XRange { key: &'a str, start: &'a str, end: &'a str },
     XRead { keys: Vec<&'a str>, ids: Vec<&'a str>, block: Option<u64> },
     Incr { key: &'a str },
+    // List commands
+    LPush { key: &'a str, value: &'a str },
+    RPush { key: &'a str, value: &'a str },
+    LPop { key: &'a str },
+    RPop { key: &'a str },
+    LLen { key: &'a str },
+    LRange { key: &'a str, start: i64, stop: i64 },
+    LTrim { key: &'a str, start: i64, stop: i64 },
+    LPos { key: &'a str, element: &'a str, count: Option<i64> },
+    LInsert { key: &'a str, before: bool, pivot: &'a str, element: &'a str },
+    LSet { key: &'a str, index: i64, element: &'a str },
+    LIndex { key: &'a str, index: i64 },
 }
 
 impl RedisCommand<'_> {
@@ -44,44 +56,18 @@ impl RedisCommand<'_> {
     const XRANGE: &'static str = "XRANGE";
     const XREAD: &'static str = "XREAD";
     const INCR: &'static str = "INCR";
-
-    fn validate_entry_id(id: &str, is_xadd: bool) -> Result<(Option<u64>, Option<u64>), String> {
-        // Special cases for XRANGE parameters
-        if id == "*" || id == "-" || id == "+" {
-            return Ok((None, None));
-        }
-
-        // Special case for XREAD
-        if !is_xadd && id == "$" {
-            return Ok((None, None));
-        }
-
-        let parts: Vec<&str> = id.split('-').collect();
-        if parts.len() != 2 {
-            return Err("ERR Invalid stream ID format".to_string());
-        }
-
-        let milliseconds = parts[0].parse::<u64>()
-            .map_err(|_| "ERR Invalid milliseconds in stream ID".to_string())?;
-
-        let sequence = if parts[1] == "*" {
-            None
-        } else {
-            Some(parts[1].parse::<u64>()
-                .map_err(|_| "ERR Invalid sequence number in stream ID".to_string())?)
-        };
-
-        // Only validate 0-0 for XADD
-        if is_xadd {
-            if let Some(seq) = sequence {
-                if milliseconds == 0 && seq == 0 {
-                    return Err("ERR The ID specified in XADD must be greater than 0-0".to_string());
-                }
-            }
-        }
-
-        Ok((Some(milliseconds), sequence))
-    }
+    // List command constants
+    const LPUSH: &'static str = "LPUSH";
+    const RPUSH: &'static str = "RPUSH";
+    const LPOP: &'static str = "LPOP";
+    const RPOP: &'static str = "RPOP";
+    const LLEN: &'static str = "LLEN";
+    const LRANGE: &'static str = "LRANGE";
+    const LTRIM: &'static str = "LTRIM";
+    const LPOS: &'static str = "LPOS";
+    const LINSERT: &'static str = "LINSERT";
+    const LSET: &'static str = "LSET";
+    const LINDEX: &'static str = "LINDEX";
 
     /// Create command from the data received from the client.
     /// It should check if the parameters are complete, otherwise return None.
@@ -192,21 +178,16 @@ impl RedisCommand<'_> {
                 if key == "" || id == "" {
                     None
                 } else {
-                    match Self::validate_entry_id(id, true) {
-                        Ok(_) => {
-                            let mut fields = HashMap::new();
-                            let mut i = 2;
-                            while i < params.len() - 1 && params[i] != "" && params[i+1] != "" {
-                                fields.insert(params[i].to_string(), params[i+1].to_string());
-                                i += 2;
-                            }
-                            if fields.is_empty() {
-                                None
-                            } else {
-                                Some(RedisCommand::XAdd { key, id, fields, original_resp: original_resp.to_string() })
-                            }
-                        },
-                        Err(e) => Some(RedisCommand::Error { message: e }),
+                    let mut fields = HashMap::new();
+                    let mut i = 2;
+                    while i < params.len() - 1 && params[i] != "" && params[i+1] != "" {
+                        fields.insert(params[i].to_string(), params[i+1].to_string());
+                        i += 2;
+                    }
+                    if fields.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::XAdd { key, id, fields, original_resp: original_resp.to_string() })
                     }
                 }
             },
@@ -217,10 +198,7 @@ impl RedisCommand<'_> {
                 if key == "" || start == "" || end == "" {
                     None
                 } else {
-                    match (Self::validate_entry_id(start, false), Self::validate_entry_id(end, false)) {
-                        (Ok(_), Ok(_)) => Some(RedisCommand::XRange { key, start, end }),
-                        (Err(e), _) | (_, Err(e)) => Some(RedisCommand::Error { message: e }),
-                    }
+                    Some(RedisCommand::XRange { key, start, end })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::XREAD) => {
@@ -254,13 +232,6 @@ impl RedisCommand<'_> {
                 let keys = all_params[..midpoint].to_vec();
                 let ids = all_params[midpoint..].to_vec();
 
-                // Validate all IDs
-                for id in &ids {
-                    if let Err(e) = Self::validate_entry_id(id, false) {
-                        return Some(RedisCommand::Error { message: e });
-                    }
-                }
-
                 Some(RedisCommand::XRead { keys, ids, block })
             },
             command if command.eq_ignore_ascii_case(Self::INCR) => {
@@ -269,6 +240,113 @@ impl RedisCommand<'_> {
                     None
                 } else {
                     Some(RedisCommand::Incr { key })
+                }
+            },
+            // List commands
+            command if command.eq_ignore_ascii_case(Self::LPUSH) => {
+                let key = params[0];
+                let value = params[1];
+                if key == "" || value == "" {
+                    None
+                } else {
+                    Some(RedisCommand::LPush { key, value })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::RPUSH) => {
+                let key = params[0];
+                let value = params[1];
+                if key == "" || value == "" {
+                    None
+                } else {
+                    Some(RedisCommand::RPush { key, value })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::LPOP) => {
+                let key = params[0];
+                if key == "" {
+                    None
+                } else {
+                    Some(RedisCommand::LPop { key })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::RPOP) => {
+                let key = params[0];
+                if key == "" {
+                    None
+                } else {
+                    Some(RedisCommand::RPop { key })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::LLEN) => {
+                let key = params[0];
+                if key == "" {
+                    None
+                } else {
+                    Some(RedisCommand::LLen { key })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::LRANGE) => {
+                let key = params[0];
+                let start = params[1].parse::<i64>().unwrap_or(0);
+                let stop = params[2].parse::<i64>().unwrap_or(-1);
+                if key == "" {
+                    None
+                } else {
+                    Some(RedisCommand::LRange { key, start, stop })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::LTRIM) => {
+                let key = params[0];
+                let start = params[1].parse::<i64>().unwrap_or(0);
+                let stop = params[2].parse::<i64>().unwrap_or(-1);
+                if key == "" {
+                    None
+                } else {
+                    Some(RedisCommand::LTrim { key, start, stop })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::LPOS) => {
+                let key = params[0];
+                let element = params[1];
+                let count = if params[2].eq_ignore_ascii_case("COUNT") {
+                    params[3].parse::<i64>().ok()
+                } else {
+                    None
+                };
+                if key == "" || element == "" {
+                    None
+                } else {
+                    Some(RedisCommand::LPos { key, element, count })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::LINSERT) => {
+                let key = params[0];
+                let before = params[1].eq_ignore_ascii_case("BEFORE");
+                let pivot = params[2];
+                let element = params[3];
+                if key == "" || pivot == "" || element == "" {
+                    None
+                } else {
+                    Some(RedisCommand::LInsert { key, before, pivot, element })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::LSET) => {
+                let key = params[0];
+                let index = params[1].parse::<i64>().unwrap_or(0);
+                let element = params[2];
+                if key == "" || element == "" {
+                    None
+                } else {
+                    Some(RedisCommand::LSet { key, index, element })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::LINDEX) => {
+                let key = params[0];
+                let index = params[1].parse::<i64>().unwrap_or(0);
+                if key == "" {
+                    None
+                } else {
+                    Some(RedisCommand::LIndex { key, index })
                 }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),

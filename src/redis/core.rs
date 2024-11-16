@@ -126,6 +126,81 @@ impl Redis {
                     Err(e) => Err(format!("-{}\r\n", e)),
                 }
             },
+            RedisCommand::LPush { key, value } => {
+                match self.storage.lpush(key, value) {
+                    Ok(len) => Ok(format!(":{}\r\n", len)),
+                    Err(e) => Err(format!("-{}\r\n", e)),
+                }
+            },
+            RedisCommand::RPush { key, value } => {
+                match self.storage.rpush(key, value) {
+                    Ok(len) => Ok(format!(":{}\r\n", len)),
+                    Err(e) => Err(format!("-{}\r\n", e)),
+                }
+            },
+            RedisCommand::LPop { key } => {
+                match self.storage.lpop(key) {
+                    Some(value) => Ok(format!("${}\r\n{}\r\n", value.len(), value)),
+                    None => Ok("$-1\r\n".to_string()),
+                }
+            },
+            RedisCommand::RPop { key } => {
+                match self.storage.rpop(key) {
+                    Some(value) => Ok(format!("${}\r\n{}\r\n", value.len(), value)),
+                    None => Ok("$-1\r\n".to_string()),
+                }
+            },
+            RedisCommand::LLen { key } => {
+                let len = self.storage.llen(key);
+                Ok(format!(":{}\r\n", len))
+            },
+            RedisCommand::LRange { key, start, stop } => {
+                let values = self.storage.lrange(key, *start, *stop);
+                let mut response = format!("*{}\r\n", values.len());
+                for value in values {
+                    response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
+                }
+                Ok(response)
+            },
+            RedisCommand::LTrim { key, start, stop } => {
+                match self.storage.ltrim(key, *start, *stop) {
+                    Ok(_) => Ok("+OK\r\n".to_string()),
+                    Err(e) => Err(format!("-{}\r\n", e)),
+                }
+            },
+            RedisCommand::LPos { key, element, count } => {
+                let positions = self.storage.lpos(key, element, *count);
+                if let Some(count) = count {
+                    let mut response = format!("*{}\r\n", positions.len());
+                    for pos in positions {
+                        response.push_str(&format!(":{}\r\n", pos));
+                    }
+                    Ok(response)
+                } else {
+                    match positions.first() {
+                        Some(&pos) => Ok(format!(":{}\r\n", pos)),
+                        None => Ok("$-1\r\n".to_string()),
+                    }
+                }
+            },
+            RedisCommand::LInsert { key, before, pivot, element } => {
+                match self.storage.linsert(key, *before, pivot, element) {
+                    Ok(len) => Ok(format!(":{}\r\n", len)),
+                    Err(e) => Err(format!("-{}\r\n", e)),
+                }
+            },
+            RedisCommand::LSet { key, index, element } => {
+                match self.storage.lset(key, *index, element) {
+                    Ok(_) => Ok("+OK\r\n".to_string()),
+                    Err(e) => Err(format!("-{}\r\n", e)),
+                }
+            },
+            RedisCommand::LIndex { key, index } => {
+                match self.storage.lindex(key, *index) {
+                    Some(value) => Ok(format!("${}\r\n{}\r\n", value.len(), value)),
+                    None => Ok("$-1\r\n".to_string()),
+                }
+            },
             RedisCommand::XAdd { key, id, fields, original_resp } => {
                 match self.xadd(key, id, fields.clone()) {
                     Ok(entry_id) => {
