@@ -5,6 +5,7 @@ pub enum RedisCommand<'a> {
     None,
     Multi,
     Exec,
+    Discard,
     Echo { data: &'a str },
     Ping,
     Set { key: &'a str, value: &'a str, ttl: Option<usize>, original_resp: String },
@@ -27,6 +28,7 @@ pub enum RedisCommand<'a> {
 impl RedisCommand<'_> {
     const MULTI : &'static str = "MULTI";
     const EXEC : &'static str = "EXEC";
+    const DISCARD : &'static str = "DISCARD";
     const PING : &'static str = "PING";
     const ECHO : &'static str = "ECHO";
     const SET : &'static str = "SET";
@@ -89,6 +91,7 @@ impl RedisCommand<'_> {
         match command {
             command if command.eq_ignore_ascii_case(Self::MULTI) => Some(RedisCommand::Multi),
             command if command.eq_ignore_ascii_case(Self::EXEC) => Some(RedisCommand::Exec),
+            command if command.eq_ignore_ascii_case(Self::DISCARD) => Some(RedisCommand::Discard),
             command if command.eq_ignore_ascii_case(Self::PING) => Some(RedisCommand::Ping),
             command if command.eq_ignore_ascii_case(Self::ECHO) => {
                 if params[0] == "" {

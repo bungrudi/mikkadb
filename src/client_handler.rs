@@ -77,6 +77,17 @@ impl ClientHandler {
                     result
                 }
             },
+            RedisCommand::Discard => {
+                let mut in_transaction = self.in_transaction.lock().unwrap();
+                if !*in_transaction {
+                    "-ERR DISCARD without MULTI\r\n".to_string()
+                } else {
+                    *in_transaction = false;
+                    // Clear all queued commands
+                    self.queued_commands.lock().unwrap().clear();
+                    "+OK\r\n".to_string()
+                }
+            },
             _ => {
                 let in_transaction = self.in_transaction.lock().unwrap();
                 if *in_transaction {

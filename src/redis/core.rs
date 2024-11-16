@@ -102,6 +102,7 @@ impl Redis {
         match command {
             RedisCommand::Multi => Ok("+OK\r\n".to_string()),
             RedisCommand::Exec => Ok("*0\r\n".to_string()),
+            RedisCommand::Discard => Ok("+OK\r\n".to_string()),
             RedisCommand::Ping => Ok("+PONG\r\n".to_string()),
             RedisCommand::Echo { data } => Ok(format!("${}\r\n{}\r\n", data.len(), data)),
             RedisCommand::Get { key } => {
