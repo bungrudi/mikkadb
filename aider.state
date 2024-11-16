@@ -1,0 +1,8 @@
+/drop
+/add       src/redis/commands.rs
+/add       src/redis/core.rs
+/add       src/redis/storage.rs
+/add       src/resp/command.rs
+/add       src/resp/context.rs
+/add       src/resp/parser.rs
+/read-only ai-instruction.md
