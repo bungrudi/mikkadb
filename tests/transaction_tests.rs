@@ -45,15 +45,15 @@ fn test_multi_exec_basic() {
 
     // Queue SET command
     let response = handler.execute_command(&RedisCommand::Set {
-        key: "foo",
-        value: "41",
+        key: "foo".to_string(),
+        value: "41".to_string(),
         ttl: None,
         original_resp: "SET foo 41".to_string(),
     });
     assert_eq!(response, "+QUEUED\r\n");
 
     // Queue INCR command
-    let response = handler.execute_command(&RedisCommand::Incr { key: "foo" });
+    let response = handler.execute_command(&RedisCommand::Incr { key: "foo".to_string() });
     assert_eq!(response, "+QUEUED\r\n");
 
     // Execute transaction

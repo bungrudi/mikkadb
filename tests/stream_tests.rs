@@ -15,14 +15,24 @@ fn test_redis() -> Redis {
 }
 
 #[cfg(test)]
-fn test_command<'a>(command: &'a str, params: &[&'a str], original_resp: &'a str) -> RedisCommand<'a> {
-    let mut fixed_params = [""; 5];
+fn test_command(command: &str, params: &[&str], original_resp: &str) -> RedisCommand {
+    // Create array with default strings
+    let mut fixed_params = [
+        String::new(),
+        String::new(),
+        String::new(), 
+        String::new(),
+        String::new()
+    ];
+
+    // Copy parameters into the array
     for (i, &param) in params.iter().enumerate() {
         if i < 5 {
-            fixed_params[i] = param;
+            fixed_params[i] = param.to_string();
         }
     }
-    RedisCommand::data(command, fixed_params, original_resp).unwrap()
+
+    RedisCommand::data(command.to_string(), &fixed_params, original_resp.to_string()).unwrap()
 }
 
 #[test]

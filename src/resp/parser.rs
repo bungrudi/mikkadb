@@ -6,9 +6,9 @@ use crate::process_command;
 
 // parse RESP using a simple state machine algorithm with zero-copy optimizations
 pub fn parse_resp(buffer: &[u8], len: usize) -> [RedisCommand;25] {
-    const ARRAY_REPEAT_VALUE: RedisCommand<'_> = RedisCommand::None;
+    const ARRAY_REPEAT_VALUE: RedisCommand = RedisCommand::None;
     let mut context = Context {
-        buffer,
+        buffer: buffer.to_vec(),
         read_len: len,
         current_pos: 0,
         resp_state: RespState::Idle,
@@ -67,8 +67,8 @@ mod tests {
         let buffer = b"*2\r\n$4\r\nECHO\r\n$4\r\nHOLA\r\n";
         let commands = parse_resp(buffer,24);
         assert_eq!(commands_len!(commands), 1);
-        match commands[0] {
-            RedisCommand::Echo { data } => assert_eq!(data, "HOLA"),
+        match &commands[0] {
+            RedisCommand::Echo { data } => assert_eq!(data, "HOLA"), 
             _ => panic!("Invalid command"),
         }
     }
@@ -90,9 +90,9 @@ mod tests {
         let commands = parse_resp(buffer, buffer.len());
         assert_eq!(commands_len!(commands), 1);
         match &commands[0] {
-            RedisCommand::Set { key, value, ttl, original_resp} => {
-                assert_eq!(*key, "key01");
-                assert_eq!(*value, "val01");
+            RedisCommand::Set { key, value, ttl, original_resp } => { 
+                assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
                 assert_eq!(*ttl, None);
                 assert_eq!(original_resp, std::str::from_utf8(buffer).unwrap());
             },
@@ -107,14 +107,14 @@ mod tests {
         assert_eq!(commands_len!(commands), 2);
         match &commands[0] {
             RedisCommand::Set { key, value, ttl, original_resp } => {
-                assert_eq!(*key, "key01");
-                assert_eq!(*value, "val01");
+                assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
                 assert_eq!(*ttl, Some(60000));
                 assert_eq!(original_resp, "*5\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n$2\r\nex\r\n$2\r\n60\r\n");
             },
             _ => panic!("Invalid command"),
         }
-        match commands[1] {
+        match &commands[1] {
             RedisCommand::Echo { data } => assert_eq!(data, "HELLO"),
             _ => panic!("Invalid command"),
         }
@@ -127,23 +127,19 @@ mod tests {
         assert_eq!(commands_len!(commands), 5);
         match &commands[0] {
             RedisCommand::Set { key, value, ttl, original_resp } => {
-                assert_eq!(*key, "key01");
-                assert_eq!(*value, "val01");
+                assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
                 assert_eq!(*ttl, None);
                 assert_eq!(*original_resp, "*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n");
             },
             _ => panic!("Invalid command"),
         }
-        match commands[1] {
-            RedisCommand::Get { key } => {
-                assert_eq!(key, "key01");
-            },
+        match &commands[1] {
+            RedisCommand::Get { key } => assert_eq!(key, "key01"),
             _ => panic!("Invalid command"),
         }
-        match commands[2] {
-            RedisCommand::Echo { data } => {
-                assert_eq!(data, "HELLO");
-            },
+        match &commands[2] {
+            RedisCommand::Echo { data } => assert_eq!(data, "HELLO"),
             _ => panic!("Invalid command"),
         }
         match commands[3] {
@@ -165,23 +161,19 @@ mod tests {
         assert_eq!(commands_len!(commands), 6);
         match &commands[0] {
             RedisCommand::Set { key, value, ttl, original_resp } => {
-                assert_eq!(*key, "key01");
-                assert_eq!(*value, "val01");
-                assert_eq!(*ttl, None);
-                assert_eq!(original_resp, "*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n");
-            },
-            _ => panic!("Invalid command"),
-        }
-        match commands[1] {
-            RedisCommand::Get { key } => {
                 assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
+                assert_eq!(*ttl, None);
+                assert_eq!(*original_resp, "*3\r\n$3\r\nSET\r\n$5\r\nkey01\r\n$5\r\nval01\r\n");
             },
             _ => panic!("Invalid command"),
         }
-        match commands[2] {
-            RedisCommand::Echo { data } => {
-                assert_eq!(data, "HELLO");
-            },
+        match &commands[1] {
+            RedisCommand::Get { key } => assert_eq!(key, "key01"),
+            _ => panic!("Invalid command"),
+        }
+        match &commands[2] {
+            RedisCommand::Echo { data } => assert_eq!(data, "HELLO"),
             _ => panic!("Invalid command"),
         }
         match commands[3] {
@@ -190,17 +182,15 @@ mod tests {
         }
         match &commands[4] {
             RedisCommand::Set { key, value, ttl, original_resp } => {
-                assert_eq!(*key, "key02");
-                assert_eq!(*value, "val02");
+                assert_eq!(key, "key02");
+                assert_eq!(value, "val02");
                 assert_eq!(*ttl, Some(60000));
                 assert_eq!(*original_resp, "*5\r\n$3\r\nSET\r\n$5\r\nkey02\r\n$5\r\nval02\r\n$2\r\nEX\r\n$2\r\n60\r\n");
             },
             _ => panic!("Invalid command"),
         }
         match &commands[5] {
-            RedisCommand::Get { key } => {
-                assert_eq!(*key, "key02");
-            },
+            RedisCommand::Get { key } => assert_eq!(key, "key02"),
             _ => panic!("Invalid command"),
         }
     }
@@ -234,8 +224,8 @@ mod tests {
         assert_eq!(commands_len!(commands), 1);
         match &commands[0] {
             RedisCommand::Set { key, value, ttl, original_resp } => {
-                assert_eq!(*key, "key00");
-                assert_eq!(*value, "val00");
+                assert_eq!(key, "key00");
+                assert_eq!(value, "val00");
                 assert_eq!(*ttl, None);
                 assert_eq!(original_resp, std::str::from_utf8(buffer).unwrap());
             },
@@ -250,8 +240,8 @@ mod tests {
         assert_eq!(commands_len!(commands), 1);
         match &commands[0] {
             RedisCommand::Set { key, value, ttl, original_resp } => {
-                assert_eq!(*key, "key01");
-                assert_eq!(*value, "val01");
+                assert_eq!(key, "key01");
+                assert_eq!(value, "val01");
                 assert_eq!(*ttl, Some(1500));
                 assert_eq!(original_resp, std::str::from_utf8(buffer).unwrap());
             },
@@ -266,8 +256,8 @@ mod tests {
         assert_eq!(commands_len!(commands), 1);
         match &commands[0] {
             RedisCommand::Set { key, value, ttl, original_resp } => {
-                assert_eq!(*key, "key02");
-                assert_eq!(*value, "val02");
+                assert_eq!(key, "key02");
+                assert_eq!(value, "val02");
                 assert_eq!(*ttl, Some(60000));
                 assert_eq!(original_resp, std::str::from_utf8(buffer).unwrap());
             },

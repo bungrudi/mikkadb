@@ -10,11 +10,12 @@ macro_rules! process_command {
     ($self:expr) => {
         match &$self.current_command {
             Some(command) => {
-                let command_ = command.command;
-                let params = command.data;
-
-                let original_resp = std::str::from_utf8( &$self.buffer[command.buffer_start..command.buffer_end] ).unwrap();
-                match RedisCommand::data(command_, params, original_resp) {
+                let command_ = command.command.clone();
+                let params = &command.data;
+                let original_resp = std::str::from_utf8(&$self.buffer[command.buffer_start..command.buffer_end])
+                    .unwrap()
+                    .to_string();
+                match RedisCommand::data(command_, &params, original_resp) {
                     Some(redis_command) => {
                         if $self.command_index < 25 {
                             $self.commands[$self.command_index as usize] = redis_command;

@@ -171,15 +171,17 @@ impl Redis {
             RedisCommand::LPos { key, element, count } => {
                 let positions = self.storage.lpos(key, element, *count);
                 if let Some(count) = count {
-                    let mut response = format!("*{}\r\n", positions.len());
-                    for pos in positions {
+                    // Format response as array when count is specified
+                    let mut response = format!("*{}\r\n", positions.len().min(*count as usize));
+                    for pos in positions.iter().take(*count as usize) {
                         response.push_str(&format!(":{}\r\n", pos));
                     }
                     Ok(response)
                 } else {
+                    // Format response as single integer when count is not specified
                     match positions.first() {
                         Some(&pos) => Ok(format!(":{}\r\n", pos)),
-                        None => Ok("$-1\r\n".to_string()),
+                        None => Ok("$-1\r\n".to_string())
                     }
                 }
             },
@@ -240,7 +242,11 @@ impl Redis {
                 }
             },
             RedisCommand::XRead { keys, ids, block } => {
-                match self.storage.xread(keys, ids, *block) {
+                match self.storage.xread(
+                    &keys.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
+                    &ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
+                    *block
+                ) {
                     Ok(stream_entries) => {
                         if stream_entries.is_empty() {
                             return Ok("$-1\r\n".to_string()); // Return null bulk string when no entries
@@ -401,9 +407,9 @@ impl Redis {
                 }               
             },
             RedisCommand::Config { subcommand, parameter } => {
-                match *subcommand {
+                match subcommand.as_str() {
                     "GET" => {
-                        match *parameter {
+                        match parameter.as_str() {
                             "dir" => {
                                 // Return the current directory
                                 let dir = self.config.dir.clone();

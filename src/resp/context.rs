@@ -4,19 +4,19 @@ use super::command::Command;
 use crate::redis::RedisCommand;
 use crate::process_command;
 
-pub struct Context<'a> {
-    pub buffer: &'a[u8],
+pub struct Context {
+    pub buffer: Vec<u8>,
     pub read_len: usize,
     pub current_pos: usize,
     pub resp_state: RespState,
     pub data_length: usize,
-    pub current_command: Option<Command<'a>>,
+    pub current_command: Option<Command>,
     pub command_index: u8,
-    pub commands: [RedisCommand<'a>;25],
+    pub commands: [RedisCommand; 25],
     pub error_reason: Cow<'static, str>,
 }
 
-impl Context<'_> {
+impl Context {
     pub const NO_ERROR: &'static str = "NO_ERROR";
     pub const PARSE_ERROR: &'static str = "PARSE_ERROR";
     pub const STATE_ERROR: &'static str = "STATE_ERROR";
@@ -39,8 +39,7 @@ impl Context<'_> {
                 let num_params: u8 = std::str::from_utf8(&self.buffer[startpos..self.current_pos]).unwrap().parse().unwrap();
                 // for every *n, create a new command object.
                 // number of params is n-1 because the first param is the command itself.
-                let mut current_command = Command::new(num_params-1,
-                    startpos-1);
+                let mut current_command = Command::new(num_params-1, startpos-1);
                 // check for end of buffer
                 if self.current_pos == self.read_len {
                     self.resp_state = RespState::End;
@@ -106,7 +105,7 @@ impl Context<'_> {
                         if endpos >= self.read_len {
                             endpos = self.read_len - 1;
                         }
-                        let data = std::str::from_utf8(&self.buffer[self.current_pos..endpos]).unwrap();
+                        let data = std::str::from_utf8(&self.buffer[self.current_pos..endpos]).unwrap().to_string();
 
                         { // enclosing the block to limit the scope of mutable borrow
                             let command = match self.current_command {
@@ -117,7 +116,7 @@ impl Context<'_> {
                                     panic!("Current command not initialized when parsing bulk data");
                                 }
                             };
-                            if command.command == Command::EMPTY_STR {
+                            if command.command.is_empty() {
                                 command.command = data;
                             } else {
                                 command.push_param(data);
@@ -148,11 +147,14 @@ impl Context<'_> {
                                 // TODO encapsulate into inline function or macro
                                 match &self.current_command {
                                     Some(command) => {
-                                        let command_ = command.command;
-                                        let params = command.data;
+                                        let command_ = command.command.to_string();
+                                        let mut params = [String::new(), String::new(), String::new(), String::new(), String::new()];
+                                        for (i, s) in command.data.iter().enumerate() {
+                                            params[i] = s.to_string();
+                                        }
 
-                                        let original_resp = std::str::from_utf8( &self.buffer[command.buffer_start..command.buffer_end] ).unwrap();
-                                        match RedisCommand::data(command_, params, original_resp) {
+                                        let original_resp = std::str::from_utf8(&self.buffer[command.buffer_start..command.buffer_end]).unwrap().to_string();
+                                        match RedisCommand::data(command_, &params, original_resp) {
                                             Some(redis_command) => {
                                                 if self.command_index < 25 {
                                                     self.commands[self.command_index as usize] = redis_command;
@@ -220,9 +222,9 @@ impl Context<'_> {
                     self.buffer[self.current_pos] == b' ' ||
                     self.buffer[self.current_pos] == b'\r' ||
                     self.buffer[self.current_pos] == b'\n' {
-                    let data = std::str::from_utf8(&self.buffer[startpos..self.current_pos]).unwrap();
+                    let data = std::str::from_utf8(&self.buffer[startpos..self.current_pos]).unwrap().to_string();
                     // first_space = true;
-                    if command.command == Command::EMPTY_STR {
+                    if command.command.is_empty() {
                         command.command = data;
                     } else {
                         command.push_param(data);

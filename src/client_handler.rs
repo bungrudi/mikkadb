@@ -13,7 +13,7 @@ pub struct ClientHandler {
     redis: Arc<Mutex<Redis>>,
     master: bool, // is this client a master?
     in_transaction: Arc<Mutex<bool>>,
-    queued_commands: Arc<Mutex<VecDeque<RedisCommand<'static>>>>,
+    queued_commands: Arc<Mutex<VecDeque<RedisCommand>>>,
 }
 
 impl ClientHandler {
@@ -38,7 +38,7 @@ impl ClientHandler {
     }
 
     pub fn execute_command(&mut self, command: &RedisCommand) -> String {
-        match command {
+        match &command {
             RedisCommand::Multi => {
                 let mut in_transaction = self.in_transaction.lock().unwrap();
                 if *in_transaction {
@@ -102,23 +102,17 @@ impl ClientHandler {
                 if *in_transaction {
                     // Queue command and return QUEUED
                     let owned_command = match command {
-                        RedisCommand::Set { key, value, ttl, original_resp } => {
-                            RedisCommand::Set {
-                                key: Box::leak(key.to_string().into_boxed_str()),
-                                value: Box::leak(value.to_string().into_boxed_str()),
-                                ttl: *ttl,
-                                original_resp: original_resp.clone(),
-                            }
+                        RedisCommand::Set { key, value, ttl, original_resp } => RedisCommand::Set {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                            ttl: *ttl,
+                            original_resp: original_resp.clone(),
                         },
-                        RedisCommand::Get { key } => {
-                            RedisCommand::Get {
-                                key: Box::leak(key.to_string().into_boxed_str()),
-                            }
+                        RedisCommand::Get { key } => RedisCommand::Get {
+                            key: key.to_string(),
                         },
-                        RedisCommand::Incr { key } => {
-                            RedisCommand::Incr {
-                                key: Box::leak(key.to_string().into_boxed_str()),
-                            }
+                        RedisCommand::Incr { key } => RedisCommand::Incr {
+                            key: key.to_string(),
                         },
                         _ => {
                             let error = "-ERR Command not supported in transaction\r\n".to_string();
@@ -177,6 +171,9 @@ impl ClientHandler {
                     break;
                 }
 
+                // Print the raw input for debugging
+                println!("Raw input ({} bytes): {}", bytes_read, String::from_utf8_lossy(&buffer[..bytes_read]));
+
                 let commands = parse_resp(&buffer, bytes_read);
 
                 // increment bytes read..
@@ -186,7 +183,8 @@ impl ClientHandler {
                 // iterate over commands
                 for command in commands {
                     if matches!(command, RedisCommand::None) {
-                        println!("-ERR unknown command");
+                        #[cfg(debug_assertions)]
+                        println!("DEBUG: Skipping None command. Original RESP: {}", String::from_utf8_lossy(&buffer[..bytes_read]));
                         break;
                     }
 
