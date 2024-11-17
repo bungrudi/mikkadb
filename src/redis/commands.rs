@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use super::xread_parser;
 
 #[derive(Debug, Clone)]
 pub enum RedisCommand {
@@ -21,7 +22,7 @@ pub enum RedisCommand {
     Type { key: String },
     XAdd { key: String, id: String, fields: HashMap<String, String>, original_resp: String },
     XRange { key: String, start: String, end: String },
-    XRead { keys: Vec<String>, ids: Vec<String>, block: Option<u64> },
+    XRead { keys: Vec<String>, ids: Vec<String>, block: Option<u64>, count: Option<usize> },
     Incr { key: String },
     FlushDB,
     // List commands
@@ -76,7 +77,7 @@ impl RedisCommand {
     /// For example Set requires 2 parameters, key and value. When this method is called for
     /// a Set command, the first time it will return true to indicate that it expects another.
     pub fn data(command: String, params: &[String; 5], original_resp: String) -> Option<RedisCommand> {
-        match command {
+        match command.to_ascii_uppercase().as_str() {
             ref command if command.eq_ignore_ascii_case(Self::MULTI) => Some(RedisCommand::Multi),
             ref command if command.eq_ignore_ascii_case(Self::EXEC) => Some(RedisCommand::Exec),
             ref command if command.eq_ignore_ascii_case(Self::DISCARD) => Some(RedisCommand::Discard),
@@ -210,47 +211,20 @@ impl RedisCommand {
                 }
             },
             command if command.eq_ignore_ascii_case(Self::XREAD) => {
-                let mut all_params: Vec<String> = params.iter()
-                    .filter(|p| !p.is_empty())
+                let all_params: Vec<String> = params.iter()
+                    .take_while(|p| !p.is_empty())
                     .cloned()
                     .collect();
 
-                let mut block = None;
-
-                // Check for BLOCK option
-                if all_params.len() >= 3 && all_params[0].eq_ignore_ascii_case("BLOCK") {
-                    if let Ok(timeout) = all_params[1].parse::<u64>() {
-                        block = Some(timeout);
-                        all_params.drain(0..2); // Remove BLOCK and timeout
-                    }
+                match xread_parser::parse_xread(&all_params) {
+                    Ok(result) => Some(RedisCommand::XRead {
+                        keys: result.keys,
+                        ids: result.ids,
+                        block: result.block,
+                        count: result.count,
+                    }),
+                    Err(msg) => Some(RedisCommand::Error { message: msg }),
                 }
-
-                // Check for STREAMS keyword
-                if all_params.is_empty() || !all_params[0].eq_ignore_ascii_case("STREAMS") {
-                    return Some(RedisCommand::Error { 
-                        message: "ERR wrong number of arguments for 'xread' command".to_string() 
-                    });
-                }
-                all_params.remove(0); // Remove STREAMS keyword
-
-                if all_params.is_empty() {
-                    return Some(RedisCommand::Error { 
-                        message: "ERR wrong number of arguments for 'xread' command".to_string() 
-                    });
-                }
-
-                // Split remaining params into keys and ids
-                let midpoint = all_params.len() / 2;
-                if midpoint == 0 {
-                    return Some(RedisCommand::Error { 
-                        message: "ERR wrong number of arguments for 'xread' command".to_string() 
-                    });
-                }
-
-                let keys = all_params[..midpoint].to_vec();
-                let ids = all_params[midpoint..].to_vec();
-
-                Some(RedisCommand::XRead { keys, ids, block })
             },
             command if command.eq_ignore_ascii_case(Self::INCR) => {
                 let key = params[0].clone();

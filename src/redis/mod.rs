@@ -6,6 +6,7 @@ pub mod replication;
 pub mod core;
 pub mod utils;
 pub mod rdb;
+pub mod xread_parser;
 
 pub use config::RedisConfig;
 pub use commands::RedisCommand;
@@ -13,7 +14,7 @@ pub use core::Redis;
 pub use utils::*;
 
 // Error responses that signal retry behavior
-pub const XREAD_RETRY_PREFIX: &str = "XREAD_RETRY"; 
+// pub const XREAD_RETRY_PREFIX: &str = "XREAD_RETRY"; 
 
 use std::net::TcpStream;
 use std::thread;

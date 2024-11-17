@@ -241,56 +241,49 @@ impl Redis {
                     Err(e) => Err(format!("-{}\r\n", e)),
                 }
             },
-            RedisCommand::XRead { keys, ids, block } => {
-                match self.storage.xread(
+            RedisCommand::XRead { keys, ids, block, count } => {
+                match self.storage.xread_with_options(
                     &keys.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
                     &ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
-                    *block
+                    *block,  // Dereference block
+                    *count   // Dereference count
                 ) {
                     Ok(stream_entries) => {
                         if stream_entries.is_empty() {
-                            return Ok("$-1\r\n".to_string()); // Return null bulk string when no entries
-                        }
+                            Ok("$-1\r\n".to_string())
+                        } else {
+                            let mut response = format!("*{}\r\n", stream_entries.len());
+                            for (stream_name, entries) in stream_entries {
+                                response.push_str("*2\r\n"); // Stream array has 2 elements: name and entries array
+                                response.push_str(&format!("${}\r\n{}\r\n", stream_name.len(), stream_name));
 
-                        // Format as array with number of streams
-                        let non_empty_entries: Vec<_> = stream_entries.into_iter()
-                            .filter(|(_, entries)| !entries.is_empty())
-                            .collect();
+                                response.push_str(&format!("*{}\r\n", entries.len())); // Entries array
+                                for entry in entries {
+                                    response.push_str("*2\r\n"); // Entry array has 2 elements: ID and fields array
+                                    response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id));
 
-                        if non_empty_entries.is_empty() {
-                            return Ok("$-1\r\n".to_string()); // Return null bulk string when no entries
-                        }
-
-                        let mut response = format!("*{}\r\n", non_empty_entries.len());
-                        
-                        for (stream_key, entries) in non_empty_entries {
-                            // Add stream key and entries array
-                            response.push_str("*2\r\n"); // Stream array has 2 elements: key and entries array
-                            response.push_str(&format!("${}\r\n{}\r\n", stream_key.len(), stream_key)); // Stream key
-                            
-                            // Format entries array
-                            response.push_str(&format!("*{}\r\n", entries.len())); // Number of entries
-                            
-                            for entry in entries {
-                                // Format each entry as an array containing the ID and field-value pairs
-                                response.push_str("*2\r\n"); // Entry array has 2 elements: ID and fields array
-                                response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id)); // ID
-
-                                // Convert HashMap to BTreeMap to ensure consistent ordering
-                                let ordered_fields: BTreeMap<_, _> = entry.fields.into_iter().collect();
-
-                                // Format field-value pairs as an array
-                                let field_count = ordered_fields.len() * 2; // Each field has a key and value
-                                response.push_str(&format!("*{}\r\n", field_count));
-                                for (key, value) in ordered_fields {
-                                    response.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
-                                    response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
+                                    // Convert HashMap to BTreeMap to ensure consistent ordering
+                                    let ordered_fields: BTreeMap<_, _> = entry.fields.into_iter().collect();
+                                    let field_count = ordered_fields.len() * 2; // Each field has name and value
+                                    response.push_str(&format!("*{}\r\n", field_count));
+                                    for (field, value) in ordered_fields {
+                                        response.push_str(&format!("${}\r\n{}\r\n", field.len(), field));
+                                        response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
+                                    }
                                 }
                             }
+                            Ok(response)
                         }
-                        Ok(response)
                     },
-                    Err(e) => Err(format!("-{}\r\n", e)),
+                    Err(e) => {
+                        if e == "NULL" {
+                            Ok("$-1\r\n".to_string())
+                        } else if e == "XREAD_RETRY" {
+                            Err("XREAD_RETRY".to_string())  // Pass through the retry signal without formatting
+                        } else {
+                            Err(format!("-{}\r\n", e))  // Normal error formatting for other errors
+                        }
+                    }
                 }
             },
             RedisCommand::Info { subcommand } => {
@@ -395,7 +388,6 @@ impl Redis {
                     Ok(format!(":{}\r\n", up_to_date_replicas))
                 } else {
                     if *elapsed >= *timeout {
-                        #[cfg(debug_assertions)]
                         println!("timeout elapsed returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
                         Ok(format!(":{}\r\n", up_to_date_replicas))
                     } else {

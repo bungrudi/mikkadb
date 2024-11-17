@@ -127,8 +127,12 @@ impl ClientHandler {
                     match self.redis.lock().unwrap().execute_command(command, Some(&mut client)) {
                         Ok(response) => response,
                         Err(error) => {
-                            println!("{}", error.trim());
-                            error
+                            if error == "XREAD_RETRY" {
+                                "XREAD_RETRY".to_string()
+                            } else {
+                                println!("{}", error.trim());
+                                error
+                            }
                         }
                     }
                 }
@@ -172,6 +176,7 @@ impl ClientHandler {
                 }
 
                 // Print the raw input for debugging
+                #[cfg(debug_assertions)]
                 println!("Raw input ({} bytes): {}", bytes_read, String::from_utf8_lossy(&buffer[..bytes_read]));
 
                 let commands = parse_resp(&buffer, bytes_read);
@@ -202,61 +207,61 @@ impl ClientHandler {
                         }
 
                         // Handle retry cases
-                        if response.starts_with("-XREAD_RETRY") {
-                            let parts: Vec<&str> = response.split_whitespace().collect();
-                            let timeout = parts[1].parse::<u64>().unwrap();
+                        if response == "XREAD_RETRY" {
+                            #[cfg(debug_assertions)]
+                            println!("DEBUG: Got XREAD_RETRY response");
+
+                            let timeout = if let RedisCommand::XRead { block, .. } = &command {
+                                block.unwrap_or(0)
+                            } else {
+                                0
+                            };
+
                             let elapsed = start_time.elapsed().as_millis() as u64;
 
                             if timeout > 0 && elapsed >= timeout {
-                                if !master {
-                                    let mut client = client.lock().unwrap();
-                                    let _ = client.write(b"$-1\r\n");
-                                    let _ = client.flush();
-                                }
+                                #[cfg(debug_assertions)]
+                                println!("DEBUG: XREAD timeout expired, sending null response");
+
+                                let mut client = client.lock().unwrap();
+                                let _ = client.write(b"$-1\r\n").and_then(|_| client.flush());
                                 should_retry = false;
                             } else {
                                 should_retry = true;
-                                if let RedisCommand::XRead { keys, ids, block } = &command {
-                                    command = RedisCommand::XRead {
-                                        keys: keys.clone(),
-                                        ids: ids.clone(),
-                                        block: *block,
-                                    };
-                                }
                             }
                         } else if response == "WAIT_RETRY" {
-                            if let RedisCommand::Wait { numreplicas, timeout, .. } = command {
-                                let elapsed = start_time.elapsed().as_millis() as i64;
-                                if elapsed >= timeout {
-                                    let up_to_date_replicas = redis.lock().unwrap().replication.count_up_to_date_replicas();
+                            if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
+                                let new_elapsed = start_time.elapsed().as_millis() as i64;
+                                if new_elapsed >= timeout {
+                                    let redis = redis.lock().unwrap();
+                                    let up_to_date_replicas = redis.replication.count_up_to_date_replicas();
                                     let mut client = client.lock().unwrap();
                                     let _ = client.write(format!(":{}\r\n", up_to_date_replicas).as_bytes());
+                                    let _ = client.flush();
                                     should_retry = false;
                                 } else {
                                     should_retry = true;
-                                    command = RedisCommand::Wait { numreplicas, timeout, elapsed };
+                                    command = RedisCommand::Wait { numreplicas, timeout, elapsed: new_elapsed };
                                 }
+                            } else {
+                                should_retry = false;
                             }
                         } else {
                             // Handle normal response
                             if !master && !response.is_empty() {
                                 let mut client = client.lock().unwrap();
-                                let _ = client.write(response.as_bytes());
+                                let _ = client.write(response.as_bytes())
+                                    .and_then(|_| client.flush());
                             }
                             should_retry = false;
                         }
-
-                        // Sleep at the end of the loop if we need to retry
                         if should_retry {
-                            if response.starts_with("-XREAD_RETRY") {
-                                thread::sleep(Duration::from_millis(50));
-                            } else if response == "WAIT_RETRY" {
-                                thread::sleep(Duration::from_millis(300));
-                            }
+                            thread::sleep(Duration::from_millis(10));
                         }
                     }
                 }
             }
-        });
+        });        
+
     }
 }

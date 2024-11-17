@@ -241,7 +241,7 @@ fn test_xread_dollar_id() {
     let _ = redis.storage.xadd("mystream", "2000-0", fields2);
 
     // First XREAD with $ should return no entries since we want only new ones
-    let result = redis.storage.xread(&["mystream"], &["$"], None).unwrap();
+    let result = redis.storage.xread_with_options(&["mystream"], &["$"], None, None).unwrap();
     assert!(result.is_empty(), "Expected no entries for initial $ read");
 
     // Add a new entry after the $ read
@@ -251,7 +251,7 @@ fn test_xread_dollar_id() {
     let _ = redis.storage.xadd("mystream", "3000-0", fields3);
 
     // Second XREAD with $ should return only the new entry
-    let result = redis.storage.xread(&["mystream"], &["$"], None).unwrap();
+    let result = redis.storage.xread_with_options(&["mystream"], &["$"], None, None).unwrap();
     assert_eq!(result.len(), 1, "Expected one stream in results");
     
     let (stream_name, entries) = &result[0];
@@ -626,7 +626,7 @@ fn test_xread_block_zero() {
     // Keep retrying until we get a result
     let mut result = redis.lock().unwrap().execute_command(&xread, None);
     while let Err(ref e) = result {
-        if e.starts_with("-XREAD_RETRY") {
+        if e.starts_with("XREAD_RETRY") {
             thread::sleep(Duration::from_millis(50));
             result = redis.lock().unwrap().execute_command(&xread, None);
         } else {
@@ -650,4 +650,145 @@ fn test_xread_block_zero() {
                    $2\r\n95\r\n";
 
     assert_eq!(result, expected);
+}
+#[test]
+fn test_xread_with_count() {
+    let redis = test_redis();
+
+    // Add test entries
+    let mut fields1 = HashMap::new();
+    fields1.insert("sensor".to_string(), "1".to_string());
+    fields1.insert("value".to_string(), "100".to_string());
+    let _ = redis.storage.xadd("mystream", "1000-0", fields1);
+
+    let mut fields2 = HashMap::new();
+    fields2.insert("sensor".to_string(), "2".to_string());
+    fields2.insert("value".to_string(), "200".to_string());
+    let _ = redis.storage.xadd("mystream", "2000-0", fields2);
+
+    // Test XREAD with COUNT parameter
+    let result = redis.storage.xread_with_options(&["mystream"], &["0"], None, Some(1)).unwrap();
+    assert_eq!(result.len(), 1, "Expected one stream in results");
+
+    let (stream_name, entries) = &result[0];
+    assert_eq!(stream_name, "mystream");
+    assert_eq!(entries.len(), 1, "COUNT parameter should limit to 1 entry");
+
+    let entry = &entries[0];
+    assert_eq!(entry.id, "1000-0");
+    assert_eq!(entry.fields.get("sensor").unwrap(), "1");
+    assert_eq!(entry.fields.get("value").unwrap(), "100");
+}
+
+#[test]
+fn test_xread_with_count_and_block() {
+    let mut redis = test_redis();
+
+    // Add test entries
+    let mut fields1 = HashMap::new();
+    fields1.insert("name".to_string(), "test1".to_string());
+    let _ = redis.storage.xadd("mystream", "1000-0", fields1);
+
+    let mut fields2 = HashMap::new();
+    fields2.insert("name".to_string(), "test2".to_string());
+    let _ = redis.storage.xadd("mystream", "2000-0", fields2);
+
+    // Test XREAD command with both COUNT and BLOCK parameters
+    let xread = test_command(
+        "XREAD",
+        &["COUNT", "1", "BLOCK", "0", "STREAMS", "mystream", "0-0"],
+        ""
+    );
+
+    let result = redis.execute_command(&xread, None).unwrap();
+
+    // Verify we get exactly one entry
+    assert!(result.contains("*1\r\n")); // One stream
+    assert!(result.contains("$8\r\nmystream\r\n")); // Stream name
+    assert!(result.contains("1000-0")); // First entry ID
+    assert!(result.contains("test1")); // First entry value
+    assert!(!result.contains("2000-0")); // Should not contain second entry
+    assert!(!result.contains("test2")); // Should not contain second entry value
+}
+
+#[test]
+fn test_xread_count_parameter_parsing() {
+    let mut redis = test_redis();
+
+    // Add test entries
+    let mut fields = HashMap::new();
+    
+    fields.insert("name".to_string(), "first".to_string());
+    let _ = redis.storage.xadd("mystream", "1000-0", fields.clone());
+
+    fields.clear();
+    fields.insert("name".to_string(), "second".to_string());
+    let _ = redis.storage.xadd("mystream", "2000-0", fields.clone());
+
+    fields.clear();
+    fields.insert("name".to_string(), "third".to_string());
+    let _ = redis.storage.xadd("mystream", "3000-0", fields);
+    // Test different COUNT parameter positions
+    let test_cases = vec![
+        (
+            &["COUNT", "2", "STREAMS", "mystream", "0"] as &[&str],
+            2
+        ),
+        (
+            &["STREAMS", "mystream", "0", "COUNT", "1"],
+            3 // COUNT after STREAMS should be ignored, return all entries
+        ),
+        (
+            &["COUNT", "2", "BLOCK", "0", "STREAMS", "mystream", "0"],
+            2
+        ),
+        (
+            &["BLOCK", "0", "COUNT", "2", "STREAMS", "mystream", "0"],
+            2
+        ),
+    ];
+
+    for (params, expected_count) in test_cases {
+        let xread = test_command("XREAD", params, "");
+        let result = redis.execute_command(&xread, None).unwrap();
+
+        #[cfg(debug_assertions)]
+        {
+            println!("Params: {:?}", params);
+            println!("XREAD response: {}", result);
+        }
+
+        // Parse the RESP response to count the number of entries
+        let entry_count = count_xread_entries(&result);
+
+        assert_eq!(
+            entry_count, 
+            expected_count, 
+            "XREAD with params {:?} should return {} entries", 
+            params, 
+            expected_count
+        );
+    }
+}
+
+// Helper function to parse the RESP response and count the entries
+fn count_xread_entries(resp: &str) -> usize {
+    let mut lines = resp.lines();
+    let mut entry_count = 0;
+
+    // Skip the initial array size and stream info
+    if lines.next() == Some("*1") {
+        lines.next(); // *2
+        lines.next(); // $<len>
+        lines.next(); // stream name
+        if let Some(num_entries_line) = lines.next() {
+            if num_entries_line.starts_with('*') {
+                // Parse the number of entries
+                let num_entries = num_entries_line[1..].parse::<usize>().unwrap_or(0);
+                entry_count = num_entries;
+            }
+        }
+    }
+
+    entry_count
 }

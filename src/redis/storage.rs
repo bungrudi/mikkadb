@@ -9,10 +9,10 @@ pub struct StreamEntry {
     pub fields: HashMap<String, String>,
 }
 
-#[derive(Default, Clone)]  // Added Clone
+#[derive(Default, Clone)]
 pub struct StreamMetadata {
-    pub last_sequences: HashMap<u64, u64>,  // This is already Clone
-    pub last_dollar_id: Option<String>,     // This is already Clone
+    pub last_sequences: HashMap<u64, u64>,
+    pub last_dollar_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -292,7 +292,6 @@ impl Storage {
     pub fn incr(&self, key: &str) -> Result<i64, String> {
         let mut data = self.data.lock().unwrap();
         
-        // Get the current value or create new if doesn't exist
         let wrapper = match data.get(key) {
             Some(w) => w.clone(),  // Clone the wrapper to avoid borrow issues
             None => {
@@ -337,23 +336,15 @@ impl Storage {
         println!("DEBUG: Comparing stream IDs: {} and {}", id1, id2);
         
         if id1 == "-" {
-            #[cfg(debug_assertions)]
-            println!("DEBUG: First ID is '-', returning Less");
             return std::cmp::Ordering::Less;
         }
         if id2 == "-" {
-            #[cfg(debug_assertions)]
-            println!("DEBUG: Second ID is '-', returning Greater");
             return std::cmp::Ordering::Greater;
         }
         if id1 == "+" {
-            #[cfg(debug_assertions)]
-            println!("DEBUG: First ID is '+', returning Greater");
             return std::cmp::Ordering::Greater;
         }
         if id2 == "+" {
-            #[cfg(debug_assertions)]
-            println!("DEBUG: Second ID is '+', returning Less");
             return std::cmp::Ordering::Less;
         }
 
@@ -362,23 +353,13 @@ impl Storage {
 
         let ms1 = parts1[0].parse::<u64>().unwrap();
         let ms2 = parts2[0].parse::<u64>().unwrap();
-        #[cfg(debug_assertions)]
-        println!("DEBUG: Comparing timestamps: {} and {}", ms1, ms2);
 
         if ms1 != ms2 {
-            let result = ms1.cmp(&ms2);
-            #[cfg(debug_assertions)]
-            println!("DEBUG: Timestamps differ returning {:?}", result);
-            result
+            ms1.cmp(&ms2)
         } else {
             let seq1 = parts1[1].parse::<u64>().unwrap();
             let seq2 = parts2[1].parse::<u64>().unwrap();
-            #[cfg(debug_assertions)]
-            println!("DEBUG: Comparing sequences: {} and {}", seq1, seq2);
-            let result = seq1.cmp(&seq2);
-            #[cfg(debug_assertions)]
-            println!("DEBUG: Sequences comparison result: {:?}", result);
-            result
+            seq1.cmp(&seq2)
         }
     }
 
@@ -401,10 +382,9 @@ impl Storage {
     }
 
     fn validate_stream_id(id: &str) -> Result<(), Cow<'static, str>> {
-        if id == "$" {
+        if id == "$" || id == "0" {
             return Ok(());
         }
-        
         let parts: Vec<&str> = id.split('-').collect();
         if parts.len() != 2 {
             return Err("ERR Invalid milliseconds in stream ID".into());
@@ -429,11 +409,7 @@ impl Storage {
     }
 
     pub fn xadd(&self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, Cow<'static, str>> {
-        #[cfg(debug_assertions)]
-        println!("DEBUG: XADD acquiring lock...");
         let mut data = self.data.lock().unwrap();
-        #[cfg(debug_assertions)]
-        println!("DEBUG: XADD acquired lock");
         
         let (time_part, sequence) = if id == "*" {
             (Self::get_current_time_ms(), None)
@@ -447,8 +423,6 @@ impl Storage {
         if id != "*" && !id.ends_with("-*") {
             let new_id = format!("{}-{}", time_part, sequence.unwrap_or(0));
             if Self::compare_stream_ids(&new_id, "0-0") != std::cmp::Ordering::Greater {
-                #[cfg(debug_assertions)]
-                println!("DEBUG: XADD releasing lock (error case)");
                 return Err("ERR The ID specified in XADD must be greater than 0-0".into());
             }
         }
@@ -469,8 +443,6 @@ impl Storage {
                             fields,
                         };
                         entries.push(entry);
-                        #[cfg(debug_assertions)]
-                        println!("DEBUG: XADD added new entry with id: {}", new_id);
                         Ok(new_id)
                     },
                     _ => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
@@ -489,14 +461,10 @@ impl Storage {
                     entries: vec![entry],
                     metadata,
                 });
-                #[cfg(debug_assertions)]
-                println!("DEBUG: XADD created new stream with id: {}", new_id);
                 Ok(new_id)
             },
         };
 
-        #[cfg(debug_assertions)]
-        println!("DEBUG: XADD releasing lock");
         result
     }
 
@@ -522,9 +490,10 @@ impl Storage {
         }
     }
 
-    pub fn xread(&self, keys: &[&str], ids: &[&str], block: Option<u64>) -> Result<Vec<(String, Vec<StreamEntry>)>, Cow<'static, str>> {
+    pub fn xread_with_options(&self, keys: &[&str], ids: &[&str], block: Option<u64>, count: Option<usize>)
+        -> Result<Vec<(String, Vec<StreamEntry>)>, Cow<'static, str>> {
         #[cfg(debug_assertions)]
-        println!("DEBUG: XREAD called with keys: {:?} ids: {:?} block: {:?}", keys, ids, block);
+        println!("DEBUG: XREAD called with keys: {:?} ids: {:?} block: {:?} count: {:?}", keys, ids, block, count);
 
         // Validate all IDs first
         for &id in ids {
@@ -540,33 +509,31 @@ impl Storage {
         for (&key, &id) in keys.iter().zip(ids.iter()) {
             match data.get_mut(key) {
                 Some(ValueWrapper::Stream { entries, metadata }) => {
-                    #[cfg(debug_assertions)]
-                    println!("DEBUG: XREAD found stream for key: {} with {} entries", key, entries.len());
-                    
                     let effective_id = if id == "$" {
-                        if metadata.last_dollar_id.is_none() {
-                            // First time seeing $, store the current last ID
-                            if let Some(last_entry) = entries.last() {
-                                metadata.last_dollar_id = Some(last_entry.id.clone());
-                            }
+                        // For $ ID, use the last entry's ID as the effective ID
+                        if let Some(last_entry) = entries.last() {
+                            metadata.last_dollar_id = Some(last_entry.id.clone());
+                            last_entry.id.as_str()
+                        } else {
+                            "0-0"
                         }
-                        metadata.last_dollar_id.as_deref().unwrap_or("0-0")
+                    } else if id == "0" {
+                        "0-0"
                     } else {
                         id
                     };
 
-                    let new_entries: Vec<StreamEntry> = entries.iter()
-                        .filter(|entry| {
-                            let comparison = Self::compare_stream_ids(&entry.id, effective_id);
-                            #[cfg(debug_assertions)]
-                            println!("DEBUG: XREAD comparing entry {} with effective_id {}: {:?}", entry.id, effective_id, comparison);
-                            comparison == std::cmp::Ordering::Greater
-                        })
+                    let mut new_entries: Vec<StreamEntry> = entries.iter()
+                        .filter(|entry| Self::compare_stream_ids(&entry.id, effective_id) == std::cmp::Ordering::Greater)
                         .map(|entry| StreamEntry {
                             id: entry.id.clone(),
                             fields: entry.fields.clone(),
                         })
                         .collect();
+
+                    if let Some(count_limit) = count {
+                        new_entries.truncate(count_limit);
+                    }
 
                     if !new_entries.is_empty() {
                         result.push((key.to_string(), new_entries));
@@ -578,20 +545,17 @@ impl Storage {
         }
 
         if !result.is_empty() {
-            #[cfg(debug_assertions)]
-            println!("DEBUG: XREAD returning results immediately");
             return Ok(result);
         }
 
+        // If we're in blocking mode and no results were found
         match block {
-            Some(timeout) => {
-                #[cfg(debug_assertions)]
-                println!("DEBUG: XREAD requesting retry with timeout: {}", timeout);
-                Err(format!("{} {}", crate::redis::XREAD_RETRY_PREFIX, timeout).into())
-            }
+            Some(_) => {
+                // For both BLOCK 0 and BLOCK N, signal retry
+                Err("XREAD_RETRY".into())
+            },
             None => {
-                #[cfg(debug_assertions)]
-                println!("DEBUG: XREAD returning empty result (non-blocking)");
+                // For non-blocking XREAD with no results
                 Ok(vec![])
             }
         }
