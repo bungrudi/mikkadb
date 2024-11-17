@@ -41,6 +41,11 @@ impl Storage {
         }
     }
 
+    pub fn flushdb(&self) {
+        let mut data = self.data.lock().unwrap();
+        data.clear();
+    }
+
     pub fn set(&self, key: &str, value: &str, ttl: Option<usize>) {
         let mut data = self.data.lock().unwrap();
         let expiration = ttl.map(|ttl| {

@@ -23,6 +23,7 @@ pub enum RedisCommand<'a> {
     XRange { key: &'a str, start: &'a str, end: &'a str },
     XRead { keys: Vec<&'a str>, ids: Vec<&'a str>, block: Option<u64> },
     Incr { key: &'a str },
+    FlushDB,
     // List commands
     LPush { key: &'a str, value: &'a str },
     RPush { key: &'a str, value: &'a str },
@@ -56,6 +57,7 @@ impl RedisCommand<'_> {
     const XRANGE: &'static str = "XRANGE";
     const XREAD: &'static str = "XREAD";
     const INCR: &'static str = "INCR";
+    const FLUSHDB: &'static str = "FLUSHDB";
     // List command constants
     const LPUSH: &'static str = "LPUSH";
     const RPUSH: &'static str = "RPUSH";
@@ -241,6 +243,9 @@ impl RedisCommand<'_> {
                 } else {
                     Some(RedisCommand::Incr { key })
                 }
+            },
+            command if command.eq_ignore_ascii_case(Self::FLUSHDB) => {
+                Some(RedisCommand::FlushDB)
             },
             // List commands
             command if command.eq_ignore_ascii_case(Self::LPUSH) => {

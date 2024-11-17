@@ -428,6 +428,10 @@ impl Redis {
                 }
                 Ok(response)
             },
+            RedisCommand::FlushDB => {
+                self.storage.flushdb();
+                Ok("+OK\r\n".to_string())
+            },
             RedisCommand::Error { message } => {
                 Err(format!("-{}\r\n", message))
             },

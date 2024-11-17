@@ -42,7 +42,9 @@ impl ClientHandler {
             RedisCommand::Multi => {
                 let mut in_transaction = self.in_transaction.lock().unwrap();
                 if *in_transaction {
-                    "-ERR MULTI calls can not be nested\r\n".to_string()
+                    let error = "-ERR MULTI calls can not be nested\r\n".to_string();
+                    println!("{}", error.trim());
+                    error
                 } else {
                     *in_transaction = true;
                     "+OK\r\n".to_string()
@@ -51,7 +53,9 @@ impl ClientHandler {
             RedisCommand::Exec => {
                 let mut in_transaction = self.in_transaction.lock().unwrap();
                 if !*in_transaction {
-                    "-ERR EXEC without MULTI\r\n".to_string()
+                    let error = "-ERR EXEC without MULTI\r\n".to_string();
+                    println!("{}", error.trim());
+                    error
                 } else {
                     *in_transaction = false;
                     let mut responses = Vec::new();
@@ -65,7 +69,10 @@ impl ClientHandler {
                             .execute_command(&cmd, Some(&mut client));
                         match result {
                             Ok(response) => responses.push(response),
-                            Err(err) => responses.push(err),
+                            Err(err) => {
+                                println!("{}", err.trim());
+                                responses.push(err)
+                            },
                         }
                     }
 
@@ -80,7 +87,9 @@ impl ClientHandler {
             RedisCommand::Discard => {
                 let mut in_transaction = self.in_transaction.lock().unwrap();
                 if !*in_transaction {
-                    "-ERR DISCARD without MULTI\r\n".to_string()
+                    let error = "-ERR DISCARD without MULTI\r\n".to_string();
+                    println!("{}", error.trim());
+                    error
                 } else {
                     *in_transaction = false;
                     // Clear all queued commands
@@ -111,7 +120,11 @@ impl ClientHandler {
                                 key: Box::leak(key.to_string().into_boxed_str()),
                             }
                         },
-                        _ => return "-ERR Command not supported in transaction\r\n".to_string(),
+                        _ => {
+                            let error = "-ERR Command not supported in transaction\r\n".to_string();
+                            println!("{}", error.trim());
+                            return error;
+                        }
                     };
                     self.queued_commands.lock().unwrap().push_back(owned_command);
                     "+QUEUED\r\n".to_string()
@@ -119,7 +132,10 @@ impl ClientHandler {
                     let mut client = self.client.lock().unwrap();
                     match self.redis.lock().unwrap().execute_command(command, Some(&mut client)) {
                         Ok(response) => response,
-                        Err(error) => error,
+                        Err(error) => {
+                            println!("{}", error.trim());
+                            error
+                        }
                     }
                 }
             }
@@ -170,6 +186,7 @@ impl ClientHandler {
                 // iterate over commands
                 for command in commands {
                     if matches!(command, RedisCommand::None) {
+                        println!("-ERR unknown command");
                         break;
                     }
 

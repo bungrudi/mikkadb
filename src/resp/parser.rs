@@ -274,4 +274,26 @@ mod tests {
             _ => panic!("Invalid command"),
         }
     }
+
+    #[test]
+    fn test_resp_flushdb() {
+        let buffer = b"*1\r\n$7\r\nFLUSHDB\r\n";
+        let commands = parse_resp(buffer, buffer.len());
+        assert_eq!(commands_len!(commands), 1);
+        match commands[0] {
+            RedisCommand::FlushDB => (),
+            _ => panic!("Invalid command"),
+        }
+    }
+
+    #[test]
+    fn test_non_resp_flushdb() {
+        let buffer = b"FLUSHDB\r\n";
+        let commands = parse_resp(buffer, buffer.len());
+        assert_eq!(commands_len!(commands), 1);
+        match commands[0] {
+            RedisCommand::FlushDB => (),
+            _ => panic!("Invalid command"),
+        }
+    }
 }
