@@ -224,7 +224,8 @@ impl ClientHandler {
                                 println!("DEBUG: XREAD timeout expired, sending null response");
 
                                 let mut client = client.lock().unwrap();
-                                let _ = client.write(b"$-1\r\n").and_then(|_| client.flush());
+                                let _ = client.write(b"$-1\r\n");
+                                let _ = client.flush();
                                 should_retry = false;
                             } else {
                                 should_retry = true;
@@ -236,8 +237,7 @@ impl ClientHandler {
                                     let redis = redis.lock().unwrap();
                                     let up_to_date_replicas = redis.replication.count_up_to_date_replicas();
                                     let mut client = client.lock().unwrap();
-                                    let _ = client.write(format!(":{}\r\n", up_to_date_replicas).as_bytes());
-                                    let _ = client.flush();
+                                    let _ = client.write(format!(":{}\r\n", up_to_date_replicas).as_bytes()).and_then(|_| client.flush());
                                     should_retry = false;
                                 } else {
                                     should_retry = true;
@@ -250,8 +250,7 @@ impl ClientHandler {
                             // Handle normal response
                             if !master && !response.is_empty() {
                                 let mut client = client.lock().unwrap();
-                                let _ = client.write(response.as_bytes())
-                                    .and_then(|_| client.flush());
+                                let _ = client.write(response.as_bytes()).and_then(|_| client.flush());
                             }
                             should_retry = false;
                         }

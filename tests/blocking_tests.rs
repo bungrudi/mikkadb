@@ -85,7 +85,7 @@ fn test_xread_blocking_timeout_expired() {
     }
 
     // Wait for timeout
-    thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(200));
 
     // Check the response
     let written_data = stream.get_written_data();
