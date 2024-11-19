@@ -556,7 +556,7 @@ impl Storage {
             },
             None => {
                 // For non-blocking XREAD with no results
-                Ok(vec![])
+                Err("NULL".into())
             }
         }
     }

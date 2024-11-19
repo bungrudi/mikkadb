@@ -12,8 +12,7 @@ mod utils;
 #[test]
 fn test_xread_blocking_timeout() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
-    let redis_clone1 = Arc::clone(&redis);
-    let redis_clone2 = Arc::clone(&redis);  // Create a second clone
+    let redis_clone = Arc::clone(&redis);
 
     // Create mock stream
     let stream = MockTcpStream::new();
@@ -21,16 +20,6 @@ fn test_xread_blocking_timeout() {
 
     // Start the client handler in a separate thread
     client_handler.start();
-
-    // Start a thread that will add data after a delay
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(100));
-        let mut fields = std::collections::HashMap::new();
-        fields.insert("field1".to_string(), "value1".to_string());
-        
-        let mut redis = redis_clone1.lock().unwrap();  // Use first clone
-        redis.xadd("mystream", "*", fields).unwrap();
-    });
 
     // Write XREAD command to the stream first
     let xread_command = "*6\r\n$5\r\nXREAD\r\n$5\r\nBLOCK\r\n$4\r\n1000\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$3\r\n0-0\r\n";
@@ -48,7 +37,7 @@ fn test_xread_blocking_timeout() {
         let mut fields = std::collections::HashMap::new();
         fields.insert("field1".to_string(), "value1".to_string());
         
-        let mut redis = redis_clone2.lock().unwrap();  // Use second clone
+        let mut redis = redis_clone.lock().unwrap();
         redis.xadd("mystream", "*", fields).unwrap();
     });
 

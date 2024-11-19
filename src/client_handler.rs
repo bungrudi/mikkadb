@@ -237,7 +237,8 @@ impl ClientHandler {
                                     let redis = redis.lock().unwrap();
                                     let up_to_date_replicas = redis.replication.count_up_to_date_replicas();
                                     let mut client = client.lock().unwrap();
-                                    let _ = client.write(format!(":{}\r\n", up_to_date_replicas).as_bytes()).and_then(|_| client.flush());
+                                    let _ = client.write(format!(":{}\r\n", up_to_date_replicas).as_bytes());
+                                    let _ = client.flush();
                                     should_retry = false;
                                 } else {
                                     should_retry = true;
@@ -248,9 +249,10 @@ impl ClientHandler {
                             }
                         } else {
                             // Handle normal response
-                            if !master && !response.is_empty() {
+                            if !response.is_empty() {
                                 let mut client = client.lock().unwrap();
-                                let _ = client.write(response.as_bytes()).and_then(|_| client.flush());
+                                let _ = client.write(response.as_bytes());
+                                let _ = client.flush();
                             }
                             should_retry = false;
                         }
