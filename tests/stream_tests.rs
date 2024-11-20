@@ -136,10 +136,7 @@ fn test_xadd_auto_sequence_error_cases() {
     // Trying to add entry with same ID should fail
     let result = redis.storage.xadd("mystream", "5-0", fields.clone());
     assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        "ERR The ID specified in XADD is equal or smaller than the target stream top item"
-    );
+    assert_eq!(result.unwrap_err(), "ERR The ID specified in XADD is equal or smaller than the target stream top item");
 
     // Trying to add entry with lower time part should fail
     let result = redis.storage.xadd("mystream", "4-0", fields.clone());
@@ -219,10 +216,7 @@ fn test_xrange_wrong_type() {
     // Try XRANGE on string key
     let result = redis.storage.xrange("string_key", "0-0", "9999999999999-0");
     assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        "ERR WRONGTYPE Operation against a key holding the wrong kind of value"
-    );
+    assert_eq!(result.unwrap_err(), "ERR WRONGTYPE Operation against a key holding the wrong kind of value");
 }
 
 #[test]
@@ -497,10 +491,7 @@ fn test_xread_wrong_type() {
 
     let result = redis.execute_command(&xread, None);
     assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        "-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-    );
+    assert_eq!(result.unwrap_err(), "-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
 }
 
 #[test]
@@ -516,10 +507,7 @@ fn test_xread_invalid_id() {
 
     let result = redis.execute_command(&xread, None);
     assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        "-ERR Invalid milliseconds in stream ID\r\n"
-    );
+    assert_eq!(result.unwrap_err(), "-ERR Invalid milliseconds in stream ID\r\n");
 }
 
 #[test]
@@ -535,10 +523,7 @@ fn test_xread_missing_parameters() {
 
     let result = redis.execute_command(&xread, None);
     assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        "-ERR wrong number of arguments for 'xread' command\r\n"
-    );
+    assert_eq!(result.unwrap_err(), "-ERR wrong number of arguments for 'xread' command\r\n");
 }
 
 #[test]
@@ -651,6 +636,7 @@ fn test_xread_block_zero() {
 
     assert_eq!(result, expected);
 }
+
 #[test]
 fn test_xread_with_count() {
     let redis = test_redis();
@@ -714,61 +700,89 @@ fn test_xread_with_count_and_block() {
 #[test]
 fn test_xread_count_parameter_parsing() {
     let mut redis = test_redis();
-
+    
     // Add test entries
     let mut fields = HashMap::new();
-    
     fields.insert("name".to_string(), "first".to_string());
     let _ = redis.storage.xadd("mystream", "1000-0", fields.clone());
 
-    fields.clear();
     fields.insert("name".to_string(), "second".to_string());
     let _ = redis.storage.xadd("mystream", "2000-0", fields.clone());
 
-    fields.clear();
     fields.insert("name".to_string(), "third".to_string());
-    let _ = redis.storage.xadd("mystream", "3000-0", fields);
-    // Test different COUNT parameter positions
-    let test_cases = vec![
-        (
-            &["COUNT", "2", "STREAMS", "mystream", "0"] as &[&str],
-            2
-        ),
-        (
-            &["STREAMS", "mystream", "0", "COUNT", "1"],
-            3 // COUNT after STREAMS should be ignored, return all entries
-        ),
-        (
-            &["COUNT", "2", "BLOCK", "0", "STREAMS", "mystream", "0"],
-            2
-        ),
-        (
-            &["BLOCK", "0", "COUNT", "2", "STREAMS", "mystream", "0"],
-            2
-        ),
-    ];
+    let _ = redis.storage.xadd("mystream", "3000-0", fields.clone());
 
-    for (params, expected_count) in test_cases {
-        let xread = test_command("XREAD", params, "");
-        let result = redis.execute_command(&xread, None).unwrap();
+    // Test XREAD with COUNT before STREAMS (proper Redis spec)
+    let xread = test_command("XREAD", &["COUNT", "2", "STREAMS", "mystream", "0"], "");
+    let result = redis.execute_command(&xread, None).unwrap();
+    
+    // Should return only first 2 entries
+    let entry_count = count_xread_entries(&result);
+    assert_eq!(entry_count, 2);
+}
 
-        #[cfg(debug_assertions)]
-        {
-            println!("Params: {:?}", params);
-            println!("XREAD response: {}", result);
-        }
+#[test]
+fn test_xread_multiple_streams() {
+    let mut redis = test_redis();
+    
+    // Add entries to first stream
+    let mut fields1 = HashMap::new();
+    fields1.insert("name".to_string(), "alice".to_string());
+    let _ = redis.storage.xadd("stream1", "1000-0", fields1.clone());
+    
+    fields1.insert("name".to_string(), "bob".to_string());
+    let _ = redis.storage.xadd("stream1", "2000-0", fields1.clone());
 
-        // Parse the RESP response to count the number of entries
-        let entry_count = count_xread_entries(&result);
+    // Add entries to second stream
+    let mut fields2 = HashMap::new();
+    fields2.insert("temp".to_string(), "25".to_string());
+    let _ = redis.storage.xadd("stream2", "1500-0", fields2.clone());
+    
+    fields2.insert("temp".to_string(), "30".to_string());
+    let _ = redis.storage.xadd("stream2", "2500-0", fields2.clone());
 
-        assert_eq!(
-            entry_count, 
-            expected_count, 
-            "XREAD with params {:?} should return {} entries", 
-            params, 
-            expected_count
-        );
-    }
+    // Test XREAD with multiple streams
+    let xread = test_command("XREAD", &["STREAMS", "stream1", "stream2", "0", "0"], "");
+    let result = redis.execute_command(&xread, None).unwrap();
+    
+    // Verify response format and content
+    assert!(result.contains("stream1"));
+    assert!(result.contains("stream2"));
+    assert!(result.contains("alice"));
+    assert!(result.contains("bob"));
+    assert!(result.contains("25"));
+    assert!(result.contains("30"));
+}
+
+#[test]
+fn test_xread_multiple_streams_with_different_ids() {
+    let mut redis = test_redis();
+    
+    // Add entries to first stream
+    let mut fields1 = HashMap::new();
+    fields1.insert("name".to_string(), "alice".to_string());
+    let _ = redis.storage.xadd("stream1", "1000-0", fields1.clone());
+    
+    fields1.insert("name".to_string(), "bob".to_string());
+    let _ = redis.storage.xadd("stream1", "2000-0", fields1.clone());
+
+    // Add entries to second stream
+    let mut fields2 = HashMap::new();
+    fields2.insert("temp".to_string(), "25".to_string());
+    let _ = redis.storage.xadd("stream2", "1500-0", fields2.clone());
+    
+    fields2.insert("temp".to_string(), "30".to_string());
+    let _ = redis.storage.xadd("stream2", "2500-0", fields2.clone());
+
+    // Test XREAD with different IDs for each stream
+    let xread = test_command("XREAD", &["STREAMS", "stream1", "stream2", "1500-0", "2000-0"], "");
+    let result = redis.execute_command(&xread, None).unwrap();
+    
+    // Should only return entries after specified IDs
+    assert!(!result.contains("alice")); // Before 1500-0
+    assert!(result.contains("bob")); // After 1500-0
+    assert!(!result.contains("25")); // Before 2000-0
+    assert!(result.contains("30")); // After 2000-0
 }
 
 // Helper function to parse the RESP response and count the entries
@@ -791,4 +805,156 @@ fn count_xread_entries(resp: &str) -> usize {
     }
 
     entry_count
+}
+
+// XREAD Parser Tests
+mod xread_parser_tests {
+    use super::*;
+    use redis_starter_rust::redis::xread_parser::parse_xread;
+
+    #[test]
+    fn test_parse_basic_xread() {
+        // Basic XREAD STREAMS key id
+        let params = vec![
+            "STREAMS".to_string(),
+            "mystream".to_string(),
+            "0-0".to_string(),
+        ];
+        let result = parse_xread(&params).unwrap();
+        assert_eq!(result.keys, vec!["mystream"]);
+        assert_eq!(result.ids, vec!["0-0"]);
+        assert_eq!(result.block, None);
+        assert_eq!(result.count, None);
+    }
+
+    #[test]
+    fn test_parse_xread_with_count() {
+        // COUNT must come before STREAMS
+        let params = vec![
+            "COUNT".to_string(),
+            "2".to_string(),
+            "STREAMS".to_string(),
+            "mystream".to_string(),
+            "0-0".to_string(),
+        ];
+        let result = parse_xread(&params).unwrap();
+        assert_eq!(result.keys, vec!["mystream"]);
+        assert_eq!(result.ids, vec!["0-0"]);
+        assert_eq!(result.count, Some(2));
+    }
+
+    #[test]
+    fn test_parse_xread_with_block() {
+        // BLOCK must come before STREAMS
+        let params = vec![
+            "BLOCK".to_string(),
+            "0".to_string(),
+            "STREAMS".to_string(),
+            "mystream".to_string(),
+            "0-0".to_string(),
+        ];
+        let result = parse_xread(&params).unwrap();
+        assert_eq!(result.keys, vec!["mystream"]);
+        assert_eq!(result.ids, vec!["0-0"]);
+        assert_eq!(result.block, Some(0));
+    }
+
+    #[test]
+    fn test_parse_xread_with_block_and_count() {
+        // Both BLOCK and COUNT must come before STREAMS
+        let params = vec![
+            "COUNT".to_string(),
+            "5".to_string(),
+            "BLOCK".to_string(),
+            "1000".to_string(),
+            "STREAMS".to_string(),
+            "mystream".to_string(),
+            "0-0".to_string(),
+        ];
+        let result = parse_xread(&params).unwrap();
+        assert_eq!(result.keys, vec!["mystream"]);
+        assert_eq!(result.ids, vec!["0-0"]);
+        assert_eq!(result.block, Some(1000));
+        assert_eq!(result.count, Some(5));
+    }
+
+    #[test]
+    fn test_parse_xread_with_special_ids() {
+        // Test with $ (special ID meaning "latest ID")
+        let params = vec![
+            "STREAMS".to_string(),
+            "mystream".to_string(),
+            "$".to_string(),
+        ];
+        let result = parse_xread(&params).unwrap();
+        assert_eq!(result.ids, vec!["$"]);
+
+        // Test with standard ID format (ms-seq)
+        let params = vec![
+            "STREAMS".to_string(),
+            "mystream".to_string(),
+            "1000-0".to_string(),
+        ];
+        let result = parse_xread(&params).unwrap();
+        assert_eq!(result.ids, vec!["1000-0"]);
+    }
+
+    #[test]
+    fn test_parse_xread_multiple_streams() {
+        // Multiple streams must have matching number of IDs
+        let params = vec![
+            "STREAMS".to_string(),
+            "stream1".to_string(),
+            "stream2".to_string(),
+            "1000-0".to_string(),
+            "2000-0".to_string(),
+        ];
+        let result = parse_xread(&params).unwrap();
+        assert_eq!(result.keys, vec!["stream1", "stream2"]);
+        assert_eq!(result.ids, vec!["1000-0", "2000-0"]);
+    }
+
+    #[test]
+    fn test_parse_xread_error_cases() {
+        // Missing STREAMS keyword
+        let params = vec!["mystream".to_string(), "0-0".to_string()];
+        let result = parse_xread(&params);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "-ERR Missing 'STREAMS' keyword\r\n");
+
+        // Invalid BLOCK value
+        let params = vec![
+            "BLOCK".to_string(),
+            "invalid".to_string(),
+            "STREAMS".to_string(),
+            "mystream".to_string(),
+            "0-0".to_string(),
+        ];
+        let result = parse_xread(&params);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "-ERR syntax error in BLOCK parameter\r\n");
+
+        // Invalid COUNT value
+        let params = vec![
+            "COUNT".to_string(),
+            "invalid".to_string(),
+            "STREAMS".to_string(),
+            "mystream".to_string(),
+            "0-0".to_string(),
+        ];
+        let result = parse_xread(&params);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "-ERR syntax error in COUNT parameter\r\n");
+
+        // Mismatched number of streams and IDs
+        let params = vec![
+            "STREAMS".to_string(),
+            "stream1".to_string(),
+            "stream2".to_string(),
+            "1000-0".to_string(),
+        ];
+        let result = parse_xread(&params);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "-ERR wrong number of arguments for 'xread' command\r\n");
+    }
 }
