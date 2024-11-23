@@ -99,6 +99,17 @@ impl ClientHandler {
                 }
             },
             RedisCommand::XRead { keys, ids, block, count } => {
+                #[cfg(debug_assertions)]
+                println!("\n[ClientHandler::execute_command] Handling XREAD command:");
+                #[cfg(debug_assertions)]
+                println!("  - Keys: {:?}", keys);
+                #[cfg(debug_assertions)]
+                println!("  - IDs: {:?}", ids);
+                #[cfg(debug_assertions)]
+                println!("  - Block: {:?}", block);
+                #[cfg(debug_assertions)]
+                println!("  - Count: {:?}", count);
+
                 let request = XReadRequest {
                     keys: keys.iter().map(|s| s.to_string()).collect(),
                     ids: ids.iter().map(|s| s.to_string()).collect(),
@@ -109,51 +120,63 @@ impl ClientHandler {
                 let mut handler = XReadHandler::new(Arc::clone(&self.redis), request);
                 match handler.run_loop() {
                     Ok(results) => {
+                        #[cfg(debug_assertions)]
+                        println!("[ClientHandler::execute_command] Got {} streams with entries", results.len());
                         if results.is_empty() {
-                            "*0\r\n".to_string()
+                            #[cfg(debug_assertions)]
+                            println!("[ClientHandler::execute_command] Returning nil response");
+                            "*-1\r\n".to_string()  // Redis nil response
                         } else {
                             let mut response = String::new();
                             
                             // Format: *<num_streams>\r\n
                             response.push_str(&format!("*{}\r\n", results.len()));
+                            #[cfg(debug_assertions)]
+                            println!("[ClientHandler::execute_command] Response header: *{}", results.len());
                             
                             // For each stream: *2\r\n$<len>\r\n<stream>\r\n*<entries>\r\n
                             for (stream_name, entries) in results {
-                                response.push_str("*2\r\n"); // Stream name and entries array
-                                response.push_str(&format!("${}\r\n{}\r\n", 
-                                    stream_name.len(), stream_name));
+                                #[cfg(debug_assertions)]
+                                println!("[ClientHandler::execute_command] Processing stream '{}' with {} entries", stream_name, entries.len());
+                                // Array of 2 elements (stream name and entries array)
+                                response.push_str("*2\r\n");
                                 
-                                // Entries array
-                                if entries.is_empty() {
-                                    response.push_str("*0\r\n");
-                                    continue;
-                                }
-
+                                // Stream name
+                                response.push_str(&format!("${}\r\n{}\r\n", stream_name.len(), stream_name));
+                                
+                                // Array of entries
                                 response.push_str(&format!("*{}\r\n", entries.len()));
                                 
-                                // For each entry: *2\r\n$<len>\r\n<id>\r\n*<fields>\r\n
+                                // Each entry is an array of 2 elements (ID and fields array)
                                 for entry in entries {
-                                    response.push_str("*2\r\n"); // ID and fields array
-                                    response.push_str(&format!("${}\r\n{}\r\n", 
-                                        entry.id.len(), entry.id));
+                                    #[cfg(debug_assertions)]
+                                    println!("[ClientHandler::execute_command] Processing entry {} with {} fields", entry.id, entry.fields.len());
+                                    response.push_str("*2\r\n");  // Array of 2 elements (ID and fields)
                                     
-                                    // Fields array: *<num_fields*2>\r\n$<len>\r\n<field>\r\n$<len>\r\n<value>\r\n
-                                    response.push_str(&format!("*{}\r\n", entry.fields.len() * 2));
-                                    for (field, value) in entry.fields {
-                                        response.push_str(&format!("${}\r\n{}\r\n${}\r\n{}\r\n",
-                                            field.len(), field, value.len(), value));
+                                    // ID
+                                    response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id));
+                                    
+                                    // Fields array - each field is a key-value pair
+                                    let field_count = entry.fields.len() * 2;  // Each field has key and value
+                                    response.push_str(&format!("*{}\r\n", field_count));
+                                    
+                                    for (key, value) in entry.fields {
+                                        // Field key
+                                        response.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
+                                        // Field value
+                                        response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
                                     }
                                 }
                             }
+                            #[cfg(debug_assertions)]
+                            println!("[ClientHandler::execute_command] Final response: {:?}", response);
                             response
                         }
-                    }
+                    },
                     Err(e) => {
-                        if e == "XREAD_RETRY" {
-                            "*0\r\n".to_string()
-                        } else {
-                            format!("-ERR {}\r\n", e)
-                        }
+                        #[cfg(debug_assertions)]
+                        println!("[ClientHandler::execute_command] Error: {}", e);
+                        format!("-ERR {}\r\n", e)
                     }
                 }
             },
@@ -201,6 +224,8 @@ impl ClientHandler {
     }
 
     pub fn start(&mut self) {
+        #[cfg(debug_assertions)]
+        println!("\n[ClientHandler::start] Starting client handler");
         let mut buffer: [u8;2048] = [0; 2048];
         let client = Arc::clone(&self.client);
         let redis = Arc::clone(&self.redis);
@@ -227,29 +252,33 @@ impl ClientHandler {
                     let mut client = client.lock().unwrap();
                     match client.read(&mut buffer) {
                         Ok(n) => n,
-                        Err(_) => break,
+                        Err(e) => {
+                            #[cfg(debug_assertions)]
+                            println!("[ClientHandler::start] Error reading from client: {}", e);
+                            break;
+                        }
                     }
                 };
 
                 if bytes_read == 0 {
+                    #[cfg(debug_assertions)]
+                    println!("[ClientHandler::start] Client disconnected (0 bytes read)");
                     break;
                 }
 
-                // Print the raw input for debugging
                 #[cfg(debug_assertions)]
-                println!("Raw input ({} bytes): {}", bytes_read, String::from_utf8_lossy(&buffer[..bytes_read]));
+                println!("[ClientHandler::start] Read {} bytes from client", bytes_read);
+                #[cfg(debug_assertions)]
+                println!("[ClientHandler::start] Raw input: {}", String::from_utf8_lossy(&buffer[..bytes_read]));
 
                 let commands = parse_resp(&buffer, bytes_read);
+                #[cfg(debug_assertions)]
+                println!("[ClientHandler::start] Parsed {} commands", commands.len());
 
-                // increment bytes read..
-                // TODO: only for write commands
-                redis.lock().expect("failed to lock redis").incr_bytes_processed(bytes_read as u64);
-
-                // iterate over commands
                 for command in commands {
                     if matches!(command, RedisCommand::None) {
                         #[cfg(debug_assertions)]
-                        println!("DEBUG: Skipping None command. Original RESP: {}", String::from_utf8_lossy(&buffer[..bytes_read]));
+                        println!("[ClientHandler::start] Skipping None command");
                         break;
                     }
 
@@ -258,10 +287,16 @@ impl ClientHandler {
                     let start_time = Instant::now();
 
                     while should_retry {
+                        #[cfg(debug_assertions)]
+                        println!("[ClientHandler::start] Executing command: {:?}", command);
                         let response = handler.execute_command(&command);
+                        #[cfg(debug_assertions)]
+                        println!("[ClientHandler::start] Got response: {:?}", response);
 
                         // Handle empty response (content sent directly)
                         if response.is_empty() {
+                            #[cfg(debug_assertions)]
+                            println!("[ClientHandler::start] Empty response, continuing");
                             should_retry = false;
                             continue;
                         }
@@ -311,6 +346,8 @@ impl ClientHandler {
                             // Handle normal response
                             if !response.is_empty() {
                                 let mut client = client.lock().unwrap();
+                                #[cfg(debug_assertions)]
+                                println!("[ClientHandler::start] Writing response to client");
                                 let _ = client.write(response.as_bytes());
                                 let _ = client.flush();
                             }
@@ -323,6 +360,5 @@ impl ClientHandler {
                 }
             }
         });        
-
     }
 }

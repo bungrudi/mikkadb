@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use redis_starter_rust::redis::{
     core::Redis,
-    commands::RedisCommand,
-    replication::ReplicationManager,
+    storage::Storage,
     xread_handler::{XReadHandler, XReadRequest},
     config::RedisConfig,
 };
@@ -18,11 +17,11 @@ mod utils;
 // Core XRead Handler Tests
 #[test]
 fn test_xread_parse_stream_id() {
-    assert_eq!(XReadHandler::parse_stream_id("1234-0").unwrap(), (1234, 0));
-    assert_eq!(XReadHandler::parse_stream_id("1234-5").unwrap(), (1234, 5));
-    assert_eq!(XReadHandler::parse_stream_id("1234").unwrap(), (1234, 0));
-    assert_eq!(XReadHandler::parse_stream_id("$").unwrap(), (u64::MAX, 0));
-    assert!(XReadHandler::parse_stream_id("invalid").is_err());
+    assert_eq!(Storage::parse_stream_id("1234-0").unwrap(), (1234, 0));
+    assert_eq!(Storage::parse_stream_id("1234-5").unwrap(), (1234, 5));
+    assert_eq!(Storage::parse_stream_id("1234").unwrap(), (1234, 0));
+    assert_eq!(Storage::parse_stream_id("$").unwrap(), (u64::MAX, 0));
+    assert!(Storage::parse_stream_id("invalid").is_err());
 }
 
 #[test]
@@ -178,7 +177,7 @@ fn test_xread_blocking_with_new_data() {
         fields.insert("field1".to_string(), "value1".to_string());
         
         let mut redis = redis_clone.lock().unwrap();
-        redis.xadd("mystream", "*", fields).unwrap();
+        redis.storage.xadd("mystream", "*", fields).unwrap();
     });
 
     // Wait for response
@@ -187,6 +186,7 @@ fn test_xread_blocking_with_new_data() {
     // Check the response
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
+    println!("\n[test_xread_blocking_with_new_data] Response received: {:?}\n", response);
     
     assert!(response.starts_with("*1\r\n"), "Response should start with array of one stream");
     assert!(response.contains("mystream"), "Response should contain stream name");
@@ -245,11 +245,11 @@ fn test_xread_blocking_multiple_streams_protocol() {
         
         // Add to first stream
         fields.insert("field1".to_string(), "value1".to_string());
-        redis.xadd("stream1", "*", fields.clone()).unwrap();
+        redis.storage.xadd("stream1", "*", fields.clone()).unwrap();
         
         // Add to second stream
         fields.insert("field1".to_string(), "value2".to_string());
-        redis.xadd("stream2", "*", fields).unwrap();
+        redis.storage.xadd("stream2", "*", fields).unwrap();
     });
 
     // Wait for response

@@ -497,7 +497,7 @@ impl Storage {
                 .iter()
                 .filter(|entry| {
                     if let Ok((entry_ms, entry_seq)) = Self::parse_stream_id(&entry.id) {
-                        (entry_ms > ms) || (entry_ms == ms && entry_seq > seq)
+                        (entry_ms > ms) || (entry_ms == ms && entry_seq >= seq)
                     } else {
                         false
                     }
@@ -517,16 +517,27 @@ impl Storage {
         }
     }
 
-    fn parse_stream_id(id: &str) -> Result<(u64, u64), ()> {
-        let parts: Vec<&str> = id.split('-').collect();
-        if parts.len() != 2 {
-            return Err(());
+    pub fn parse_stream_id(id: &str) -> Result<(u64, u64), String> {
+        if id == "$" {
+            return Ok((u64::MAX, 0));
         }
 
-        let ms = parts[0].parse::<u64>().unwrap();
-        let seq = parts[1].parse::<u64>().unwrap();
-
-        Ok((ms, seq))
+        let parts: Vec<&str> = id.split('-').collect();
+        match parts.len() {
+            1 => {
+                let ms = parts[0].parse::<u64>()
+                    .map_err(|_| format!("Invalid stream ID format: {}", id))?;
+                Ok((ms, 0))
+            }
+            2 => {
+                let ms = parts[0].parse::<u64>()
+                    .map_err(|_| format!("Invalid stream ID format: {}", id))?;
+                let seq = parts[1].parse::<u64>()
+                    .map_err(|_| format!("Invalid stream ID format: {}", id))?;
+                Ok((ms, seq))
+            }
+            _ => Err(format!("Invalid stream ID format: {}", id))
+        }
     }
 
     pub fn keys(&self, pattern: &str) -> Vec<String> {
