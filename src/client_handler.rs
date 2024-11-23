@@ -124,6 +124,11 @@ impl ClientHandler {
                                     stream_name.len(), stream_name));
                                 
                                 // Entries array
+                                if entries.is_empty() {
+                                    response.push_str("*0\r\n");
+                                    continue;
+                                }
+
                                 response.push_str(&format!("*{}\r\n", entries.len()));
                                 
                                 // For each entry: *2\r\n$<len>\r\n<id>\r\n*<fields>\r\n

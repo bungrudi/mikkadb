@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use std::thread;
 
 use crate::redis::Redis;
-use crate::redis::storage::StreamEntry;
+use crate::redis::storage::{StreamEntry, ValueWrapper};
 
 pub struct XReadRequest {
     pub keys: Vec<String>,
@@ -49,50 +49,65 @@ impl XReadHandler {
     }
 
     fn process_stream(&self, stream_key: &str, id: &str, count: Option<usize>) -> Result<Vec<StreamEntry>, String> {
-        let (ms, seq) = Self::parse_stream_id(id)?;
-        
         let redis = self.redis.lock().unwrap();
-        let entries = redis.storage.get_stream_entries(stream_key, ms, seq, count);
-        
-        Ok(entries)
+        let storage = &redis.storage;
+
+        if id == "$" {
+            // For $ ID, we need to get the last entry's ID
+            let (ms, seq) = match storage.get_last_stream_id(stream_key) {
+                Some(last_id) => Self::parse_stream_id(&last_id)?,
+                None => (0, 0),
+            };
+            Ok(storage.get_stream_entries(stream_key, ms, seq, count))
+        } else {
+            let (ms, seq) = Self::parse_stream_id(id)?;
+            Ok(storage.get_stream_entries(stream_key, ms, seq, count))
+        }
     }
 
     pub fn run_loop(&mut self) -> Result<Vec<(String, Vec<StreamEntry>)>, String> {
         let start_time = Instant::now();
-        
         loop {
-            if let Some(results) = self.execute()? {
-                return Ok(results);
-            }
+            let mut result = Vec::new();
+            let mut has_data = false;
 
-            if let Some(block_ms) = self.request.block {
-                let elapsed = start_time.elapsed();
-                if elapsed >= Duration::from_millis(block_ms) {
-                    return Ok(vec![]);
+            // Process each stream
+            for (key, id) in self.request.keys.iter().zip(self.request.ids.iter()) {
+                // Always include the stream in result, even if empty
+                match self.process_stream(key, id, self.request.count) {
+                    Ok(entries) => {
+                        has_data = has_data || !entries.is_empty();
+                        result.push((key.clone(), entries));
+                    }
+                    Err(_) => {
+                        result.push((key.clone(), vec![]));
+                    }
                 }
-                thread::sleep(Duration::from_millis(10));
-            } else {
-                return Ok(vec![]);
             }
-        }
-    }
 
-    fn execute(&self) -> Result<Option<Vec<(String, Vec<StreamEntry>)>>, String> {
-        let mut results = Vec::new();
-        let mut has_entries = false;
-
-        for (key, id) in self.request.keys.iter().zip(self.request.ids.iter()) {
-            let entries = self.process_stream(key, id, self.request.count)?;
-            if !entries.is_empty() {
-                has_entries = true;
+            // For non-blocking operations, return the result immediately
+            if self.request.block.is_none() {
+                println!("Non-blocking XREAD returning result with {} streams", result.len());
+                return Ok(result);
             }
-            results.push((key.clone(), entries));
-        }
 
-        if has_entries {
-            Ok(Some(results))
-        } else {
-            Ok(None)
+            // For blocking operations, only return if we have data
+            if has_data {
+                println!("Blocking XREAD found data, returning result with {} streams", result.len());
+                return Ok(result);
+            }
+
+            // Check if we've exceeded the blocking timeout
+            if let Some(block) = self.request.block {
+                let elapsed = start_time.elapsed();
+                if elapsed >= Duration::from_millis(block) {
+                    println!("Blocking XREAD timed out after {}ms", block);
+                    return Ok(vec![]); // Return empty array on timeout
+                }
+            }
+
+            // Sleep briefly before next iteration
+            thread::sleep(Duration::from_millis(10));
         }
     }
 }

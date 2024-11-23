@@ -490,70 +490,43 @@ impl Storage {
         }
     }
 
-    pub fn xread_with_options(&self, keys: &[&str], ids: &[&str], block: Option<u64>, count: Option<usize>)
-        -> Result<Vec<(String, Vec<StreamEntry>)>, Cow<'static, str>> {
-        #[cfg(debug_assertions)]
-        println!("DEBUG: XREAD called with keys: {:?} ids: {:?} block: {:?} count: {:?}", keys, ids, block, count);
-
-        // Validate all IDs first
-        for &id in ids {
-            if let Err(e) = Self::validate_stream_id(id) {
-                return Err(e);
-            }
-        }
-
-        let mut result = Vec::new();
-        let mut data = self.data.lock().unwrap();
-        
-        // Check for new entries
-        for (&key, &id) in keys.iter().zip(ids.iter()) {
-            match data.get_mut(key) {
-                Some(ValueWrapper::Stream { entries, metadata }) => {
-                    let effective_id = if id == "$" {
-                        // For $ ID, use u64::MAX to ensure we only get entries strictly greater
-                        format!("{}-{}", u64::MAX, 0)
-                    } else if id == "0" {
-                        "0-0".to_string()
+    pub fn get_stream_entries(&self, stream_key: &str, ms: u64, seq: u64, count: Option<usize>) -> Vec<StreamEntry> {
+        let data = self.data.lock().unwrap();
+        if let Some(ValueWrapper::Stream { entries, .. }) = data.get(stream_key) {
+            let mut matching_entries: Vec<StreamEntry> = entries
+                .iter()
+                .filter(|entry| {
+                    if let Ok((entry_ms, entry_seq)) = Self::parse_stream_id(&entry.id) {
+                        (entry_ms > ms) || (entry_ms == ms && entry_seq > seq)
                     } else {
-                        id.to_string()
-                    };
-
-                    let mut new_entries: Vec<StreamEntry> = entries.iter()
-                        .filter(|entry| Self::compare_stream_ids(&entry.id, &effective_id) == std::cmp::Ordering::Greater)
-                        .map(|entry| StreamEntry {
-                            id: entry.id.clone(),
-                            fields: entry.fields.clone(),
-                        })
-                        .collect();
-
-                    if let Some(count_limit) = count {
-                        new_entries.truncate(count_limit);
+                        false
                     }
+                })
+                .cloned()
+                .collect();
 
-                    if !new_entries.is_empty() {
-                        result.push((key.to_string(), new_entries));
-                    }
-                },
-                Some(_) => return Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
-                None => (),
+            matching_entries.sort_by(|a, b| Storage::compare_stream_ids(&a.id, &b.id));
+
+            if let Some(count) = count {
+                matching_entries.truncate(count);
             }
+
+            matching_entries
+        } else {
+            vec![]
+        }
+    }
+
+    fn parse_stream_id(id: &str) -> Result<(u64, u64), ()> {
+        let parts: Vec<&str> = id.split('-').collect();
+        if parts.len() != 2 {
+            return Err(());
         }
 
-        if !result.is_empty() {
-            return Ok(result);
-        }
+        let ms = parts[0].parse::<u64>().unwrap();
+        let seq = parts[1].parse::<u64>().unwrap();
 
-        // If we're in blocking mode and no results were found
-        match block {
-            Some(_) => {
-                // For both BLOCK 0 and BLOCK N, signal retry
-                Err("XREAD_RETRY".into())
-            },
-            None => {
-                // For non-blocking XREAD with no results
-                Ok(Vec::new())
-            }
-        }
+        Ok((ms, seq))
     }
 
     pub fn keys(&self, pattern: &str) -> Vec<String> {
@@ -578,40 +551,24 @@ impl Storage {
         }
     }
 
-    pub fn get_stream_entries(&self, stream_key: &str, ms: u64, seq: u64, count: Option<usize>) -> Vec<StreamEntry> {
-        let mut entries = Vec::new();
-        
-        // If ms is u64::MAX ($ ID), return no entries since they should be strictly greater
-        if ms == u64::MAX {
-            return entries;
-        }
-        
-        if let Some(ValueWrapper::Stream { entries: stream_entries, .. }) = self.data.lock().unwrap().get(stream_key) {
-            for entry in stream_entries {
-                let parts: Vec<&str> = entry.id.split('-').collect();
-                if parts.len() != 2 {
-                    continue;
+    pub fn get_last_stream_id(&self, stream_key: &str) -> Option<String> {
+        let data = self.data.lock().unwrap();
+        if let Some(ValueWrapper::Stream { entries, metadata }) = data.get(stream_key) {
+            if let Some(last_id) = &metadata.last_dollar_id {
+                return Some(last_id.clone());
+            }
+            
+            if !entries.is_empty() {
+                let mut last_entry = entries[0].id.clone();
+                for entry in entries.iter().skip(1) {
+                    if Self::compare_stream_ids(&entry.id, &last_entry) == std::cmp::Ordering::Greater {
+                        last_entry = entry.id.clone();
+                    }
                 }
-                
-                let entry_ms = parts[0].parse::<u64>().unwrap_or(0);
-                let entry_seq = parts[1].parse::<u64>().unwrap_or(0);
-                
-                if entry_ms > ms || (entry_ms == ms && entry_seq > seq) {
-                    entries.push(StreamEntry {
-                        id: entry.id.clone(),
-                        fields: entry.fields.clone(),
-                    });
-                }
+                return Some(last_entry);
             }
         }
-        
-        entries.sort_by(|a: &StreamEntry, b: &StreamEntry| a.id.cmp(&b.id));
-        
-        if let Some(count) = count {
-            entries.truncate(count);
-        }
-        
-        entries
+        None
     }
 }
 
