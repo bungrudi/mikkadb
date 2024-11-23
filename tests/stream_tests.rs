@@ -7,6 +7,8 @@ use redis_starter_rust::redis::{
     core::Redis,
     commands::RedisCommand,
     replication::ReplicationManager,
+    xread_handler::{XReadHandler, XReadRequest},
+    storage::StreamEntry,
 };
 
 #[cfg(test)]
@@ -390,7 +392,7 @@ fn test_xrange_resp_format() {
 
 #[test]
 fn test_xread_basic() {
-    let mut redis = test_redis();
+    let redis = test_redis();
     
     // Add test entry
     let mut fields = BTreeMap::new();
@@ -421,7 +423,7 @@ fn test_xread_basic() {
 
 #[test]
 fn test_xread_exclusive() {
-    let mut redis = test_redis();
+    let redis = test_redis();
     
     // Add test entries with ordered fields
     let mut fields1 = BTreeMap::new();
@@ -462,7 +464,7 @@ fn test_xread_exclusive() {
 
 #[test]
 fn test_xread_empty_stream() {
-    let mut redis = test_redis();
+    let redis = test_redis();
     
     // Test XREAD on non-existent stream
     let xread = test_command(
@@ -477,7 +479,7 @@ fn test_xread_empty_stream() {
 
 #[test]
 fn test_xread_wrong_type() {
-    let mut redis = test_redis();
+    let redis = test_redis();
     
     // Set a string value
     redis.storage.set("string_key", "some_value", None);
@@ -496,7 +498,7 @@ fn test_xread_wrong_type() {
 
 #[test]
 fn test_xread_invalid_id() {
-    let mut redis = test_redis();
+    let redis = test_redis();
     
     // Try XREAD with invalid ID format
     let xread = test_command(
@@ -512,7 +514,7 @@ fn test_xread_invalid_id() {
 
 #[test]
 fn test_xread_missing_parameters() {
-    let mut redis = test_redis();
+    let redis = test_redis();
     
     // Try XREAD without required parameters
     let xread = test_command(
@@ -528,7 +530,7 @@ fn test_xread_missing_parameters() {
 
 #[test]
 fn test_xread_multiple_streams() {
-    let mut redis = test_redis();
+    let redis = test_redis();
     
     // Add entries to two different streams
     let mut fields1 = BTreeMap::new();
@@ -571,7 +573,7 @@ fn test_xread_multiple_streams() {
 
 #[test]
 fn test_incr_nonexistent_key() {
-    let mut redis = test_redis();
+    let redis = test_redis();
     
     // Test INCR command on non-existent key
     let incr = test_command("INCR", &["nonexistent"], "");
@@ -957,4 +959,310 @@ mod xread_parser_tests {
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "-ERR wrong number of arguments for 'xread' command\r\n");
     }
+}
+
+fn setup_test_stream() -> Arc<Mutex<Redis>> {
+    let redis = Arc::new(Mutex::new(Redis::new()));
+    let mut fields = HashMap::new();
+    fields.insert("temperature".to_string(), "25".to_string());
+    fields.insert("humidity".to_string(), "65".to_string());
+    
+    {
+        let mut redis_guard = redis.lock().unwrap();
+        redis_guard.xadd("sensor:1", "1000-0", fields.clone()).unwrap();
+        
+        fields.insert("temperature".to_string(), "26".to_string());
+        redis_guard.xadd("sensor:1", "2000-0", fields.clone()).unwrap();
+        
+        fields.insert("temperature".to_string(), "27".to_string());
+        redis_guard.xadd("sensor:1", "3000-0", fields).unwrap();
+    }
+    
+    redis
+}
+
+#[test]
+fn test_xread_basic() {
+    let redis = setup_test_stream();
+    
+    let request = XReadRequest {
+        keys: vec!["sensor:1".to_string()],
+        ids: vec!["0-0".to_string()],
+        block: None,
+        count: None,
+    };
+    
+    let handler = XReadHandler::new(redis, request);
+    let results = handler.run_loop().unwrap();
+    
+    assert_eq!(results.len(), 1);
+    let (stream_name, entries) = &results[0];
+    assert_eq!(stream_name, "sensor:1");
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].id, "1000-0");
+    assert_eq!(entries[0].fields["temperature"], "25");
+    assert_eq!(entries[0].fields["humidity"], "65");
+}
+
+#[test]
+fn test_xread_with_specific_id() {
+    let redis = setup_test_stream();
+    
+    let request = XReadRequest {
+        keys: vec!["sensor:1".to_string()],
+        ids: vec!["2000-0".to_string()],
+        block: None,
+        count: None,
+    };
+    
+    let handler = XReadHandler::new(redis, request);
+    let results = handler.run_loop().unwrap();
+    
+    assert_eq!(results.len(), 1);
+    let (_, entries) = &results[0];
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "3000-0");
+}
+
+#[test]
+fn test_xread_with_count() {
+    let redis = setup_test_stream();
+    
+    let request = XReadRequest {
+        keys: vec!["sensor:1".to_string()],
+        ids: vec!["0-0".to_string()],
+        block: None,
+        count: Some(2),
+    };
+    
+    let handler = XReadHandler::new(redis, request);
+    let results = handler.run_loop().unwrap();
+    
+    assert_eq!(results.len(), 1);
+    let (_, entries) = &results[0];
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].id, "1000-0");
+    assert_eq!(entries[1].id, "2000-0");
+}
+
+#[test]
+fn test_xread_with_dollar() {
+    let redis = setup_test_stream();
+    
+    let request = XReadRequest {
+        keys: vec!["sensor:1".to_string()],
+        ids: vec!["$".to_string()],
+        block: None,
+        count: None,
+    };
+    
+    let handler = XReadHandler::new(redis.clone(), request);
+    let results = handler.run_loop().unwrap();
+    
+    // Should be empty since $ means "new entries only"
+    assert_eq!(results.len(), 1);
+    let (_, entries) = &results[0];
+    assert_eq!(entries.len(), 0);
+    
+    // Add a new entry and try again
+    {
+        let mut redis_guard = redis.lock().unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("temperature".to_string(), "28".to_string());
+        redis_guard.xadd("sensor:1", "4000-0", fields).unwrap();
+    }
+    
+    let request = XReadRequest {
+        keys: vec!["sensor:1".to_string()],
+        ids: vec!["$".to_string()],
+        block: None,
+        count: None,
+    };
+    
+    let handler = XReadHandler::new(redis, request);
+    let results = handler.run_loop().unwrap();
+    
+    assert_eq!(results.len(), 1);
+    let (_, entries) = &results[0];
+    assert_eq!(entries.len(), 0); // Still 0 because $ points to the latest ID
+}
+
+#[test]
+fn test_xread_blocking() {
+    let redis = setup_test_stream();
+    
+    let request = XReadRequest {
+        keys: vec!["sensor:1".to_string()],
+        ids: vec!["3000-0".to_string()],
+        block: Some(1000), // 1 second timeout
+        count: None,
+    };
+    
+    let handler = XReadHandler::new(redis.clone(), request);
+    let results = handler.run_loop().unwrap();
+    
+    // Initially no results as we're reading after the last ID
+    assert_eq!(results.len(), 1);
+    let (_, entries) = &results[0];
+    assert_eq!(entries.len(), 0);
+}
+
+#[test]
+fn test_stream_basic_operations() {
+    let storage = Arc::new(Mutex::new(Storage::new()));
+    
+    // Test XADD
+    {
+        let mut storage_guard = storage.lock().unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("sensor".to_string(), "1".to_string());
+        fields.insert("temperature".to_string(), "25".to_string());
+        
+        let id = storage_guard.xadd("mystream", "1000-0", fields).unwrap();
+        assert_eq!(id, "1000-0");
+    }
+    
+    // Test XREAD
+    let request = XReadRequest {
+        keys: vec!["mystream".to_string()],
+        ids: vec!["0-0".to_string()],
+        block: None,
+        count: None,
+    };
+    
+    let handler = XReadHandler::new(storage.clone(), request);
+    let results = handler.run_loop().unwrap();
+    
+    assert_eq!(results.len(), 1);
+    let (stream_name, entries) = &results[0];
+    assert_eq!(stream_name, "mystream");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "1000-0");
+    assert_eq!(entries[0].fields.get("sensor").unwrap(), "1");
+    assert_eq!(entries[0].fields.get("temperature").unwrap(), "25");
+}
+
+#[test]
+fn test_stream_multiple_entries() {
+    let storage = Arc::new(Mutex::new(Storage::new()));
+    
+    // Add multiple entries
+    {
+        let mut storage_guard = storage.lock().unwrap();
+        let mut fields = HashMap::new();
+        
+        // Entry 1
+        fields.insert("sensor".to_string(), "1".to_string());
+        fields.insert("temperature".to_string(), "25".to_string());
+        storage_guard.xadd("mystream", "1000-0", fields.clone()).unwrap();
+        
+        // Entry 2
+        fields.insert("temperature".to_string(), "26".to_string());
+        storage_guard.xadd("mystream", "1001-0", fields.clone()).unwrap();
+        
+        // Entry 3
+        fields.insert("temperature".to_string(), "27".to_string());
+        storage_guard.xadd("mystream", "1002-0", fields).unwrap();
+    }
+    
+    // Test XREAD with COUNT
+    let request = XReadRequest {
+        keys: vec!["mystream".to_string()],
+        ids: vec!["0-0".to_string()],
+        block: None,
+        count: Some(2),
+    };
+    
+    let handler = XReadHandler::new(storage.clone(), request);
+    let results = handler.run_loop().unwrap();
+    
+    assert_eq!(results.len(), 1);
+    let (_, entries) = &results[0];
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].id, "1000-0");
+    assert_eq!(entries[1].id, "1001-0");
+}
+
+#[test]
+fn test_stream_blocking_read() {
+    let storage = Arc::new(Mutex::new(Storage::new()));
+    let storage_clone = storage.clone();
+    
+    // Start a blocking read in a separate thread
+    let handle = thread::spawn(move || {
+        let request = XReadRequest {
+            keys: vec!["mystream".to_string()],
+            ids: vec!["$".to_string()],
+            block: Some(1000), // 1 second timeout
+            count: None,
+        };
+        
+        let handler = XReadHandler::new(storage_clone, request);
+        handler.run_loop()
+    });
+    
+    // Wait a bit then add an entry
+    thread::sleep(Duration::from_millis(100));
+    {
+        let mut storage_guard = storage.lock().unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("sensor".to_string(), "1".to_string());
+        fields.insert("temperature".to_string(), "25".to_string());
+        storage_guard.xadd("mystream", "1000-0", fields).unwrap();
+    }
+    
+    // Get results from blocking read
+    let results = handle.join().unwrap().unwrap();
+    assert_eq!(results.len(), 1);
+    let (_, entries) = &results[0];
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "1000-0");
+}
+
+#[test]
+fn test_stream_multiple_keys() {
+    let storage = Arc::new(Mutex::new(Storage::new()));
+    
+    // Add entries to multiple streams
+    {
+        let mut storage_guard = storage.lock().unwrap();
+        let mut fields = HashMap::new();
+        
+        // Stream 1
+        fields.insert("sensor".to_string(), "1".to_string());
+        fields.insert("temperature".to_string(), "25".to_string());
+        storage_guard.xadd("stream1", "1000-0", fields.clone()).unwrap();
+        
+        // Stream 2
+        fields.insert("sensor".to_string(), "2".to_string());
+        fields.insert("temperature".to_string(), "26".to_string());
+        storage_guard.xadd("stream2", "1001-0", fields).unwrap();
+    }
+    
+    // Test XREAD from multiple streams
+    let request = XReadRequest {
+        keys: vec!["stream1".to_string(), "stream2".to_string()],
+        ids: vec!["0-0".to_string(), "0-0".to_string()],
+        block: None,
+        count: None,
+    };
+    
+    let handler = XReadHandler::new(storage, request);
+    let results = handler.run_loop().unwrap();
+    
+    assert_eq!(results.len(), 2);
+    
+    // Check stream1
+    let (stream1_name, stream1_entries) = &results[0];
+    assert_eq!(stream1_name, "stream1");
+    assert_eq!(stream1_entries.len(), 1);
+    assert_eq!(stream1_entries[0].id, "1000-0");
+    assert_eq!(stream1_entries[0].fields.get("sensor").unwrap(), "1");
+    
+    // Check stream2
+    let (stream2_name, stream2_entries) = &results[1];
+    assert_eq!(stream2_name, "stream2");
+    assert_eq!(stream2_entries.len(), 1);
+    assert_eq!(stream2_entries[0].id, "1001-0");
+    assert_eq!(stream2_entries[0].fields.get("sensor").unwrap(), "2");
 }

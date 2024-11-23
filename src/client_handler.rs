@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use crate::redis::{Redis, RedisCommand};
 use crate::resp::parse_resp;
 use crate::redis::replication::TcpStreamTrait;
+use crate::redis::xread_handler::{XReadHandler, XReadRequest};
 
 // ClientHandler should ideally be an actor.
 pub struct ClientHandler {
@@ -95,6 +96,41 @@ impl ClientHandler {
                     // Clear all queued commands
                     self.queued_commands.lock().unwrap().clear();
                     "+OK\r\n".to_string()
+                }
+            },
+            RedisCommand::XRead { keys, ids, block, count } => {
+                let redis = self.redis.lock().unwrap();
+                let request = XReadRequest {
+                    keys: keys.iter().map(|s| s.to_string()).collect(),
+                    ids: ids.iter().map(|s| s.to_string()).collect(),
+                    block: *block,
+                    count: *count,
+                };
+                
+                let storage = Arc::new(Mutex::new(redis.storage.clone()));
+                let mut handler = XReadHandler::new(storage, request);
+                match handler.run_loop() {
+                    Ok(results) => {
+                        if results.is_empty() {
+                            "*0\r\n".to_string()
+                        } else {
+                            let mut response = format!("*{}\r\n", results.len());
+                            for (key, entries) in results {
+                                response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
+                                    key.len(), key, entries.len()));
+                                for entry in entries {
+                                    response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n",
+                                        entry.id.len(), entry.id, entry.fields.len() * 2));
+                                    for (field, value) in entry.fields {
+                                        response.push_str(&format!("${}\r\n{}\r\n${}\r\n{}\r\n",
+                                            field.len(), field, value.len(), value));
+                                    }
+                                }
+                            }
+                            response
+                        }
+                    }
+                    Err(e) => format!("-ERR {}\r\n", e),
                 }
             },
             _ => {

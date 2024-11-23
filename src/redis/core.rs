@@ -5,6 +5,7 @@ use base64::Engine;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap, BTreeMap};
+use std::sync::{Arc, Mutex};
 
 use crate::redis::config::RedisConfig;
 use crate::redis::storage::Storage;
@@ -12,6 +13,7 @@ use crate::redis::replication::{ReplicationManager, TcpStreamTrait};
 use crate::redis::commands::RedisCommand;
 use crate::redis::utils::gen_replid;
 use crate::redis::rdb::RdbParser;
+use crate::redis::xread_handler::{XReadHandler, XReadRequest};
 
 pub struct Redis {
     pub config: RedisConfig,
@@ -241,50 +243,9 @@ impl Redis {
                     Err(e) => Err(format!("-{}\r\n", e)),
                 }
             },
-            RedisCommand::XRead { keys, ids, block, count } => {
-                match self.storage.xread_with_options(
-                    &keys.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
-                    &ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
-                    *block,  // Dereference block
-                    *count   // Dereference count
-                ) {
-                    Ok(stream_entries) => {
-                        if stream_entries.is_empty() {
-                            Ok("$-1\r\n".to_string())
-                        } else {
-                            let mut response = format!("*{}\r\n", stream_entries.len());
-                            for (stream_name, entries) in stream_entries {
-                                response.push_str("*2\r\n"); // Stream array has 2 elements: name and entries array
-                                response.push_str(&format!("${}\r\n{}\r\n", stream_name.len(), stream_name));
-
-                                response.push_str(&format!("*{}\r\n", entries.len())); // Entries array
-                                for entry in entries {
-                                    response.push_str("*2\r\n"); // Entry array has 2 elements: ID and fields array
-                                    response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id));
-
-                                    // Convert HashMap to BTreeMap to ensure consistent ordering
-                                    let ordered_fields: BTreeMap<_, _> = entry.fields.into_iter().collect();
-                                    let field_count = ordered_fields.len() * 2; // Each field has name and value
-                                    response.push_str(&format!("*{}\r\n", field_count));
-                                    for (field, value) in ordered_fields {
-                                        response.push_str(&format!("${}\r\n{}\r\n", field.len(), field));
-                                        response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
-                                    }
-                                }
-                            }
-                            Ok(response)
-                        }
-                    },
-                    Err(e) => {
-                        if e == "NULL" {
-                            Ok("$-1\r\n".to_string())
-                        } else if e == "XREAD_RETRY" {
-                            Err("XREAD_RETRY".to_string())  // Pass through the retry signal without formatting
-                        } else {
-                            Err(format!("-{}\r\n", e))  // Normal error formatting for other errors
-                        }
-                    }
-                }
+            RedisCommand::XRead { .. } => {
+                // XREAD is handled by XReadHandler
+                Err("ERR XREAD command is handled by XReadHandler".to_string())
             },
             RedisCommand::Info { subcommand } => {
                 match subcommand.as_str() {
