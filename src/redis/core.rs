@@ -5,7 +5,6 @@ use base64::Engine;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap, BTreeMap};
-use std::sync::{Arc, Mutex};
 
 use crate::redis::config::RedisConfig;
 use crate::redis::storage::Storage;
@@ -13,7 +12,6 @@ use crate::redis::replication::{ReplicationManager, TcpStreamTrait};
 use crate::redis::commands::RedisCommand;
 use crate::redis::utils::gen_replid;
 use crate::redis::rdb::RdbParser;
-use crate::redis::xread_handler::{XReadHandler, XReadRequest};
 
 pub struct Redis {
     pub config: RedisConfig,

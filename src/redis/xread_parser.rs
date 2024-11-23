@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub struct XReadParams {
     pub keys: Vec<String>,
     pub ids: Vec<String>,

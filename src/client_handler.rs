@@ -99,7 +99,6 @@ impl ClientHandler {
                 }
             },
             RedisCommand::XRead { keys, ids, block, count } => {
-                let redis = self.redis.lock().unwrap();
                 let request = XReadRequest {
                     keys: keys.iter().map(|s| s.to_string()).collect(),
                     ids: ids.iter().map(|s| s.to_string()).collect(),
@@ -107,20 +106,34 @@ impl ClientHandler {
                     count: *count,
                 };
                 
-                let storage = Arc::new(Mutex::new(redis.storage.clone()));
-                let mut handler = XReadHandler::new(storage, request);
+                let mut handler = XReadHandler::new(Arc::clone(&self.redis), request);
                 match handler.run_loop() {
                     Ok(results) => {
                         if results.is_empty() {
                             "*0\r\n".to_string()
                         } else {
-                            let mut response = format!("*{}\r\n", results.len());
-                            for (key, entries) in results {
-                                response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
-                                    key.len(), key, entries.len()));
+                            let mut response = String::new();
+                            
+                            // Format: *<num_streams>\r\n
+                            response.push_str(&format!("*{}\r\n", results.len()));
+                            
+                            // For each stream: *2\r\n$<len>\r\n<stream>\r\n*<entries>\r\n
+                            for (stream_name, entries) in results {
+                                response.push_str("*2\r\n"); // Stream name and entries array
+                                response.push_str(&format!("${}\r\n{}\r\n", 
+                                    stream_name.len(), stream_name));
+                                
+                                // Entries array
+                                response.push_str(&format!("*{}\r\n", entries.len()));
+                                
+                                // For each entry: *2\r\n$<len>\r\n<id>\r\n*<fields>\r\n
                                 for entry in entries {
-                                    response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n",
-                                        entry.id.len(), entry.id, entry.fields.len() * 2));
+                                    response.push_str("*2\r\n"); // ID and fields array
+                                    response.push_str(&format!("${}\r\n{}\r\n", 
+                                        entry.id.len(), entry.id));
+                                    
+                                    // Fields array: *<num_fields*2>\r\n$<len>\r\n<field>\r\n$<len>\r\n<value>\r\n
+                                    response.push_str(&format!("*{}\r\n", entry.fields.len() * 2));
                                     for (field, value) in entry.fields {
                                         response.push_str(&format!("${}\r\n{}\r\n${}\r\n{}\r\n",
                                             field.len(), field, value.len(), value));
@@ -130,7 +143,13 @@ impl ClientHandler {
                             response
                         }
                     }
-                    Err(e) => format!("-ERR {}\r\n", e),
+                    Err(e) => {
+                        if e == "XREAD_RETRY" {
+                            "*0\r\n".to_string()
+                        } else {
+                            format!("-ERR {}\r\n", e)
+                        }
+                    }
                 }
             },
             _ => {

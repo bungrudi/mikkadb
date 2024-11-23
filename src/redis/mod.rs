@@ -7,6 +7,7 @@ pub mod core;
 pub mod utils;
 pub mod rdb;
 pub mod xread_parser;
+pub mod xread_handler;
 
 pub use config::RedisConfig;
 pub use commands::RedisCommand;

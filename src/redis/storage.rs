@@ -510,21 +510,16 @@ impl Storage {
             match data.get_mut(key) {
                 Some(ValueWrapper::Stream { entries, metadata }) => {
                     let effective_id = if id == "$" {
-                        // For $ ID, use the last entry's ID as the effective ID
-                        if let Some(last_entry) = entries.last() {
-                            metadata.last_dollar_id = Some(last_entry.id.clone());
-                            last_entry.id.as_str()
-                        } else {
-                            "0-0"
-                        }
+                        // For $ ID, use u64::MAX to ensure we only get entries strictly greater
+                        format!("{}-{}", u64::MAX, 0)
                     } else if id == "0" {
-                        "0-0"
+                        "0-0".to_string()
                     } else {
-                        id
+                        id.to_string()
                     };
 
                     let mut new_entries: Vec<StreamEntry> = entries.iter()
-                        .filter(|entry| Self::compare_stream_ids(&entry.id, effective_id) == std::cmp::Ordering::Greater)
+                        .filter(|entry| Self::compare_stream_ids(&entry.id, &effective_id) == std::cmp::Ordering::Greater)
                         .map(|entry| StreamEntry {
                             id: entry.id.clone(),
                             fields: entry.fields.clone(),
@@ -556,7 +551,7 @@ impl Storage {
             },
             None => {
                 // For non-blocking XREAD with no results
-                Err("NULL".into())
+                Ok(Vec::new())
             }
         }
     }
@@ -581,6 +576,42 @@ impl Storage {
             Some(ValueWrapper::List { .. }) => "list".into(),
             None => "none".into(),
         }
+    }
+
+    pub fn get_stream_entries(&self, stream_key: &str, ms: u64, seq: u64, count: Option<usize>) -> Vec<StreamEntry> {
+        let mut entries = Vec::new();
+        
+        // If ms is u64::MAX ($ ID), return no entries since they should be strictly greater
+        if ms == u64::MAX {
+            return entries;
+        }
+        
+        if let Some(ValueWrapper::Stream { entries: stream_entries, .. }) = self.data.lock().unwrap().get(stream_key) {
+            for entry in stream_entries {
+                let parts: Vec<&str> = entry.id.split('-').collect();
+                if parts.len() != 2 {
+                    continue;
+                }
+                
+                let entry_ms = parts[0].parse::<u64>().unwrap_or(0);
+                let entry_seq = parts[1].parse::<u64>().unwrap_or(0);
+                
+                if entry_ms > ms || (entry_ms == ms && entry_seq > seq) {
+                    entries.push(StreamEntry {
+                        id: entry.id.clone(),
+                        fields: entry.fields.clone(),
+                    });
+                }
+            }
+        }
+        
+        entries.sort_by(|a: &StreamEntry, b: &StreamEntry| a.id.cmp(&b.id));
+        
+        if let Some(count) = count {
+            entries.truncate(count);
+        }
+        
+        entries
     }
 }
 
