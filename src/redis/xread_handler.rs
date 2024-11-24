@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use std::thread;
 
 use crate::redis::Redis;
-use crate::redis::storage::{StreamEntry, ValueWrapper};
+use crate::redis::storage::{StreamEntry, Storage};
 
 pub struct XReadRequest {
     pub keys: Vec<String>,
@@ -28,28 +28,18 @@ impl XReadHandler {
     pub fn run_loop(&mut self) -> Result<Vec<(String, Vec<StreamEntry>)>, String> {
         #[cfg(debug_assertions)]
         println!("\n[XReadHandler::run_loop] Starting with block={:?}, count={:?}", self.request.block, self.request.count);
-        
-        if let Some(block_ms) = self.request.block {
-            let start = Instant::now();
-            let mut last_try = self.try_read()?;
-            #[cfg(debug_assertions)]
-            println!("[XReadHandler::run_loop] Initial try_read result: {:?} entries", last_try.len());
 
-            while start.elapsed() < Duration::from_millis(block_ms as u64) {
-                if !last_try.is_empty() {
-                    #[cfg(debug_assertions)]
-                    println!("[XReadHandler::run_loop] Found entries, returning");
-                    return Ok(last_try);
+        if let Some(block_ms) = self.request.block {
+            let start_time = Instant::now();
+            while start_time.elapsed().as_millis() < block_ms as u128 {
+                let results = self.try_read()?;
+                if !results.is_empty() {
+                    return Ok(results);
                 }
                 thread::sleep(Duration::from_millis(10));
-                last_try = self.try_read()?;
-                #[cfg(debug_assertions)]
-                println!("[XReadHandler::run_loop] Retried try_read result: {:?} entries", last_try.len());
             }
-            
-            #[cfg(debug_assertions)]
-            println!("[XReadHandler::run_loop] Timeout reached, returning empty array");
-            Ok(vec![])
+            // Return empty result on timeout
+            return Ok(vec![]);
         } else {
             #[cfg(debug_assertions)]
             println!("[XReadHandler::run_loop] Non-blocking mode, calling try_read once");
@@ -59,62 +49,142 @@ impl XReadHandler {
 
     fn try_read(&self) -> Result<Vec<(String, Vec<StreamEntry>)>, String> {
         #[cfg(debug_assertions)]
-        println!("\n[XReadHandler::try_read] Starting read for keys={:?}", self.request.keys);
-        let redis = self.redis.lock().map_err(|e| e.to_string())?;
-        let mut results = Vec::new();
+        println!("\n[XReadHandler::try_read] === Starting read operation ===");
+        #[cfg(debug_assertions)]
+        println!("Request parameters:");
+        #[cfg(debug_assertions)]
+        println!("  - Keys: {:?}", self.request.keys);
+        #[cfg(debug_assertions)]
+        println!("  - IDs: {:?}", self.request.ids);
+        #[cfg(debug_assertions)]
+        println!("  - Block: {:?} ({})", 
+            self.request.block,
+            if self.request.block.is_some() { "BLOCKING" } else { "NON-BLOCKING" }
+        );
+        #[cfg(debug_assertions)]
+        println!("  - Count: {:?}", self.request.count);
 
-        for (stream_idx, key) in self.request.keys.iter().enumerate() {
-            let id = &self.request.ids[stream_idx];
+        let mut results = Vec::new();
+        let redis = self.redis.lock().unwrap();
+
+        for (stream_key, stream_id) in self.request.keys.iter().zip(self.request.ids.iter()) {
             #[cfg(debug_assertions)]
-            println!("[XReadHandler::try_read] Processing stream '{}' with ID '{}'", key, id);
-            
-            // Handle $ ID - only return entries after current last ID
-            let entries = if id == "$" {
+            println!("\n[XReadHandler::try_read] Processing stream '{}' with ID '{}'", stream_key, stream_id);
+
+            if stream_id == "$" {
                 #[cfg(debug_assertions)]
-                println!("[XReadHandler::try_read] Handling $ ID for stream '{}'", key);
-                // Get all entries after the current last ID
-                let last_id = redis.storage.get_last_stream_id(key).unwrap_or_else(|| "0-0".to_string());
+                println!("[XReadHandler::try_read] Special $ ID handling:");
+
+                if self.request.block.is_none() {
+                    #[cfg(debug_assertions)]
+                    println!("  - Non-blocking mode with $ ID");
+                    #[cfg(debug_assertions)]
+                    println!("  - Skipping stream (Redis returns nil for $ in non-blocking mode)");
+                    continue;
+                }
+
                 #[cfg(debug_assertions)]
-                println!("[XReadHandler::try_read] Last ID for stream '{}' is '{}'", key, last_id);
-                let (ms, seq) = match last_id.split_once('-') {
-                    Some((ms_str, seq_str)) => {
-                        let ms = ms_str.parse::<u64>().map_err(|_| "Invalid stream ID format")?;
-                        let seq = seq_str.parse::<u64>().map_err(|_| "Invalid stream ID format")?;
-                        (ms, seq)
-                    }
-                    None => (0, 0),
+                println!("  - Blocking mode with $ ID");
+                
+                let last_id = redis.storage.get_last_stream_id(stream_key);
+                #[cfg(debug_assertions)]
+                println!("  - Last stream ID: {:?}", last_id);
+
+                let (ms, seq) = if let Some(last_id) = last_id {
+                    let (last_ms, last_seq) = Storage::parse_stream_id(&last_id)?;
+                    #[cfg(debug_assertions)]
+                    println!("  - Using last ID as starting point: {}:{}", last_ms, last_seq);
+                    (last_ms, last_seq)
+                } else {
+                    #[cfg(debug_assertions)]
+                    println!("  - No entries in stream, using 0:0 as starting point");
+                    (0, 0)
                 };
-                redis.storage.get_stream_entries(key, ms, seq, self.request.count)
+
+                // Get entries strictly after our last ID
+                let entries = redis.storage.get_stream_entries(stream_key, ms, seq, self.request.count);
+                
+                #[cfg(debug_assertions)]
+                println!("  - Found {} entries after {}:{}", entries.len(), ms, seq);
+                if !entries.is_empty() {
+                    #[cfg(debug_assertions)]
+                    println!("  - Entry IDs: {:?}", entries.iter().map(|e| &e.id).collect::<Vec<_>>());
+                }
+
+                if !entries.is_empty() {
+                    results.push((stream_key.clone(), entries));
+                }
             } else {
                 #[cfg(debug_assertions)]
-                println!("[XReadHandler::try_read] Handling specific ID '{}' for stream '{}'", id, key);
-                // Parse the ID
-                let (ms, seq) = match id.split_once('-') {
-                    Some((ms_str, seq_str)) => {
-                        let ms = ms_str.parse::<u64>().map_err(|_| "Invalid stream ID format")?;
-                        let seq = seq_str.parse::<u64>().map_err(|_| "Invalid stream ID format")?;
+                println!("[XReadHandler::try_read] Regular ID handling:");
+                
+                let (ms, seq) = match Storage::parse_stream_id(stream_id) {
+                    Ok((ms, seq)) => {
+                        #[cfg(debug_assertions)]
+                        println!("  - Parsed ID {}:{}", ms, seq);
                         (ms, seq)
-                    }
-                    None => {
-                        let ms = id.parse::<u64>().map_err(|_| "Invalid stream ID format")?;
-                        (ms, 0)
+                    },
+                    Err(e) => {
+                        #[cfg(debug_assertions)]
+                        println!("  - Failed to parse ID: {}", e);
+                        return Err(e);
                     }
                 };
 
-                redis.storage.get_stream_entries(key, ms, seq, self.request.count)
-            };
-
-            #[cfg(debug_assertions)]
-            println!("[XReadHandler::try_read] Got {} entries for stream '{}'", entries.len(), key);
-            if !entries.is_empty() {
+                let entries = redis.storage.get_stream_entries(stream_key, ms, seq, self.request.count);
+                
                 #[cfg(debug_assertions)]
-                println!("[XReadHandler::try_read] Adding stream '{}' to results", key);
-                results.push((key.clone(), entries));
+                println!("  - Found {} entries after {}:{}", entries.len(), ms, seq);
+                if !entries.is_empty() {
+                    #[cfg(debug_assertions)]
+                    println!("  - Entry IDs: {:?}", entries.iter().map(|e| &e.id).collect::<Vec<_>>());
+                }
+
+                if !entries.is_empty() {
+                    results.push((stream_key.clone(), entries));
+                }
             }
         }
 
         #[cfg(debug_assertions)]
-        println!("[XReadHandler::try_read] Returning {} streams with entries", results.len());
+        println!("\n[XReadHandler::try_read] === Operation summary ===");
+        #[cfg(debug_assertions)]
+        if results.is_empty() {
+            println!("No entries found in any stream");
+            if self.request.block.is_none() {
+                println!("Returning nil (non-blocking mode)");
+            } else {
+                println!("Will continue waiting (blocking mode)");
+            }
+        } else {
+            println!("Found entries in {} streams:", results.len());
+            for (stream, entries) in &results {
+                println!("  - {}: {} entries", stream, entries.len());
+            }
+        }
+
         Ok(results)
+    }
+
+    pub fn format_response(&self, entries: Vec<(String, Vec<StreamEntry>)>) -> String {
+        if entries.is_empty() {
+            return "*-1\r\n".to_string();
+        }
+
+        let mut response = "*2\r\n".to_string();  
+        for (stream_key, stream_entries) in entries {
+            response.push_str(&format!("*2\r\n${}\r\n{}\r\n", stream_key.len(), stream_key));
+            response.push_str(&format!("*{}\r\n", stream_entries.len()));
+            for entry in stream_entries {
+                response.push_str("*2\r\n");
+                response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id));
+                response.push_str(&format!("*{}\r\n", entry.fields.len()));
+                for (field, value) in entry.fields {
+                    response.push_str(&format!("${}\r\n{}\r\n", field.len(), field));
+                    response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
+                }
+            }
+        }
+        response
     }
 }

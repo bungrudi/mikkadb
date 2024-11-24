@@ -68,39 +68,30 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
         return Err("-ERR wrong number of arguments for 'xread' command\r\n".to_string());
     }
 
-    // Find the first ID in the remaining parameters
-    let mut id_pos = None;
-    for (i, param) in remaining.iter().enumerate() {
-        if is_stream_id(param) {
-            id_pos = Some(i);
-            break;
-        }
-    }
-
-    // If no ID is found, use the second parameter as ID
-    let id_pos = match id_pos {
-        Some(pos) => pos,
-        None => {
-            if remaining.len() < 2 {
-                return Err("-ERR wrong number of arguments for 'xread' command\r\n".to_string());
-            }
-            1
-        }
-    };
-
-    // Everything before the ID position is a stream name
-    let stream_names = remaining[..id_pos].to_vec();
-    if stream_names.is_empty() {
+    // Split remaining parameters into stream names and IDs
+    let num_params = remaining.len();
+    if num_params % 2 != 0 {
         return Err("-ERR wrong number of arguments for 'xread' command\r\n".to_string());
     }
 
-    // The ID is used for all streams
-    let id = remaining[id_pos].clone();
-    let ids = vec![id; stream_names.len()];
+    let mid = num_params / 2;
+    let stream_names = remaining[..mid].to_vec();
+    let stream_ids = remaining[mid..].to_vec();
+
+    if stream_names.is_empty() || stream_ids.len() != stream_names.len() {
+        return Err("-ERR wrong number of arguments for 'xread' command\r\n".to_string());
+    }
+
+    // Validate all IDs
+    for id in &stream_ids {
+        if !is_stream_id(id) {
+            return Err(format!("-ERR Invalid stream ID format: {}\r\n", id));
+        }
+    }
 
     Ok(XReadParams {
         keys: stream_names,
-        ids,
+        ids: stream_ids,
         block,
         count,
     })
