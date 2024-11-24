@@ -34,25 +34,14 @@ impl XReadHandler {
         for (i, (key, id)) in self.request.keys.iter().zip(&self.request.ids).enumerate() {
             if id == "$" {
                 // For $ ID, use the last ID in the stream or "0-0" if stream is empty
-                {
-                    let redis = self.redis.lock().unwrap();
-                    concrete_ids[i] = redis.storage.get_last_stream_id(key)
-                        .unwrap_or_else(|| "0-0".to_string());
-                }
-                
-                // If using "0-0", limit to 1 entry
-                if concrete_ids[i] == "0-0" {
-                    self.request.count = Some(1);
-                }
+                let redis = self.redis.lock().unwrap();
+                concrete_ids[i] = redis.storage.get_last_stream_id(key)
+                    .unwrap_or_else(|| "0-0".to_string());
             }
         }
 
         if let Some(block_ms) = self.request.block {
-            // Try immediately first
-            let results = self.try_read(&concrete_ids)?;
-            if !results.is_empty() {
-                return Ok(results);
-            }
+            let start_time = Instant::now();
             
             // block_ms == 0 means block indefinitely
             let block_duration = if block_ms == 0 {
@@ -61,40 +50,30 @@ impl XReadHandler {
                 Some(Duration::from_millis(block_ms))
             };
             
-            let start_time = Instant::now();
-            
-            // Then wait with longer sleep intervals
+            // Keep checking until timeout
             loop {
-                // Check if we've exceeded timeout (if any)
+                // Check for timeout first
                 if let Some(timeout) = block_duration {
-                    if start_time.elapsed() >= timeout {
+                    let elapsed = start_time.elapsed();
+                    if elapsed >= timeout {
                         #[cfg(debug_assertions)]
-                        println!("[XReadHandler::run_loop] Block timeout reached after {:?}", start_time.elapsed());
-                        return Ok(vec![]);
+                        println!("[XReadHandler::run_loop] Block timeout reached after {:?}", elapsed);
+                        return Ok(vec![]); // Return empty vec ONLY on timeout
                     }
                 }
-                
-                // Sleep for a short duration
-                let sleep_duration = if let Some(timeout) = block_duration {
-                    let remaining = timeout - start_time.elapsed();
-                    std::cmp::min(remaining, Duration::from_millis(300))
-                } else {
-                    Duration::from_millis(300) // For block 0, just use fixed sleep
-                };
-                thread::sleep(sleep_duration);
-                
+
+                // Try reading data
                 let results = self.try_read(&concrete_ids)?;
                 if !results.is_empty() {
-                    return Ok(results);
+                    return Ok(results); // Return non-empty results immediately
                 }
+
+                // Sleep for a short duration to avoid busy waiting
+                thread::sleep(Duration::from_millis(10));
             }
         } else {
-            // For non-blocking mode, include all streams
-            if let Ok(results) = self.try_read(&concrete_ids) {
-                Ok(results)
-            } else {
-                Ok(Vec::new())
-            }
+            // For non-blocking mode, just try once
+            self.try_read(&concrete_ids)
         }
     }
 
@@ -146,11 +125,11 @@ impl XReadHandler {
             
             #[cfg(debug_assertions)]
             println!("  - Found {} entries after {}:{}", entries.len(), ms, seq);
+
+            // Only include streams that have new entries
             if !entries.is_empty() {
-                #[cfg(debug_assertions)]
-                println!("  - Entry IDs: {:?}", entries.iter().map(|e| &e.id).collect::<Vec<_>>());
+                results.push((stream_key.clone(), entries));
             }
-            results.push((stream_key.clone(), entries));
         }
 
         drop(redis);
@@ -158,10 +137,10 @@ impl XReadHandler {
         #[cfg(debug_assertions)]
         println!("\n[XReadHandler::try_read] === Operation summary ===");
         #[cfg(debug_assertions)]
-        if results.iter().all(|(_, entries)| entries.is_empty()) {
+        if results.is_empty() {
             println!("No entries found in any stream");
             if self.request.block.is_none() {
-                println!("Returning nil (non-blocking mode)");
+                println!("Returning empty result (non-blocking mode)");
             } else {
                 println!("Will continue waiting (blocking mode)");
             }

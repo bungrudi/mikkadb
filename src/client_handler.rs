@@ -220,7 +220,7 @@ impl ClientHandler {
                         match handler.run_loop() {
                             Ok(results) => {
                                 let mut client = client.lock().unwrap();
-                                if results.is_empty() {
+                                if results.is_empty() || results.iter().all(|(_, entries)| entries.is_empty()) {
                                     #[cfg(debug_assertions)]
                                     println!("[ClientHandler::start] Empty result, sending nil response");
                                     client.write_all(b"*-1\r\n").unwrap();
@@ -230,19 +230,21 @@ impl ClientHandler {
                                 } else {
                                     let mut response = format!("*{}\r\n", results.len());
                                     for (stream_key, entries) in results {
-                                        // Format: *2\r\n$[key_len]\r\n[key]\r\n*[entries_len]\r\n
-                                        response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
-                                            stream_key.len(), stream_key, entries.len()));
-                                        
-                                        for entry in entries {
-                                            // Format: *2\r\n$[id_len]\r\n[id]\r\n*[field_count*2]\r\n
-                                            let field_count = entry.fields.len() * 2; // Each field has key and value
+                                        // Only include streams with entries
+                                        if !entries.is_empty() {
                                             response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
-                                                entry.id.len(), entry.id, field_count));
+                                                stream_key.len(), stream_key, entries.len()));
                                             
-                                            for (field, value) in entry.fields {
-                                                response.push_str(&format!("${}\r\n{}\r\n${}\r\n{}\r\n",
-                                                    field.len(), field, value.len(), value));
+                                            for entry in entries {
+                                                // Format: *2\r\n$[id_len]\r\n[id]\r\n*[field_count*2]\r\n
+                                                let field_count = entry.fields.len() * 2; // Each field has key and value
+                                                response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
+                                                    entry.id.len(), entry.id, field_count));
+                                                
+                                                for (field, value) in entry.fields {
+                                                    response.push_str(&format!("${}\r\n{}\r\n${}\r\n{}\r\n",
+                                                        field.len(), field, value.len(), value));
+                                                }
                                             }
                                         }
                                     }

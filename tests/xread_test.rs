@@ -101,6 +101,12 @@ fn test_xread_blocking_timeout_handler_logic() {
     let results = handler.run_loop().unwrap();
     let elapsed = start.elapsed();
 
+    #[cfg(debug_assertions)]
+    {
+        println!("[test_xread_blocking_timeout_handler_logic] Results: {:?}\n", results);
+        println!("[test_xread_blocking_timeout_handler_logic] Elapsed: {:?}\n", elapsed);
+    }
+
     assert!(elapsed >= Duration::from_millis(100));
     // Redis returns nil on timeout
     assert!(results.is_empty());
@@ -122,34 +128,80 @@ fn test_xread_multiple_streams() {
         redis_guard.storage.xadd("stream2", "1-0", fields).unwrap();
     }
 
-    let request = XReadRequest {
-        keys: vec!["stream1".to_string(), "stream2".to_string()],
-        ids: vec!["0-0".to_string(), "0-0".to_string()],
-        block: None,
-        count: None,
-    };
+    // Test 1: Both streams have entries
+    {
+        let request = XReadRequest {
+            keys: vec!["stream1".to_string(), "stream2".to_string()],
+            ids: vec!["0-0".to_string(), "0-0".to_string()],
+            block: None,
+            count: None,
+        };
 
-    let mut handler = XReadHandler::new(redis.clone(), request);
-    let results = handler.run_loop().unwrap();
+        let mut handler = XReadHandler::new(redis.clone(), request);
+        let results = handler.run_loop().unwrap();
 
-    #[cfg(debug_assertions)]
-    println!("[test_xread_multiple_streams] Results: {:?}\n", results);
-    
-    assert_eq!(results.len(), 2);
-    
-    // Check first stream
-    let (stream_name, entries) = &results[0];
-    assert_eq!(stream_name, "stream1");
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].id, "1-0");
-    assert_eq!(entries[0].fields["field1"], "value1");
-    
-    // Check second stream
-    let (stream_name, entries) = &results[1];
-    assert_eq!(stream_name, "stream2");
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].id, "1-0");
-    assert_eq!(entries[0].fields["field1"], "value2");
+        #[cfg(debug_assertions)]
+        println!("[test_xread_multiple_streams::test1] Results: {:?}\n", results);
+        
+        assert_eq!(results.len(), 2);
+        
+        // Check first stream
+        let (stream_name, entries) = &results[0];
+        assert_eq!(stream_name, "stream1");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "1-0");
+        assert_eq!(entries[0].fields["field1"], "value1");
+        
+        // Check second stream
+        let (stream_name, entries) = &results[1];
+        assert_eq!(stream_name, "stream2");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "1-0");
+        assert_eq!(entries[0].fields["field1"], "value2");
+    }
+
+    // Test 2: Only one stream has entries
+    {
+        let request = XReadRequest {
+            keys: vec!["stream1".to_string(), "stream2".to_string()],
+            ids: vec!["0-0".to_string(), "1-0".to_string()], // stream2 has no new entries after 1-0
+            block: None,
+            count: None,
+        };
+
+        let mut handler = XReadHandler::new(redis.clone(), request);
+        let results = handler.run_loop().unwrap();
+
+        #[cfg(debug_assertions)]
+        println!("[test_xread_multiple_streams::test2] Results: {:?}\n", results);
+        
+        assert_eq!(results.len(), 1, "Should only include stream1 which has entries");
+        
+        // Check stream1 (only stream with entries)
+        let (stream_name, entries) = &results[0];
+        assert_eq!(stream_name, "stream1");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "1-0");
+        assert_eq!(entries[0].fields["field1"], "value1");
+    }
+
+    // Test 3: No streams have entries
+    {
+        let request = XReadRequest {
+            keys: vec!["stream1".to_string(), "stream2".to_string()],
+            ids: vec!["1-0".to_string(), "1-0".to_string()], // No new entries after 1-0
+            block: None,
+            count: None,
+        };
+
+        let mut handler = XReadHandler::new(redis.clone(), request);
+        let results = handler.run_loop().unwrap();
+
+        #[cfg(debug_assertions)]
+        println!("[test_xread_multiple_streams::test3] Results: {:?}\n", results);
+        
+        assert!(results.is_empty(), "Should return empty array when no streams have entries");
+    }
 }
 
 // Protocol-Level XREAD Tests
@@ -411,6 +463,7 @@ fn test_xread_empty_responses() {
     let response = String::from_utf8_lossy(&written_data);
     #[cfg(debug_assertions)]
     println!("[test_xread_empty_responses::test1] Response received: {:?}", response);
+    
     assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with $");
 
     // Wait for write to complete and clear buffers
