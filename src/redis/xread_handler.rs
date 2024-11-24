@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::thread;
 
 use crate::redis::Redis;
@@ -29,39 +29,76 @@ impl XReadHandler {
         #[cfg(debug_assertions)]
         println!("\n[XReadHandler::run_loop] Starting with block={:?}, count={:?}", self.request.block, self.request.count);
 
+        // Convert $ to appropriate ID
+        let mut concrete_ids = self.request.ids.clone();
+        for (i, (key, id)) in self.request.keys.iter().zip(&self.request.ids).enumerate() {
+            if id == "$" {
+                // For $ ID, use the last ID in the stream or "0-0" if stream is empty
+                {
+                    let redis = self.redis.lock().unwrap();
+                    concrete_ids[i] = redis.storage.get_last_stream_id(key)
+                        .unwrap_or_else(|| "0-0".to_string());
+                }
+                
+                // If using "0-0", limit to 1 entry
+                if concrete_ids[i] == "0-0" {
+                    self.request.count = Some(1);
+                }
+            }
+        }
+
         if let Some(block_ms) = self.request.block {
-            let start_time = Instant::now();
-            let block_duration = Duration::from_millis(block_ms);
-            
             // Try immediately first
-            let results = self.try_read()?;
+            let results = self.try_read(&concrete_ids)?;
             if !results.is_empty() {
                 return Ok(results);
             }
             
+            // block_ms == 0 means block indefinitely
+            let block_duration = if block_ms == 0 {
+                None // No timeout
+            } else {
+                Some(Duration::from_millis(block_ms))
+            };
+            
+            let start_time = Instant::now();
+            
             // Then wait with longer sleep intervals
-            while start_time.elapsed() < block_duration {
-                let remaining = block_duration - start_time.elapsed();
-                let sleep_duration = std::cmp::min(remaining, Duration::from_millis(50));
+            loop {
+                // Check if we've exceeded timeout (if any)
+                if let Some(timeout) = block_duration {
+                    if start_time.elapsed() >= timeout {
+                        #[cfg(debug_assertions)]
+                        println!("[XReadHandler::run_loop] Block timeout reached after {:?}", start_time.elapsed());
+                        return Ok(vec![]);
+                    }
+                }
+                
+                // Sleep for a short duration
+                let sleep_duration = if let Some(timeout) = block_duration {
+                    let remaining = timeout - start_time.elapsed();
+                    std::cmp::min(remaining, Duration::from_millis(300))
+                } else {
+                    Duration::from_millis(300) // For block 0, just use fixed sleep
+                };
                 thread::sleep(sleep_duration);
                 
-                let results = self.try_read()?;
+                let results = self.try_read(&concrete_ids)?;
                 if !results.is_empty() {
                     return Ok(results);
                 }
             }
-            
-            #[cfg(debug_assertions)]
-            println!("[XReadHandler::run_loop] Block timeout reached after {:?}", start_time.elapsed());
-            return Ok(vec![]);
         } else {
-            #[cfg(debug_assertions)]
-            println!("[XReadHandler::run_loop] Non-blocking mode, calling try_read once");
-            self.try_read()
+            // For non-blocking mode, include all streams
+            if let Ok(results) = self.try_read(&concrete_ids) {
+                Ok(results)
+            } else {
+                Ok(Vec::new())
+            }
         }
     }
 
-    fn try_read(&self) -> Result<Vec<(String, Vec<StreamEntry>)>, String> {
+    fn try_read(&self, ids: &[String]) -> Result<Vec<(String, Vec<StreamEntry>)>, String> {
         #[cfg(debug_assertions)]
         println!("\n[XReadHandler::try_read] === Starting read operation ===");
         #[cfg(debug_assertions)]
@@ -69,7 +106,7 @@ impl XReadHandler {
         #[cfg(debug_assertions)]
         println!("  - Keys: {:?}", self.request.keys);
         #[cfg(debug_assertions)]
-        println!("  - IDs: {:?}", self.request.ids);
+        println!("  - IDs: {:?}", ids);
         #[cfg(debug_assertions)]
         println!("  - Block: {:?} ({})", 
             self.request.block,
@@ -81,89 +118,47 @@ impl XReadHandler {
         let mut results = Vec::new();
         let redis = self.redis.lock().unwrap();
 
-        for (stream_key, stream_id) in self.request.keys.iter().zip(self.request.ids.iter()) {
+        for (i, stream_key) in self.request.keys.iter().enumerate() {
             #[cfg(debug_assertions)]
-            println!("\n[XReadHandler::try_read] Processing stream '{}' with ID '{}'", stream_key, stream_id);
+            println!("\n[XReadHandler::try_read] Processing stream '{}' with ID '{}'", stream_key, ids[i]);
 
-            if stream_id == "$" {
-                #[cfg(debug_assertions)]
-                println!("[XReadHandler::try_read] Special $ ID handling:");
-
-                if self.request.block.is_none() {
+            let (ms, seq) = match Storage::parse_stream_id(&ids[i]) {
+                Ok((ms, seq)) => {
                     #[cfg(debug_assertions)]
-                    println!("  - Non-blocking mode with $ ID");
+                    println!("  - Parsed ID {}:{}", ms, seq);
+                    (ms, seq)
+                },
+                Err(e) => {
                     #[cfg(debug_assertions)]
-                    println!("  - Skipping stream (Redis returns nil for $ in non-blocking mode)");
-                    continue;
+                    println!("  - Failed to parse ID: {}", e);
+                    return Err(e);
                 }
+            };
 
+            // Get entries that arrived after the specified ID
+            let entries = redis.storage.get_stream_entries(
+                stream_key,
+                ms,
+                seq,
+                self.request.count,
+                self.request.block.is_some(), // Use strict comparison for blocking mode
+            );
+            
+            #[cfg(debug_assertions)]
+            println!("  - Found {} entries after {}:{}", entries.len(), ms, seq);
+            if !entries.is_empty() {
                 #[cfg(debug_assertions)]
-                println!("  - Blocking mode with $ ID");
-                
-                let last_id = redis.storage.get_last_stream_id(stream_key);
-                #[cfg(debug_assertions)]
-                println!("  - Last stream ID: {:?}", last_id);
-
-                let (ms, seq) = if let Some(last_id) = last_id {
-                    let (last_ms, last_seq) = Storage::parse_stream_id(&last_id)?;
-                    #[cfg(debug_assertions)]
-                    println!("  - Using last ID as starting point: {}:{}", last_ms, last_seq);
-                    (last_ms, last_seq)
-                } else {
-                    #[cfg(debug_assertions)]
-                    println!("  - No entries in stream, using 0:0 as starting point");
-                    (0, 0)
-                };
-
-                // Get entries strictly after our last ID
-                let entries = redis.storage.get_stream_entries(stream_key, ms, seq, self.request.count);
-                
-                #[cfg(debug_assertions)]
-                println!("  - Found {} entries after {}:{}", entries.len(), ms, seq);
-                if !entries.is_empty() {
-                    #[cfg(debug_assertions)]
-                    println!("  - Entry IDs: {:?}", entries.iter().map(|e| &e.id).collect::<Vec<_>>());
-                }
-
-                if !entries.is_empty() {
-                    results.push((stream_key.clone(), entries));
-                }
-            } else {
-                #[cfg(debug_assertions)]
-                println!("[XReadHandler::try_read] Regular ID handling:");
-                
-                let (ms, seq) = match Storage::parse_stream_id(stream_id) {
-                    Ok((ms, seq)) => {
-                        #[cfg(debug_assertions)]
-                        println!("  - Parsed ID {}:{}", ms, seq);
-                        (ms, seq)
-                    },
-                    Err(e) => {
-                        #[cfg(debug_assertions)]
-                        println!("  - Failed to parse ID: {}", e);
-                        return Err(e);
-                    }
-                };
-
-                let entries = redis.storage.get_stream_entries(stream_key, ms, seq, self.request.count);
-                
-                #[cfg(debug_assertions)]
-                println!("  - Found {} entries after {}:{}", entries.len(), ms, seq);
-                if !entries.is_empty() {
-                    #[cfg(debug_assertions)]
-                    println!("  - Entry IDs: {:?}", entries.iter().map(|e| &e.id).collect::<Vec<_>>());
-                }
-
-                if !entries.is_empty() {
-                    results.push((stream_key.clone(), entries));
-                }
+                println!("  - Entry IDs: {:?}", entries.iter().map(|e| &e.id).collect::<Vec<_>>());
             }
+            results.push((stream_key.clone(), entries));
         }
+
+        drop(redis);
 
         #[cfg(debug_assertions)]
         println!("\n[XReadHandler::try_read] === Operation summary ===");
         #[cfg(debug_assertions)]
-        if results.is_empty() {
+        if results.iter().all(|(_, entries)| entries.is_empty()) {
             println!("No entries found in any stream");
             if self.request.block.is_none() {
                 println!("Returning nil (non-blocking mode)");

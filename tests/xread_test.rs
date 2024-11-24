@@ -131,6 +131,9 @@ fn test_xread_multiple_streams() {
 
     let mut handler = XReadHandler::new(redis.clone(), request);
     let results = handler.run_loop().unwrap();
+
+    #[cfg(debug_assertions)]
+    println!("[test_xread_multiple_streams] Results: {:?}\n", results);
     
     assert_eq!(results.len(), 2);
     
@@ -155,6 +158,14 @@ fn test_xread_blocking_with_new_data() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
     let redis_clone = Arc::clone(&redis);
 
+    // Add initial data that should not be returned
+    {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("field1".to_string(), "old_value".to_string());
+        let redis = redis.lock().unwrap();
+        redis.storage.xadd("mystream", "*", fields).unwrap();
+    }
+
     // Create mock stream
     let stream = MockTcpStream::new();
     let mut client_handler = ClientHandler::new(stream.clone(), redis.clone());
@@ -167,11 +178,11 @@ fn test_xread_blocking_with_new_data() {
         read_data.extend_from_slice(xread_command.as_bytes());
     }
 
-    // Start a thread that will add data after a delay
+    // Start a thread that will add new data after a delay
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(100));
         let mut fields = std::collections::HashMap::new();
-        fields.insert("field1".to_string(), "value1".to_string());
+        fields.insert("field1".to_string(), "new_value".to_string());
         
         let redis = redis_clone.lock().unwrap();
         redis.storage.xadd("mystream", "*", fields).unwrap();
@@ -188,7 +199,8 @@ fn test_xread_blocking_with_new_data() {
     assert!(response.starts_with("*1\r\n"), "Response should start with array of one stream");
     assert!(response.contains("mystream"), "Response should contain stream name");
     assert!(response.contains("field1"), "Response should contain field name");
-    assert!(response.contains("value1"), "Response should contain field value");
+    assert!(response.contains("new_value"), "Response should contain new field value");
+    assert!(!response.contains("old_value"), "Response should not contain old field value");
 
     // Shutdown both stream and client handler
     stream.shutdown();
@@ -333,7 +345,7 @@ fn test_xread_empty_vs_nil_response() {
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
     #[cfg(debug_assertions)]
-    println!("[test_xread_empty_vs_nil_response::test1] Response: {:?}", response);
+    println!("[test_xread_empty_vs_nil_response::test1] Response received: {:?}", response);
     assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with $");
 
     // Wait for write to complete
@@ -351,7 +363,7 @@ fn test_xread_empty_vs_nil_response() {
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
     #[cfg(debug_assertions)]
-    println!("[test_xread_empty_vs_nil_response::test2] Response: {:?}", response);
+    println!("[test_xread_empty_vs_nil_response::test2] Response received: {:?}", response);
     assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with no matches");
 
     // Wait for write to complete and clear buffers
@@ -369,7 +381,7 @@ fn test_xread_empty_vs_nil_response() {
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
     #[cfg(debug_assertions)]
-    println!("[test_xread_empty_vs_nil_response::test3] Response: {:?}", response);
+    println!("[test_xread_empty_vs_nil_response::test3] Response received: {:?}", response);
     assert_eq!(response, "*-1\r\n", "Should return nil for blocking read timeout");
 
     // Shutdown stream and client handler
@@ -398,7 +410,7 @@ fn test_xread_empty_responses() {
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
     #[cfg(debug_assertions)]
-    println!("[test_xread_empty_responses::test1] Response: {:?}", response);
+    println!("[test_xread_empty_responses::test1] Response received: {:?}", response);
     assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with $");
 
     // Wait for write to complete and clear buffers
@@ -423,7 +435,7 @@ fn test_xread_empty_responses() {
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
     #[cfg(debug_assertions)]
-    println!("[test_xread_empty_responses::test2] Response: {:?}", response);
+    println!("[test_xread_empty_responses::test2] Response received: {:?}", response);
     assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with no matches");
 
     // Wait for write to complete and clear buffers
@@ -448,7 +460,7 @@ fn test_xread_empty_responses() {
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
     #[cfg(debug_assertions)]
-    println!("[test_xread_empty_responses::test3] Response: {:?}", response);
+    println!("[test_xread_empty_responses::test3] Response received: {:?}", response);
     assert_eq!(response, "*-1\r\n", "Should return nil for blocking read timeout");
 
     // Shutdown stream and client handler

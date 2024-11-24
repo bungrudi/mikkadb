@@ -230,12 +230,15 @@ impl ClientHandler {
                                 } else {
                                     let mut response = format!("*{}\r\n", results.len());
                                     for (stream_key, entries) in results {
+                                        // Format: *2\r\n$[key_len]\r\n[key]\r\n*[entries_len]\r\n
                                         response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
                                             stream_key.len(), stream_key, entries.len()));
                                         
                                         for entry in entries {
+                                            // Format: *2\r\n$[id_len]\r\n[id]\r\n*[field_count*2]\r\n
+                                            let field_count = entry.fields.len() * 2; // Each field has key and value
                                             response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
-                                                entry.id.len(), entry.id, entry.fields.len()));
+                                                entry.id.len(), entry.id, field_count));
                                             
                                             for (field, value) in entry.fields {
                                                 response.push_str(&format!("${}\r\n{}\r\n${}\r\n{}\r\n",
@@ -244,7 +247,7 @@ impl ClientHandler {
                                         }
                                     }
                                     #[cfg(debug_assertions)]
-                                    println!("[ClientHandler::start] Writing non-empty response: {:?}", response);
+                                    println!("[ClientHandler::start] Sending response: {}", response);
                                     client.write_all(response.as_bytes()).unwrap();
                                     client.flush().unwrap();
                                     #[cfg(debug_assertions)]
