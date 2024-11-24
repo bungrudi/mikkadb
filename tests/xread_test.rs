@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::HashMap;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
@@ -31,11 +31,10 @@ fn test_xread_with_dollar_id() {
     // Add some test data
     {
         let redis_guard = redis.lock().unwrap();
-        let mut fields = HashMap::new();
-        fields.insert("temperature".to_string(), "25".to_string());
-        redis_guard.storage.xadd("mystream", "1-0", fields.clone()).unwrap();
+        let fields = HashMap::new();
+        redis_guard.storage.xadd("mystream", "1-0", fields).unwrap();
         
-        fields.insert("temperature".to_string(), "26".to_string());
+        let fields = HashMap::new();
         redis_guard.storage.xadd("mystream", "2-0", fields).unwrap();
     }
 
@@ -59,15 +58,14 @@ fn test_xread_with_count_limit() {
     
     // Add test data
     {
-        let mut redis_guard = redis.lock().unwrap();
-        let mut fields = HashMap::new();
-        fields.insert("temperature".to_string(), "25".to_string());
-        redis_guard.storage.xadd("mystream", "1-0", fields.clone()).unwrap();
+        let redis_guard = redis.lock().unwrap();
+        let fields = HashMap::new();
+        redis_guard.storage.xadd("mystream", "1-0", fields).unwrap();
         
-        fields.insert("temperature".to_string(), "26".to_string());
-        redis_guard.storage.xadd("mystream", "2-0", fields.clone()).unwrap();
+        let fields = HashMap::new();
+        redis_guard.storage.xadd("mystream", "2-0", fields).unwrap();
         
-        fields.insert("temperature".to_string(), "27".to_string());
+        let fields = HashMap::new();
         redis_guard.storage.xadd("mystream", "3-0", fields).unwrap();
     }
 
@@ -114,11 +112,12 @@ fn test_xread_multiple_streams() {
     
     // Add test data
     {
-        let mut redis_guard = redis.lock().unwrap();
+        let redis_guard = redis.lock().unwrap();
         let mut fields = HashMap::new();
         fields.insert("field1".to_string(), "value1".to_string());
-        redis_guard.storage.xadd("stream1", "1-0", fields.clone()).unwrap();
+        redis_guard.storage.xadd("stream1", "1-0", fields).unwrap();
         
+        let mut fields = HashMap::new();
         fields.insert("field1".to_string(), "value2".to_string());
         redis_guard.storage.xadd("stream2", "1-0", fields).unwrap();
     }
@@ -176,7 +175,7 @@ fn test_xread_blocking_with_new_data() {
         let mut fields = std::collections::HashMap::new();
         fields.insert("field1".to_string(), "value1".to_string());
         
-        let mut redis = redis_clone.lock().unwrap();
+        let redis = redis_clone.lock().unwrap();
         redis.storage.xadd("mystream", "*", fields).unwrap();
     });
 
@@ -241,7 +240,7 @@ fn test_xread_blocking_multiple_streams_protocol() {
         thread::sleep(Duration::from_millis(100));
         let mut fields = std::collections::HashMap::new();
         
-        let mut redis = redis_clone.lock().unwrap();
+        let redis = redis_clone.lock().unwrap();
         
         // Add to first stream
         fields.insert("field1".to_string(), "value1".to_string());
