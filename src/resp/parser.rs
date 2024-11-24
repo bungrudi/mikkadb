@@ -5,8 +5,7 @@ use crate::redis::RedisCommand;
 use crate::process_command;
 
 // parse RESP using a simple state machine algorithm with zero-copy optimizations
-pub fn parse_resp(buffer: &[u8], len: usize) -> [RedisCommand;25] {
-    const ARRAY_REPEAT_VALUE: RedisCommand = RedisCommand::None;
+pub fn parse_resp(buffer: &[u8], len: usize) -> Vec<RedisCommand> {
     let mut context = Context {
         buffer: buffer.to_vec(),
         read_len: len,
@@ -15,7 +14,7 @@ pub fn parse_resp(buffer: &[u8], len: usize) -> [RedisCommand;25] {
         data_length: 0,
         current_command: None,
         command_index: 0,
-        commands: [ARRAY_REPEAT_VALUE;25],
+        commands: Vec::new(),
         error_reason: Cow::Borrowed(Context::NO_ERROR),
     };
 

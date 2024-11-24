@@ -165,26 +165,4 @@ impl XReadHandler {
 
         Ok(results)
     }
-
-    pub fn format_response(&self, entries: Vec<(String, Vec<StreamEntry>)>) -> String {
-        if entries.is_empty() {
-            return "*-1\r\n".to_string();
-        }
-
-        let mut response = "*2\r\n".to_string();  
-        for (stream_key, stream_entries) in entries {
-            response.push_str(&format!("*2\r\n${}\r\n{}\r\n", stream_key.len(), stream_key));
-            response.push_str(&format!("*{}\r\n", stream_entries.len()));
-            for entry in stream_entries {
-                response.push_str("*2\r\n");
-                response.push_str(&format!("${}\r\n{}\r\n", entry.id.len(), entry.id));
-                response.push_str(&format!("*{}\r\n", entry.fields.len()));
-                for (field, value) in entry.fields {
-                    response.push_str(&format!("${}\r\n{}\r\n", field.len(), field));
-                    response.push_str(&format!("${}\r\n{}\r\n", value.len(), value));
-                }
-            }
-        }
-        response
-    }
 }

@@ -12,7 +12,7 @@ pub struct Context {
     pub data_length: usize,
     pub current_command: Option<Command>,
     pub command_index: u8,
-    pub commands: [RedisCommand; 25],
+    pub commands: Vec<RedisCommand>,
     pub error_reason: Cow<'static, str>,
 }
 
@@ -148,21 +148,13 @@ impl Context {
                                 match &self.current_command {
                                     Some(command) => {
                                         let command_ = command.command.to_string();
-                                        let mut params = [String::new(), String::new(), String::new(), String::new(), String::new()];
-                                        for (i, s) in command.data.iter().enumerate() {
-                                            params[i] = s.to_string();
-                                        }
-
+                                        let params: Vec<String> = command.data.iter().map(|s| s.to_string()).collect();
                                         let original_resp = std::str::from_utf8(&self.buffer[command.buffer_start..command.buffer_end]).unwrap().to_string();
                                         match RedisCommand::data(command_, &params, original_resp) {
                                             Some(redis_command) => {
-                                                if self.command_index < 25 {
-                                                    self.commands[self.command_index as usize] = redis_command;
-                                                    self.current_command = None;
-                                                    self.command_index += 1;
-                                                } else{
-                                                    self.error_reason = Cow::Borrowed("Too many commands");
-                                                }
+                                                self.commands.push(redis_command);
+                                                self.current_command = None;
+                                                self.command_index += 1;
                                             },
                                             None => {
                                                 // None we just continue...

@@ -76,37 +76,41 @@ impl RedisCommand {
     /// It should check if the parameters are complete, otherwise return None.
     /// For example Set requires 2 parameters, key and value. When this method is called for
     /// a Set command, the first time it will return true to indicate that it expects another.
-    pub fn data(command: String, params: &[String; 5], original_resp: String) -> Option<RedisCommand> {
+    pub fn data(command: String, params: &[String], original_resp: String) -> Option<RedisCommand> {
         match command.to_ascii_uppercase().as_str() {
             ref command if command.eq_ignore_ascii_case(Self::MULTI) => Some(RedisCommand::Multi),
             ref command if command.eq_ignore_ascii_case(Self::EXEC) => Some(RedisCommand::Exec),
             ref command if command.eq_ignore_ascii_case(Self::DISCARD) => Some(RedisCommand::Discard),
             ref command if command.eq_ignore_ascii_case(Self::PING) => Some(RedisCommand::Ping),
             ref command if command.eq_ignore_ascii_case(Self::ECHO) => {
-                if params[0].is_empty() {
+                if params.is_empty() {
                     None
                 } else {
                     Some(RedisCommand::Echo { data: params[0].clone() })
                 }
             },
             ref command if command.eq_ignore_ascii_case(Self::SET) => {
-                let key = &params[0];
-                let value = &params[1];
-                if key.is_empty() || value.is_empty() {
+                if params.len() < 2 {
                     None
                 } else {
-                    let ttl = match params[2].as_str().eq_ignore_ascii_case("EX") {
-                        true => match params[3].parse::<usize>() {
-                            Ok(value) => Some(value * 1000),
-                            Err(_) => None,
+                    let key = &params[0];
+                    let value = &params[1];
+                    let ttl = match params.get(2) {
+                        Some(param) if param.eq_ignore_ascii_case("EX") => match params.get(3) {
+                            Some(param) => match param.parse::<usize>() {
+                                Ok(value) => Some(value * 1000),
+                                Err(_) => None,
+                            },
+                            None => None,
                         },
-                        false => match params[2].as_str().eq_ignore_ascii_case("PX") {
-                            true => match params[3].parse::<usize>() {
+                        Some(param) if param.eq_ignore_ascii_case("PX") => match params.get(3) {
+                            Some(param) => match param.parse::<usize>() {
                                 Ok(value) => Some(value),
                                 Err(_) => None,
                             },
-                            false => None,
+                            None => None,
                         },
+                        _ => None,
                     };
                     Some(RedisCommand::Set { 
                         key: key.clone(), 
@@ -117,97 +121,121 @@ impl RedisCommand {
                 }
             },
             command if command.eq_ignore_ascii_case(Self::GET) => {
-                let key = params[0].clone();
-                if key.is_empty() {
+                if params.is_empty() {
                     None
                 } else {
+                    let key = params[0].clone();
                     Some(RedisCommand::Get { key })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::INFO) => {
-                let subcommand = params[0].clone();
-                if subcommand.is_empty() {
+                if params.is_empty() {
                     None
                 } else {
+                    let _subcommand = params[0].clone();
                     Some(RedisCommand::Info { subcommand: params[0].to_string() })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::REPLCONF) => {
-                let subcommand = params[0].clone();
-                let params = params[1..].iter().filter(|&p| !p.is_empty()).cloned().collect();
-                if subcommand.is_empty() {
-                    Some(RedisCommand::Error { message: "ERR Wrong number of arguments for 'replconf' command".to_string() })
+                if params.is_empty() {
+                    None
                 } else {
-                    if subcommand.eq_ignore_ascii_case("getack") {
-                        Some(RedisCommand::ReplconfGetack)
+                    let _subcommand = params[0].clone();
+                    let params = params[1..].iter().filter(|&p| !p.is_empty()).cloned().collect();
+                    if _subcommand.is_empty() {
+                        Some(RedisCommand::Error { message: "ERR Wrong number of arguments for 'replconf' command".to_string() })
                     } else {
-                        Some(RedisCommand::Replconf { subcommand, params })
+                        if _subcommand.eq_ignore_ascii_case("getack") {
+                            Some(RedisCommand::ReplconfGetack)
+                        } else {
+                            Some(RedisCommand::Replconf { subcommand: _subcommand, params })
+                        }
                     }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::PSYNC) => {
-                let replica_id = params[0].clone();
-                match params[1].parse::<i8>() {
-                    Ok(offset) => Some(RedisCommand::Psync { replica_id, offset }),
-                    Err(_) => Some(RedisCommand::Error { message: "ERR Invalid offset".to_string() }),
+                if params.len() < 2 {
+                    None
+                } else {
+                    let replica_id = params[0].clone();
+                    match params[1].parse::<i8>() {
+                        Ok(offset) => Some(RedisCommand::Psync { replica_id, offset }),
+                        Err(_) => Some(RedisCommand::Error { message: "ERR Invalid offset".to_string() }),
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::WAIT) => {
-                let numreplicas = params[0].parse::<i64>().unwrap();
-                let timeout = params[1].parse::<i64>().unwrap();
-                Some(RedisCommand::Wait { numreplicas, timeout, elapsed: 0 })
-            },
-            command if command.eq_ignore_ascii_case(Self::CONFIG) => {
-                let subcommand = params[0].clone();
-                let parameter = params[1].clone();
-                if subcommand.is_empty() || parameter.is_empty() {
+                if params.len() < 2 {
                     None
                 } else {
-                    Some(RedisCommand::Config { subcommand, parameter })
+                    let numreplicas = params[0].parse::<i64>().unwrap();
+                    let timeout = params[1].parse::<i64>().unwrap();
+                    Some(RedisCommand::Wait { numreplicas, timeout, elapsed: 0 })
+                }
+            },
+            command if command.eq_ignore_ascii_case(Self::CONFIG) => {
+                if params.len() < 2 {
+                    None
+                } else {
+                    let _subcommand = params[0].clone();
+                    let parameter = params[1].clone();
+                    if _subcommand.is_empty() || parameter.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::Config { subcommand: _subcommand, parameter })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::KEYS) => {
-                if params[0].is_empty() {
+                if params.is_empty() {
                     None
                 } else {
                     Some(RedisCommand::Keys { pattern: params[0].clone() })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::TYPE) => {
-                let key = params[0].clone();
-                if key.is_empty() {
+                if params.is_empty() {
                     None
                 } else {
+                    let key = params[0].clone();
                     Some(RedisCommand::Type { key })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::XADD) => {
-                let key = params[0].clone();
-                let id = params[1].clone();
-                if key.is_empty() || id.is_empty() {
+                if params.len() < 3 {
                     None
                 } else {
-                    let mut fields = HashMap::new();
-                    let mut i = 2;
-                    while i < params.len() - 1 && !params[i].is_empty() && !params[i+1].is_empty() {
-                        fields.insert(params[i].clone(), params[i+1].clone());
-                        i += 2;
-                    }
-                    if fields.is_empty() {
+                    let key = params[0].clone();
+                    let id = params[1].clone();
+                    if key.is_empty() || id.is_empty() {
                         None
                     } else {
-                        Some(RedisCommand::XAdd { key, id, fields, original_resp })
+                        let mut fields = HashMap::new();
+                        let mut i = 2;
+                        while i < params.len() - 1 && !params[i].is_empty() && !params[i+1].is_empty() {
+                            fields.insert(params[i].clone(), params[i+1].clone());
+                            i += 2;
+                        }
+                        if fields.is_empty() {
+                            None
+                        } else {
+                            Some(RedisCommand::XAdd { key, id, fields, original_resp })
+                        }
                     }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::XRANGE) => {
-                let key = params[0].clone();
-                let start = params[1].clone();
-                let end = params[2].clone();
-                if key.is_empty() || start.is_empty() || end.is_empty() {
+                if params.len() < 3 {
                     None
                 } else {
-                    Some(RedisCommand::XRange { key, start, end })
+                    let key = params[0].clone();
+                    let start = params[1].clone();
+                    let end = params[2].clone();
+                    if key.is_empty() || start.is_empty() || end.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::XRange { key, start, end })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::XREAD) => {
@@ -227,10 +255,10 @@ impl RedisCommand {
                 }
             },
             command if command.eq_ignore_ascii_case(Self::INCR) => {
-                let key = params[0].clone();
-                if key.is_empty() {
+                if params.is_empty() {
                     None
                 } else {
+                    let key = params[0].clone();
                     Some(RedisCommand::Incr { key })
                 }
             },
@@ -239,109 +267,141 @@ impl RedisCommand {
             },
             // List commands
             command if command.eq_ignore_ascii_case(Self::LPUSH) => {
-                let key = params[0].clone();
-                let value = params[1].clone();
-                if key.is_empty() || value.is_empty() {
+                if params.len() < 2 {
                     None
                 } else {
-                    Some(RedisCommand::LPush { key, value })
+                    let key = params[0].clone();
+                    let value = params[1].clone();
+                    if key.is_empty() || value.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::LPush { key, value })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::RPUSH) => {
-                let key = params[0].clone();
-                let value = params[1].clone();
-                if key.is_empty() || value.is_empty() {
+                if params.len() < 2 {
                     None
                 } else {
-                    Some(RedisCommand::RPush { key, value })
+                    let key = params[0].clone();
+                    let value = params[1].clone();
+                    if key.is_empty() || value.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::RPush { key, value })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::LPOP) => {
-                let key = params[0].clone();
-                if key.is_empty() {
+                if params.is_empty() {
                     None
                 } else {
+                    let key = params[0].clone();
                     Some(RedisCommand::LPop { key })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::RPOP) => {
-                let key = params[0].clone();
-                if key.is_empty() {
+                if params.is_empty() {
                     None
                 } else {
+                    let key = params[0].clone();
                     Some(RedisCommand::RPop { key })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::LLEN) => {
-                let key = params[0].clone();
-                if key.is_empty() {
+                if params.is_empty() {
                     None
                 } else {
+                    let key = params[0].clone();
                     Some(RedisCommand::LLen { key })
                 }
             },
             command if command.eq_ignore_ascii_case(Self::LRANGE) => {
-                let key = params[0].clone();
-                let start = params[1].parse::<i64>().unwrap_or(0);
-                let stop = params[2].parse::<i64>().unwrap_or(-1);
-                if key.is_empty() {
+                if params.len() < 3 {
                     None
                 } else {
-                    Some(RedisCommand::LRange { key, start, stop })
+                    let key = params[0].clone();
+                    let start = params[1].parse::<i64>().unwrap_or(0);
+                    let stop = params[2].parse::<i64>().unwrap_or(-1);
+                    if key.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::LRange { key, start, stop })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::LTRIM) => {
-                let key = params[0].clone();
-                let start = params[1].parse::<i64>().unwrap_or(0);
-                let stop = params[2].parse::<i64>().unwrap_or(-1);
-                if key.is_empty() {
+                if params.len() < 3 {
                     None
                 } else {
-                    Some(RedisCommand::LTrim { key, start, stop })
+                    let key = params[0].clone();
+                    let start = params[1].parse::<i64>().unwrap_or(0);
+                    let stop = params[2].parse::<i64>().unwrap_or(-1);
+                    if key.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::LTrim { key, start, stop })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::LPOS) => {
-                let key = params[0].clone();
-                let element = params[1].clone();
-                let count = if params[2].eq_ignore_ascii_case("COUNT") {
-                    params[3].parse::<i64>().ok()
-                } else {
-                    None
-                };
-                if key.is_empty() || element.is_empty() {
+                if params.len() < 3 {
                     None
                 } else {
-                    Some(RedisCommand::LPos { key, element, count })
+                    let key = params[0].clone();
+                    let element = params[1].clone();
+                    let count = if params.len() > 3 && params[2].eq_ignore_ascii_case("COUNT") {
+                        params[3].parse::<i64>().ok()
+                    } else {
+                        None
+                    };
+                    if key.is_empty() || element.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::LPos { key, element, count })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::LINSERT) => {
-                let key = params[0].clone();
-                let before = params[1].eq_ignore_ascii_case("BEFORE");
-                let pivot = params[2].clone();
-                let element = params[3].clone();
-                if key.is_empty() || pivot.is_empty() || element.is_empty() {
+                if params.len() < 4 {
                     None
                 } else {
-                    Some(RedisCommand::LInsert { key, before, pivot, element })
+                    let key = params[0].clone();
+                    let before = params[1].eq_ignore_ascii_case("BEFORE");
+                    let pivot = params[2].clone();
+                    let element = params[3].clone();
+                    if key.is_empty() || pivot.is_empty() || element.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::LInsert { key, before, pivot, element })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::LSET) => {
-                let key = params[0].clone();
-                let index = params[1].parse::<i64>().unwrap_or(0);
-                let element = params[2].clone();
-                if key.is_empty() || element.is_empty() {
+                if params.len() < 3 {
                     None
                 } else {
-                    Some(RedisCommand::LSet { key, index, element })
+                    let key = params[0].clone();
+                    let index = params[1].parse::<i64>().unwrap_or(0);
+                    let element = params[2].clone();
+                    if key.is_empty() || element.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::LSet { key, index, element })
+                    }
                 }
             },
             command if command.eq_ignore_ascii_case(Self::LINDEX) => {
-                let key = params[0].clone();
-                let index = params[1].parse::<i64>().unwrap_or(0);
-                if key.is_empty() {
+                if params.len() < 2 {
                     None
                 } else {
-                    Some(RedisCommand::LIndex { key, index })
+                    let key = params[0].clone();
+                    let index = params[1].parse::<i64>().unwrap_or(0);
+                    if key.is_empty() {
+                        None
+                    } else {
+                        Some(RedisCommand::LIndex { key, index })
+                    }
                 }
             },
             _ => Some(RedisCommand::Error { message: format!("Unknown command: {}", command) }),

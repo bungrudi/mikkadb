@@ -69,10 +69,6 @@ impl Redis {
         self.bytes_processed.load(Ordering::SeqCst)
     }
 
-    pub fn incr_bytes_processed(&mut self, bytes: u64) {
-        self.bytes_processed.fetch_add(bytes, Ordering::SeqCst);
-    }
-
     pub fn keys(&self, pattern: &str) -> Vec<String> {
         self.storage.keys(pattern)
     }

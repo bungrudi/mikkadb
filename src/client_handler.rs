@@ -117,6 +117,13 @@ impl ClientHandler {
                     count: *count,
                 };
                 
+                #[cfg(debug_assertions)]
+                println!("[ClientHandler::execute_command] Created request:");
+                #[cfg(debug_assertions)]
+                println!("  - Keys (after clone): {:?}", request.keys);
+                #[cfg(debug_assertions)]
+                println!("  - IDs (after clone): {:?}", request.ids);
+                
                 let mut handler = XReadHandler::new(Arc::clone(&self.redis), request);
                 match handler.run_loop() {
                     Ok(results) => {
@@ -133,6 +140,8 @@ impl ClientHandler {
                             response.push_str(&format!("*{}\r\n", results.len()));
                             #[cfg(debug_assertions)]
                             println!("[ClientHandler::execute_command] Response header: *{}", results.len());
+                            #[cfg(debug_assertions)]
+                            println!("[ClientHandler::execute_command] Results to process: {:?}", results);
                             
                             // For each stream: *2\r\n$<len>\r\n<stream>\r\n*<entries>\r\n
                             for (stream_name, entries) in results {
@@ -161,6 +170,8 @@ impl ClientHandler {
                                     response.push_str(&format!("*{}\r\n", field_count));
                                     
                                     for (key, value) in entry.fields {
+                                        #[cfg(debug_assertions)]
+                                        println!("[ClientHandler::execute_command] Field: {} = {}", key, value);
                                         // Field key
                                         response.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
                                         // Field value

@@ -17,13 +17,9 @@ macro_rules! process_command {
                     .to_string();
                 match RedisCommand::data(command_, &params, original_resp) {
                     Some(redis_command) => {
-                        if $self.command_index < 25 {
-                            $self.commands[$self.command_index as usize] = redis_command;
-                            $self.current_command = None;
-                            $self.command_index += 1;
-                        } else{
-                            $self.error_reason = "Too many commands".into();
-                        }
+                        $self.commands.push(redis_command);
+                        $self.current_command = None;
+                        $self.command_index += 1;
                     },
                     None => {
                         $self.error_reason = Context::PARSE_ERROR.into();

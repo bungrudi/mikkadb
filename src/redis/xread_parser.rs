@@ -11,6 +11,9 @@ fn is_stream_id(s: &str) -> bool {
 }
 
 pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
+    #[cfg(debug_assertions)]
+    println!("\n[XReadParser::parse_xread] Starting with params: {:?}", params);
+
     let mut block: Option<u64> = None;
     let mut count: Option<usize> = None;
     let mut streams_index = None;
@@ -27,6 +30,9 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
         Some(pos) => pos,
         None => return Err("-ERR Missing 'STREAMS' keyword\r\n".to_string()),
     };
+
+    #[cfg(debug_assertions)]
+    println!("[XReadParser::parse_xread] Found STREAMS at position {}", streams_pos);
 
     // Process parameters before STREAMS
     let mut i = 0;
@@ -68,6 +74,9 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
         return Err("-ERR wrong number of arguments for 'xread' command\r\n".to_string());
     }
 
+    #[cfg(debug_assertions)]
+    println!("[XReadParser::parse_xread] Remaining params after STREAMS: {:?}", remaining);
+
     // Split remaining parameters into stream names and IDs
     let num_params = remaining.len();
     if num_params % 2 != 0 {
@@ -77,6 +86,13 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
     let mid = num_params / 2;
     let stream_names = remaining[..mid].to_vec();
     let stream_ids = remaining[mid..].to_vec();
+
+    #[cfg(debug_assertions)]
+    println!("[XReadParser::parse_xread] Split into:");
+    #[cfg(debug_assertions)]
+    println!("  - Stream names: {:?}", stream_names);
+    #[cfg(debug_assertions)]
+    println!("  - Stream IDs: {:?}", stream_ids);
 
     if stream_names.is_empty() || stream_ids.len() != stream_names.len() {
         return Err("-ERR wrong number of arguments for 'xread' command\r\n".to_string());

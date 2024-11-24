@@ -381,26 +381,6 @@ impl Storage {
         Ok(())
     }
 
-    fn validate_stream_id(id: &str) -> Result<(), Cow<'static, str>> {
-        if id == "$" || id == "0" {
-            return Ok(());
-        }
-        let parts: Vec<&str> = id.split('-').collect();
-        if parts.len() != 2 {
-            return Err("ERR Invalid milliseconds in stream ID".into());
-        }
-
-        if let Err(_) = parts[0].parse::<u64>() {
-            return Err("ERR Invalid milliseconds in stream ID".into());
-        }
-
-        if let Err(_) = parts[1].parse::<u64>() {
-            return Err("ERR Invalid milliseconds in stream ID".into());
-        }
-
-        Ok(())
-    }
-
     pub fn get_current_time_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
