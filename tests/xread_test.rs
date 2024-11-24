@@ -158,9 +158,7 @@ fn test_xread_blocking_with_new_data() {
     // Create mock stream
     let stream = MockTcpStream::new();
     let mut client_handler = ClientHandler::new(stream.clone(), redis.clone());
-
-    // Start the client handler in a separate thread
-    client_handler.start();
+    let handle = client_handler.start();
 
     // Write XREAD command with BLOCK option
     let xread_command = "*6\r\n$5\r\nXREAD\r\n$5\r\nBLOCK\r\n$4\r\n1000\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$1\r\n$\r\n";
@@ -191,6 +189,10 @@ fn test_xread_blocking_with_new_data() {
     assert!(response.contains("mystream"), "Response should contain stream name");
     assert!(response.contains("field1"), "Response should contain field name");
     assert!(response.contains("value1"), "Response should contain field value");
+
+    // Drop the stream to terminate the thread
+    drop(stream);
+    handle.join().unwrap();
 }
 
 #[test]
@@ -200,7 +202,7 @@ fn test_xread_non_blocking_empty() {
     // Create mock stream
     let stream = MockTcpStream::new();
     let mut client_handler = ClientHandler::new(stream.clone(), redis.clone());
-    client_handler.start();
+    let handle = client_handler.start();
 
     // Write non-blocking XREAD command
     let xread_command = "*4\r\n$5\r\nXREAD\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$1\r\n$\r\n";
@@ -216,6 +218,11 @@ fn test_xread_non_blocking_empty() {
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
     assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking empty read");
+
+    // Shutdown both stream and client handler
+    stream.shutdown();
+    client_handler.shutdown();
+    handle.join().unwrap();
 }
 
 #[test]
@@ -226,7 +233,7 @@ fn test_xread_blocking_multiple_streams_protocol() {
     // Create mock stream
     let stream = MockTcpStream::new();
     let mut client_handler = ClientHandler::new(stream.clone(), redis.clone());
-    client_handler.start();
+    let handle = client_handler.start();
 
     // Write XREAD command with multiple streams
     let xread_command = "*8\r\n$5\r\nXREAD\r\n$5\r\nBLOCK\r\n$4\r\n1000\r\n$7\r\nSTREAMS\r\n$7\r\nstream1\r\n$7\r\nstream2\r\n$1\r\n$\r\n$1\r\n$\r\n";
@@ -269,6 +276,10 @@ fn test_xread_blocking_multiple_streams_protocol() {
     assert!(response.contains("stream2"), "Response should contain stream2");
     assert!(response.contains("value1"), "Response should contain value1");
     assert!(response.contains("value2"), "Response should contain value2");
+
+    // Drop the stream to terminate the thread
+    drop(stream);
+    handle.join().unwrap();
 }
 
 #[test]
@@ -278,7 +289,7 @@ fn test_xread_blocking_timeout() {
     // Create mock stream
     let stream = MockTcpStream::new();
     let mut client_handler = ClientHandler::new(stream.clone(), redis.clone());
-    client_handler.start();
+    let handle = client_handler.start();
 
     // Write XREAD command with BLOCK option
     let xread_command = "*6\r\n$5\r\nXREAD\r\n$5\r\nBLOCK\r\n$3\r\n100\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$1\r\n$\r\n";
@@ -294,4 +305,150 @@ fn test_xread_blocking_timeout() {
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
     assert_eq!(response, "*-1\r\n", "Should return nil for blocking read timeout");
+
+    // Drop the stream to terminate the thread
+    drop(stream);
+    handle.join().unwrap();
+}
+
+#[test]
+fn test_xread_empty_vs_nil_response() {
+    let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
+
+    // Create mock stream
+    let stream = MockTcpStream::new();
+    let mut client_handler = ClientHandler::new(stream.clone(), redis.clone());
+    let handle = client_handler.start();
+
+    // Test 1: Non-blocking read with $ (should return nil)
+    let xread_command = "*5\r\n$5\r\nXREAD\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$1\r\n$\r\n";
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(xread_command.as_bytes());
+    }
+    thread::sleep(Duration::from_millis(50));
+    let written_data = stream.get_written_data();
+    let response = String::from_utf8_lossy(&written_data);
+    #[cfg(debug_assertions)]
+    println!("[test_xread_empty_vs_nil_response::test1] Response: {:?}", response);
+    assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with $");
+
+    // Wait for write to complete
+    thread::sleep(Duration::from_millis(50));
+    stream.clear_written_data();
+    stream.clear_read_data();
+
+    // Test 2: Non-blocking read with non-existent ID (should also return nil)
+    let xread_command = "*5\r\n$5\r\nXREAD\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$3\r\n0-0\r\n";
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(xread_command.as_bytes());
+    }
+    thread::sleep(Duration::from_millis(50));
+    let written_data = stream.get_written_data();
+    let response = String::from_utf8_lossy(&written_data);
+    #[cfg(debug_assertions)]
+    println!("[test_xread_empty_vs_nil_response::test2] Response: {:?}", response);
+    assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with no matches");
+
+    // Wait for write to complete
+    thread::sleep(Duration::from_millis(50));
+    stream.clear_written_data();
+    stream.clear_read_data();
+
+    // Test 3: Blocking read with timeout (should return nil)
+    let xread_command = "*6\r\n$5\r\nXREAD\r\n$5\r\nBLOCK\r\n$3\r\n100\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$1\r\n$\r\n";
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(xread_command.as_bytes());
+    }
+    thread::sleep(Duration::from_millis(200));
+    let written_data = stream.get_written_data();
+    let response = String::from_utf8_lossy(&written_data);
+    #[cfg(debug_assertions)]
+    println!("[test_xread_empty_vs_nil_response::test3] Response: {:?}", response);
+    assert_eq!(response, "*-1\r\n", "Should return nil for blocking read timeout");
+
+    // Shutdown both stream and client handler
+    stream.shutdown();
+    client_handler.shutdown();
+    handle.join().unwrap();
+}
+
+#[test]
+fn test_xread_empty_responses() {
+    let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
+
+    // Create mock stream
+    let stream = MockTcpStream::new();
+    let mut client_handler = ClientHandler::new(stream.clone(), redis.clone());
+    let handle = client_handler.start();
+
+    // Test 1: Non-blocking read with $ (should return nil)
+    let xread_command = "*5\r\n$5\r\nXREAD\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$1\r\n$\r\n";
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(xread_command.as_bytes());
+    }
+    thread::sleep(Duration::from_millis(300));  // Wait longer for command processing
+    let written_data = stream.get_written_data();
+    let response = String::from_utf8_lossy(&written_data);
+    #[cfg(debug_assertions)]
+    println!("[test_xread_empty_responses::test1] Response: {:?}", response);
+    assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with $");
+
+    // Wait for write to complete and clear buffers
+    thread::sleep(Duration::from_millis(300));  // Wait longer before clearing
+    stream.clear_written_data();
+    stream.clear_read_data();
+    let written_data = stream.get_written_data();
+    #[cfg(debug_assertions)]
+    println!("[test_xread_empty_responses::test1] After clear - written data: {:?}", String::from_utf8_lossy(&written_data));
+
+    // Test 2: Non-blocking read with non-existent ID (should also return nil)
+    let xread_command = "*5\r\n$5\r\nXREAD\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$3\r\n0-0\r\n";
+    #[cfg(debug_assertions)]
+    println!("\n[test_xread_empty_responses::test2] Sending command: {:?}", xread_command);
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(xread_command.as_bytes());
+        #[cfg(debug_assertions)]
+        println!("[test_xread_empty_responses::test2] Command added to read buffer, len: {}", read_data.len());
+    }
+    thread::sleep(Duration::from_millis(300));  // Wait longer for command processing
+    let written_data = stream.get_written_data();
+    let response = String::from_utf8_lossy(&written_data);
+    #[cfg(debug_assertions)]
+    println!("[test_xread_empty_responses::test2] Response: {:?}", response);
+    assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with no matches");
+
+    // Wait for write to complete and clear buffers
+    thread::sleep(Duration::from_millis(300));  // Wait longer before clearing
+    stream.clear_written_data();
+    stream.clear_read_data();
+    let written_data = stream.get_written_data();
+    #[cfg(debug_assertions)]
+    println!("[test_xread_empty_responses::test2] After clear - written data: {:?}", String::from_utf8_lossy(&written_data));
+
+    // Test 3: Blocking read with timeout (should return nil)
+    let xread_command = "*6\r\n$5\r\nXREAD\r\n$5\r\nBLOCK\r\n$3\r\n100\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$1\r\n$\r\n";
+    #[cfg(debug_assertions)]
+    println!("\n[test_xread_empty_responses::test3] Sending command: {:?}", xread_command);
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(xread_command.as_bytes());
+        #[cfg(debug_assertions)]
+        println!("[test_xread_empty_responses::test3] Command added to read buffer, len: {}", read_data.len());
+    }
+    thread::sleep(Duration::from_millis(300));  // Wait longer for command processing
+    let written_data = stream.get_written_data();
+    let response = String::from_utf8_lossy(&written_data);
+    #[cfg(debug_assertions)]
+    println!("[test_xread_empty_responses::test3] Response: {:?}", response);
+    assert_eq!(response, "*-1\r\n", "Should return nil for blocking read timeout");
+
+    // Shutdown both stream and client handler
+    stream.shutdown();
+    client_handler.shutdown();
+    handle.join().unwrap();
 }
