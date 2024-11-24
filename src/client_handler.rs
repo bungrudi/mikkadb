@@ -261,14 +261,6 @@ impl ClientHandler {
                                 println!("[ClientHandler::start] Error response written and flushed");
                             }
                         }
-                        
-                        // In tests, we need to ensure the response is fully written before the client disconnects
-                        // This sleep gives enough time for the MockTcpStream to process the written data
-                        #[cfg(debug_assertions)]
-                        println!("[ClientHandler::start] Sleeping for 300ms to ensure write completion");
-                        thread::sleep(Duration::from_millis(300));
-                        #[cfg(debug_assertions)]
-                        println!("[ClientHandler::start] Sleep complete, continuing");
                         continue;
                     }
 

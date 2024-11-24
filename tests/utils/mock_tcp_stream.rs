@@ -2,7 +2,7 @@ use std::io::{Read, Write, Result};
 use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use redis_starter_rust::redis::replication::TcpStreamTrait;
 
 #[derive(Clone)]
@@ -50,8 +50,17 @@ impl MockTcpStream {
 
 impl Read for MockTcpStream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let start_time = Instant::now();
         loop {
-            // First check shutdown flag
+            // Check timeout
+            if start_time.elapsed() > Duration::from_secs(2) {
+                #[cfg(debug_assertions)]
+                println!("[MockTcpStream::read] Timeout after 2s, setting shutdown flag");
+                *self.shutdown.lock().unwrap() = true;
+                return Ok(0);
+            }
+
+            // Check shutdown flag
             if *self.shutdown.lock().unwrap() {
                 #[cfg(debug_assertions)]
                 println!("[MockTcpStream::read] Stream is shutdown, returning 0");

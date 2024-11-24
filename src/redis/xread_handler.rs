@@ -31,14 +31,28 @@ impl XReadHandler {
 
         if let Some(block_ms) = self.request.block {
             let start_time = Instant::now();
-            while start_time.elapsed().as_millis() < block_ms as u128 {
+            let block_duration = Duration::from_millis(block_ms);
+            
+            // Try immediately first
+            let results = self.try_read()?;
+            if !results.is_empty() {
+                return Ok(results);
+            }
+            
+            // Then wait with longer sleep intervals
+            while start_time.elapsed() < block_duration {
+                let remaining = block_duration - start_time.elapsed();
+                let sleep_duration = std::cmp::min(remaining, Duration::from_millis(50));
+                thread::sleep(sleep_duration);
+                
                 let results = self.try_read()?;
                 if !results.is_empty() {
                     return Ok(results);
                 }
-                thread::sleep(Duration::from_millis(10));
             }
-            // Return empty result on timeout
+            
+            #[cfg(debug_assertions)]
+            println!("[XReadHandler::run_loop] Block timeout reached after {:?}", start_time.elapsed());
             return Ok(vec![]);
         } else {
             #[cfg(debug_assertions)]

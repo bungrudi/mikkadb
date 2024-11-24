@@ -190,8 +190,9 @@ fn test_xread_blocking_with_new_data() {
     assert!(response.contains("field1"), "Response should contain field name");
     assert!(response.contains("value1"), "Response should contain field value");
 
-    // Drop the stream to terminate the thread
-    drop(stream);
+    // Shutdown both stream and client handler
+    stream.shutdown();
+    client_handler.shutdown();
     handle.join().unwrap();
 }
 
@@ -277,8 +278,9 @@ fn test_xread_blocking_multiple_streams_protocol() {
     assert!(response.contains("value1"), "Response should contain value1");
     assert!(response.contains("value2"), "Response should contain value2");
 
-    // Drop the stream to terminate the thread
-    drop(stream);
+    // Shutdown both stream and client handler
+    stream.shutdown();
+    client_handler.shutdown();
     handle.join().unwrap();
 }
 
@@ -306,8 +308,9 @@ fn test_xread_blocking_timeout() {
     let response = String::from_utf8_lossy(&written_data);
     assert_eq!(response, "*-1\r\n", "Should return nil for blocking read timeout");
 
-    // Drop the stream to terminate the thread
-    drop(stream);
+    // Shutdown both stream and client handler
+    stream.shutdown();
+    client_handler.shutdown();
     handle.join().unwrap();
 }
 
@@ -351,7 +354,7 @@ fn test_xread_empty_vs_nil_response() {
     println!("[test_xread_empty_vs_nil_response::test2] Response: {:?}", response);
     assert_eq!(response, "*-1\r\n", "Should return nil for non-blocking read with no matches");
 
-    // Wait for write to complete
+    // Wait for write to complete and clear buffers
     thread::sleep(Duration::from_millis(50));
     stream.clear_written_data();
     stream.clear_read_data();
@@ -369,9 +372,10 @@ fn test_xread_empty_vs_nil_response() {
     println!("[test_xread_empty_vs_nil_response::test3] Response: {:?}", response);
     assert_eq!(response, "*-1\r\n", "Should return nil for blocking read timeout");
 
-    // Shutdown both stream and client handler
+    // Shutdown stream and client handler
     stream.shutdown();
     client_handler.shutdown();
+    thread::sleep(Duration::from_millis(100)); // Give time for shutdown to propagate
     handle.join().unwrap();
 }
 
@@ -447,8 +451,9 @@ fn test_xread_empty_responses() {
     println!("[test_xread_empty_responses::test3] Response: {:?}", response);
     assert_eq!(response, "*-1\r\n", "Should return nil for blocking read timeout");
 
-    // Shutdown both stream and client handler
+    // Shutdown stream and client handler
     stream.shutdown();
     client_handler.shutdown();
+    thread::sleep(Duration::from_millis(100)); // Give time for shutdown to propagate
     handle.join().unwrap();
 }
