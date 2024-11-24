@@ -3,6 +3,8 @@ use super::xread_parser;
 
 #[derive(Debug, Clone)]
 pub enum RedisCommand {
+    /// Represents an invalid or unrecognized command.
+    /// This variant is used in pattern matching but never constructed directly.
     None,
     Multi,
     Exec,

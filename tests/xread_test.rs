@@ -293,5 +293,5 @@ fn test_xread_blocking_timeout() {
     // Check the response
     let written_data = stream.get_written_data();
     let response = String::from_utf8_lossy(&written_data);
-    assert_eq!(response, "*-1\r\n", "Should return nil on timeout");
+    assert_eq!(response, "*-1\r\n", "Should return nil for blocking read timeout");
 }

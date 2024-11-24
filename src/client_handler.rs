@@ -70,9 +70,9 @@ impl ClientHandler {
                             .execute_command(&cmd, Some(&mut client));
                         match result {
                             Ok(response) => responses.push(response),
-                            Err(err) => {
-                                println!("{}", err.trim());
-                                responses.push(err)
+                            Err(_e) => {
+                                println!("{}", _e.trim());
+                                responses.push(_e)
                             },
                         }
                     }
@@ -131,8 +131,8 @@ impl ClientHandler {
                         println!("[ClientHandler::execute_command] Got {} streams with entries", results.len());
                         if results.is_empty() {
                             #[cfg(debug_assertions)]
-                            println!("[ClientHandler::execute_command] Returning nil response");
-                            "*-1\r\n".to_string()  // Redis nil response
+                            println!("[ClientHandler::execute_command] Returning nil response for empty read");
+                            "*-1\r\n".to_string()  // Redis nil response for empty read (both blocking and non-blocking)
                         } else {
                             let mut response = String::new();
                             
@@ -184,10 +184,10 @@ impl ClientHandler {
                             response
                         }
                     },
-                    Err(e) => {
+                    Err(_e) => {
                         #[cfg(debug_assertions)]
-                        println!("[ClientHandler::execute_command] Error: {}", e);
-                        format!("-ERR {}\r\n", e)
+                        println!("[ClientHandler::execute_command] Error: {}", _e);
+                        format!("-ERR {}\r\n", _e)
                     }
                 }
             },
@@ -220,12 +220,12 @@ impl ClientHandler {
                     let mut client = self.client.lock().unwrap();
                     match self.redis.lock().unwrap().execute_command(command, Some(&mut client)) {
                         Ok(response) => response,
-                        Err(error) => {
-                            if error == "XREAD_RETRY" {
+                        Err(_e) => {
+                            if _e == "XREAD_RETRY" {
                                 "XREAD_RETRY".to_string()
                             } else {
-                                println!("{}", error.trim());
-                                error
+                                println!("{}", _e.trim());
+                                _e
                             }
                         }
                     }
@@ -263,9 +263,9 @@ impl ClientHandler {
                     let mut client = client.lock().unwrap();
                     match client.read(&mut buffer) {
                         Ok(n) => n,
-                        Err(e) => {
+                        Err(_e) => {
                             #[cfg(debug_assertions)]
-                            println!("[ClientHandler::start] Error reading from client: {}", e);
+                            println!("[ClientHandler::start] Error reading from client: {}", _e);
                             break;
                         }
                     }

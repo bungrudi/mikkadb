@@ -163,6 +163,11 @@ impl XReadHandler {
             }
         }
 
-        Ok(results)
+        if results.is_empty() && self.request.block.is_none() {
+            // For non-blocking mode with no results, return empty results
+            Ok(vec![])
+        } else {
+            Ok(results)
+        }
     }
 }
