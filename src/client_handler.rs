@@ -217,10 +217,16 @@ impl ClientHandler {
                         };
                         
                         let mut handler = XReadHandler::new(Arc::clone(&redis), request);
+                        #[cfg(debug_assertions)]
+                        println!("[ClientHandler::start] Running XReadHandler...");
                         match handler.run_loop() {
                             Ok(results) => {
+                                #[cfg(debug_assertions)]
+                                println!("[ClientHandler::start] Got results with {} streams", results.len());
                                 let mut client = client.lock().unwrap();
-                                if results.is_empty() || results.iter().all(|(_, entries)| entries.is_empty()) {
+                                
+                                if results.is_empty() {
+                                    // Return nil response for empty results
                                     #[cfg(debug_assertions)]
                                     println!("[ClientHandler::start] Empty result, sending nil response");
                                     client.write_all(b"*-1\r\n").unwrap();
@@ -228,6 +234,7 @@ impl ClientHandler {
                                     #[cfg(debug_assertions)]
                                     println!("[ClientHandler::start] Nil response written and flushed");
                                 } else {
+                                    // Format non-empty response
                                     let mut response = format!("*{}\r\n", results.len());
                                     for (stream_key, entries) in results {
                                         // Only include streams with entries
@@ -257,9 +264,9 @@ impl ClientHandler {
                                 }
                             },
                             Err(e) => {
-                                let mut client = client.lock().unwrap();
                                 #[cfg(debug_assertions)]
-                                println!("[ClientHandler::start] Writing error response: {:?}", e);
+                                println!("[ClientHandler::start] Got error: {:?}", e);
+                                let mut client = client.lock().unwrap();
                                 client.write_all(e.as_bytes()).unwrap();
                                 client.flush().unwrap();
                                 #[cfg(debug_assertions)]

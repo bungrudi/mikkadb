@@ -37,6 +37,8 @@ impl XReadHandler {
                 let redis = self.redis.lock().unwrap();
                 concrete_ids[i] = redis.storage.get_last_stream_id(key)
                     .unwrap_or_else(|| "0-0".to_string());
+                #[cfg(debug_assertions)]
+                println!("[XReadHandler::run_loop] key={}, id={}, concrete_id={}", key, id, concrete_ids[i]);
             }
         }
 
@@ -73,7 +75,10 @@ impl XReadHandler {
             }
         } else {
             // For non-blocking mode, just try once
-            self.try_read(&concrete_ids)
+            let results = self.try_read(&concrete_ids)?;
+            #[cfg(debug_assertions)]
+            println!("[XReadHandler::run_loop] Non-blocking mode results: {:?}", results);
+            Ok(results)
         }
     }
 
@@ -99,7 +104,7 @@ impl XReadHandler {
 
         for (i, stream_key) in self.request.keys.iter().enumerate() {
             #[cfg(debug_assertions)]
-            println!("\n[XReadHandler::try_read] Processing stream '{}' with ID '{}'", stream_key, ids[i]);
+            println!("[XReadHandler::try_read] Processing stream '{}' with ID '{}'", stream_key, ids[i]);
 
             let (ms, seq) = match Storage::parse_stream_id(&ids[i]) {
                 Ok((ms, seq)) => {
@@ -119,8 +124,7 @@ impl XReadHandler {
                 stream_key,
                 ms,
                 seq,
-                self.request.count,
-                self.request.block.is_some(), // Use strict comparison for blocking mode
+                self.request.count
             );
             
             #[cfg(debug_assertions)]

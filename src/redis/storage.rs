@@ -470,20 +470,14 @@ impl Storage {
         }
     }
 
-    pub fn get_stream_entries(&self, stream_key: &str, ms: u64, seq: u64, count: Option<usize>, strictly_greater: bool) -> Vec<StreamEntry> {
+    pub fn get_stream_entries(&self, stream_key: &str, ms: u64, seq: u64, count: Option<usize>) -> Vec<StreamEntry> {
         let data = self.data.lock().unwrap();
         if let Some(ValueWrapper::Stream { entries, .. }) = data.get(stream_key) {
             let mut matching_entries: Vec<StreamEntry> = entries
                 .iter()
                 .filter(|entry| {
                     if let Ok((entry_ms, entry_seq)) = Self::parse_stream_id(&entry.id) {
-                        if strictly_greater {
-                            // For blocking mode, only return entries strictly greater
-                            (entry_ms > ms) || (entry_ms == ms && entry_seq > seq)
-                        } else {
-                            // For non-blocking mode, return entries greater or equal
-                            (entry_ms > ms) || (entry_ms == ms && entry_seq >= seq)
-                        }
+                        (entry_ms > ms) || (entry_ms == ms && entry_seq > seq)
                     } else {
                         false
                     }
