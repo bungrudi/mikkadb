@@ -41,16 +41,11 @@ impl Redis {
     }
 
     pub fn set(&mut self, key: &str, value: &str, ttl: Option<usize>) {
-        #[cfg(debug_assertions)]
-        println!("DEBUG: Setting key '{}' with value '{}' and TTL {:?}", key, value, ttl);
         self.storage.set(key, value, ttl);
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
-        let result = self.storage.get(key);
-        #[cfg(debug_assertions)]
-        println!("DEBUG: Getting key '{}'. Result: {:?}", key, result);
-        result
+        self.storage.get(key)
     }
 
     pub fn xadd(&mut self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, String> {
@@ -96,6 +91,9 @@ impl Redis {
 
     pub fn execute_command(&mut self, command: &RedisCommand, client: Option<&mut Box<dyn TcpStreamTrait>>) -> Result<String, String> {
         match command {
+            RedisCommand::None => {
+                Err("-ERR Unknown command\r\n".to_string())
+            },
             RedisCommand::Multi => Ok("+OK\r\n".to_string()),
             RedisCommand::Exec => Ok("*0\r\n".to_string()),
             RedisCommand::Discard => Ok("+OK\r\n".to_string()),
@@ -165,20 +163,9 @@ impl Redis {
                 }
             },
             RedisCommand::LPos { key, element, count } => {
-                let positions = self.storage.lpos(key, element, *count);
-                if let Some(count) = count {
-                    // Format response as array when count is specified
-                    let mut response = format!("*{}\r\n", positions.len().min(*count as usize));
-                    for pos in positions.iter().take(*count as usize) {
-                        response.push_str(&format!(":{}\r\n", pos));
-                    }
-                    Ok(response)
-                } else {
-                    // Format response as single integer when count is not specified
-                    match positions.first() {
-                        Some(&pos) => Ok(format!(":{}\r\n", pos)),
-                        None => Ok("$-1\r\n".to_string())
-                    }
+                match self.storage.lpos(key, element, *count) {
+                    Ok(response) => Ok(response),
+                    Err(err) => Err(err),
                 }
             },
             RedisCommand::LInsert { key, before, pivot, element } => {
@@ -387,9 +374,6 @@ impl Redis {
             },
             RedisCommand::Error { message } => {
                 Err(format!("-{}\r\n", message))
-            },
-            RedisCommand::None => {
-                Err("-ERR Unknown command\r\n".to_string())
             },
         }
     }

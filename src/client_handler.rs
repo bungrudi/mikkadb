@@ -41,6 +41,7 @@ impl ClientHandler {
         }
     }
 
+    #[allow(dead_code)]
     pub fn shutdown(&self) {
         #[cfg(debug_assertions)]
         println!("[ClientHandler::shutdown] Setting shutdown flag");
@@ -115,244 +116,279 @@ impl ClientHandler {
                             key: key.to_string(),
                             value: value.to_string(),
                             ttl: *ttl,
-                            original_resp: original_resp.clone(),
+                            original_resp: original_resp.to_string(),
                         },
                         RedisCommand::Get { key } => RedisCommand::Get {
                             key: key.to_string(),
                         },
+                        RedisCommand::Info { subcommand } => RedisCommand::Info {
+                            subcommand: subcommand.to_string(),
+                        },
+                        RedisCommand::Type { key } => RedisCommand::Type {
+                            key: key.to_string(),
+                        },
+                        RedisCommand::Config { subcommand, parameter } => RedisCommand::Config {
+                            subcommand: subcommand.to_string(),
+                            parameter: parameter.to_string(),
+                        },
+                        RedisCommand::Keys { pattern } => RedisCommand::Keys {
+                            pattern: pattern.to_string(),
+                        },
+                        RedisCommand::Ping => RedisCommand::Ping,
+                        RedisCommand::Echo { data } => RedisCommand::Echo {
+                            data: data.to_string(),
+                        },
                         RedisCommand::Incr { key } => RedisCommand::Incr {
                             key: key.to_string(),
                         },
-                        _ => {
-                            let error = "-ERR Command not supported in transaction\r\n".to_string();
-                            println!("{}", error.trim());
-                            return error;
-                        }
+                        RedisCommand::LPush { key, value } => RedisCommand::LPush {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                        },
+                        RedisCommand::RPush { key, value } => RedisCommand::RPush {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                        },
+                        RedisCommand::LRange { key, start, stop } => RedisCommand::LRange {
+                            key: key.to_string(),
+                            start: *start,
+                            stop: *stop,
+                        },
+                        RedisCommand::XAdd { key, id, fields, original_resp } => RedisCommand::XAdd {
+                            key: key.to_string(),
+                            id: id.to_string(),
+                            fields: fields.clone(),
+                            original_resp: original_resp.to_string(),
+                        },
+                        RedisCommand::XRange { key, start, end } => RedisCommand::XRange {
+                            key: key.to_string(),
+                            start: start.to_string(),
+                            end: end.to_string(),
+                        },
+                        RedisCommand::XRead { keys, ids, block, count } => RedisCommand::XRead {
+                            keys: keys.clone(),
+                            ids: ids.clone(),
+                            block: *block,
+                            count: *count,
+                        },
+                        RedisCommand::Multi => RedisCommand::Multi,
+                        RedisCommand::Exec => RedisCommand::Exec,
+                        RedisCommand::Discard => RedisCommand::Discard,
+                        RedisCommand::Error { message } => RedisCommand::Error {
+                            message: message.to_string(),
+                        },
+                        _ => RedisCommand::Error {
+                            message: "Command not supported in transaction".to_string(),
+                        },
                     };
                     self.queued_commands.lock().unwrap().push_back(owned_command);
                     "+QUEUED\r\n".to_string()
                 } else {
-                    let mut client = self.client.lock().unwrap();
-                    match self.redis.lock().unwrap().execute_command(command, Some(&mut client)) {
-                        Ok(response) => response,
-                        Err(_e) => {
-                            println!("{}", _e.trim());
-                            _e
-                        }
-                    }
+                    self.execute_command(&command)
                 }
             }
         }
     }
 
     pub fn start(&mut self) -> std::thread::JoinHandle<()> {
-        #[cfg(debug_assertions)]
-        println!("\n[ClientHandler::start] Starting client handler");
-        let mut buffer: [u8;2048] = [0; 2048];
         let client = Arc::clone(&self.client);
         let redis = Arc::clone(&self.redis);
-        let master = self.master;
+        let shutdown = Arc::clone(&self.shutdown);
         let in_transaction = Arc::clone(&self.in_transaction);
         let queued_commands = Arc::clone(&self.queued_commands);
-        let shutdown = Arc::clone(&self.shutdown);
 
         thread::spawn(move || {
-            let mut handler = ClientHandler {
-                client: client.clone(),
-                redis: redis.clone(),
-                master,
-                in_transaction,
-                queued_commands,
-                shutdown: shutdown.clone(),
-            };
+            #[cfg(debug_assertions)]
+            println!("[CLIENT] Starting new client handler");
 
-            let _addr = {
-                let client = client.lock().unwrap();
-                client.peer_addr().unwrap()
-            };
+            let mut buffer = Vec::new();
+            let mut read_buffer = [0; 1024];
 
-            while !*handler.shutdown.lock().unwrap() {
-                let bytes_read = {
+            loop {
+                if *shutdown.lock().unwrap() {
+                    break;
+                }
+
+                // Read from client
+                let n = {
                     let mut client = client.lock().unwrap();
-                    match client.read(&mut buffer) {
-                        Ok(n) => n,
-                        Err(_e) => {
-                            #[cfg(debug_assertions)]
-                            println!("[ClientHandler::start] Error reading from client: {}", _e);
+                    match client.read(&mut read_buffer) {
+                        Ok(0) => {
+                            // Connection closed
                             break;
+                        }
+                        Ok(n) => {
+                            #[cfg(debug_assertions)]
+                            println!("[CLIENT] Received {} bytes", n);
+                            buffer.extend_from_slice(&read_buffer[..n]);
+                            n
+                        }
+                        Err(e) => {
+                            if e.kind() != std::io::ErrorKind::WouldBlock {
+                                eprintln!("[CLIENT] Error reading from client: {}", e);
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
                         }
                     }
                 };
 
-                if bytes_read == 0 {
+                // Parse commands from buffer
+                let commands = parse_resp(&buffer, buffer.len());
+                if !commands.is_empty() {
+                    buffer.clear();
+
                     #[cfg(debug_assertions)]
-                    println!("[ClientHandler::start] No data available, continuing");
-                    continue;
-                }
+                    println!("[CLIENT] Processing {} commands", commands.len());
 
-                #[cfg(debug_assertions)]
-                println!("[ClientHandler::start] Raw input: {}", String::from_utf8_lossy(&buffer[..bytes_read]));
-
-                let commands = parse_resp(&buffer, bytes_read);
-                #[cfg(debug_assertions)]
-                println!("[ClientHandler::start] Parsed {} commands", commands.len());
-
-                for command in commands {
-                    if matches!(command, RedisCommand::None) {
+                    for command in commands {
                         #[cfg(debug_assertions)]
-                        println!("[ClientHandler::start] Skipping None command");
-                        break;
-                    }
+                        println!("[CLIENT] Executing command: {:?}", command);
 
-                    // Handle XREAD command separately since it has its own retry logic
-                    if let RedisCommand::XRead { keys, ids, block, count } = &command {
-                        #[cfg(debug_assertions)]
-                        println!("[ClientHandler::start] Handling XREAD command");
-                        
-                        let request = XReadRequest {
-                            keys: keys.iter().map(|s| s.to_string()).collect(),
-                            ids: ids.iter().map(|s| s.to_string()).collect(),
-                            block: *block,
-                            count: *count,
-                        };
-                        
-                        let mut handler = XReadHandler::new(Arc::clone(&redis), request);
-                        #[cfg(debug_assertions)]
-                        println!("[ClientHandler::start] Running XReadHandler...");
-                        match handler.run_loop() {
-                            Ok(results) => {
-                                #[cfg(debug_assertions)]
-                                println!("[ClientHandler::start] Got results with {} streams", results.len());
-                                let mut client = client.lock().unwrap();
-                                
-                                if results.is_empty() {
-                                    // Return nil response for empty results
-                                    #[cfg(debug_assertions)]
-                                    println!("[ClientHandler::start] Empty result, sending nil response");
-                                    client.write_all(b"*-1\r\n").unwrap();
-                                    client.flush().unwrap();
-                                    #[cfg(debug_assertions)]
-                                    println!("[ClientHandler::start] Nil response written and flushed");
+                        let mut response = String::new();
+                        match command {
+                            RedisCommand::Multi => {
+                                let mut in_transaction = in_transaction.lock().unwrap();
+                                if *in_transaction {
+                                    response = "-ERR MULTI calls can not be nested\r\n".to_string();
                                 } else {
-                                    // Format non-empty response
-                                    let mut response = format!("*{}\r\n", results.len());
-                                    for (stream_key, entries) in results {
-                                        // Only include streams with entries
-                                        if !entries.is_empty() {
-                                            response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
-                                                stream_key.len(), stream_key, entries.len()));
-                                            
-                                            for entry in entries {
-                                                // Format: *2\r\n$[id_len]\r\n[id]\r\n*[field_count*2]\r\n
-                                                let field_count = entry.fields.len() * 2; // Each field has key and value
-                                                response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
-                                                    entry.id.len(), entry.id, field_count));
-                                                
-                                                for (field, value) in entry.fields {
-                                                    response.push_str(&format!("${}\r\n{}\r\n${}\r\n{}\r\n",
-                                                        field.len(), field, value.len(), value));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    #[cfg(debug_assertions)]
-                                    println!("[ClientHandler::start] Sending response: {}", response);
-                                    client.write_all(response.as_bytes()).unwrap();
-                                    client.flush().unwrap();
-                                    #[cfg(debug_assertions)]
-                                    println!("[ClientHandler::start] Non-empty response written and flushed");
+                                    *in_transaction = true;
+                                    response = "+OK\r\n".to_string();
                                 }
                             },
-                            Err(e) => {
-                                #[cfg(debug_assertions)]
-                                println!("[ClientHandler::start] Got error: {:?}", e);
-                                let mut client = client.lock().unwrap();
-                                client.write_all(e.as_bytes()).unwrap();
-                                client.flush().unwrap();
-                                #[cfg(debug_assertions)]
-                                println!("[ClientHandler::start] Error response written and flushed");
-                            }
-                        }
-                        continue;
-                    }
-
-                    let mut command = command;
-                    let mut should_retry = true;
-                    let start_time = Instant::now();
-
-                    while should_retry {
-                        #[cfg(debug_assertions)]
-                        println!("[ClientHandler::start] Executing command: {:?}", command);
-                        let response = handler.execute_command(&command);
-                        #[cfg(debug_assertions)]
-                        println!("[ClientHandler::start] Got response: {:?}", response);
-
-                        // Handle empty response (content sent directly)
-                        if response.is_empty() {
-                            #[cfg(debug_assertions)]
-                            println!("[ClientHandler::start] Empty response, continuing");
-                            should_retry = false;
-                            continue;
-                        }
-
-                        // Handle retry cases
-                        if response == "XREAD_RETRY" {
-                            #[cfg(debug_assertions)]
-                            println!("DEBUG: Got XREAD_RETRY response");
-
-                            let timeout = if let RedisCommand::XRead { block, .. } = &command {
-                                block.unwrap_or(0)
-                            } else {
-                                0
-                            };
-
-                            let elapsed = start_time.elapsed().as_millis() as u64;
-
-                            if timeout > 0 && elapsed >= timeout {
-                                #[cfg(debug_assertions)]
-                                println!("DEBUG: XREAD timeout expired, sending null response");
-
-                                let mut client = client.lock().unwrap();
-                                let _ = client.write(b"$-1\r\n");
-                                let _ = client.flush();
-                                should_retry = false;
-                            } else {
-                                should_retry = true;
-                            }
-                        } else if response == "WAIT_RETRY" {
-                            if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
-                                let new_elapsed = start_time.elapsed().as_millis() as i64;
-                                if new_elapsed >= timeout {
-                                    let redis = redis.lock().unwrap();
-                                    let up_to_date_replicas = redis.replication.count_up_to_date_replicas();
-                                    let mut client = client.lock().unwrap();
-                                    let _ = client.write(format!(":{}\r\n", up_to_date_replicas).as_bytes());
-                                    let _ = client.flush();
-                                    should_retry = false;
+                            RedisCommand::Exec => {
+                                let mut in_transaction = in_transaction.lock().unwrap();
+                                if !*in_transaction {
+                                    response = "-ERR EXEC without MULTI\r\n".to_string();
                                 } else {
-                                    should_retry = true;
-                                    command = RedisCommand::Wait { numreplicas, timeout, elapsed: new_elapsed };
+                                    *in_transaction = false;
+                                    let mut responses = Vec::new();
+                                    let mut queued_commands = queued_commands.lock().unwrap();
+                                    
+                                    // Execute all queued commands
+                                    while let Some(cmd) = queued_commands.pop_front() {
+                                        let result = redis.lock().unwrap().execute_command(&cmd, Some(&mut *client.lock().unwrap()));
+                                        match result {
+                                            Ok(resp) => responses.push(resp),
+                                            Err(e) => responses.push(e),
+                                        }
+                                    }
+
+                                    // Format response array
+                                    response = format!("*{}\r\n", responses.len());
+                                    for resp in responses {
+                                        response.push_str(&resp);
+                                    }
                                 }
-                            } else {
-                                should_retry = false;
+                            },
+                            RedisCommand::Discard => {
+                                let mut in_transaction = in_transaction.lock().unwrap();
+                                if !*in_transaction {
+                                    response = "-ERR DISCARD without MULTI\r\n".to_string();
+                                } else {
+                                    *in_transaction = false;
+                                    queued_commands.lock().unwrap().clear();
+                                    response = "+OK\r\n".to_string();
+                                }
+                            },
+                            _ => {
+                                if *in_transaction.lock().unwrap() {
+                                    // Queue command and return QUEUED
+                                    queued_commands.lock().unwrap().push_back(command);
+                                    response = "+QUEUED\r\n".to_string();
+                                } else {
+                                    // Handle XREAD command separately since it has its own retry logic
+                                    if let RedisCommand::XRead { keys, ids, block, count } = &command {
+                                        #[cfg(debug_assertions)]
+                                        println!("[ClientHandler::start] Handling XREAD command");
+                                        
+                                        let request = XReadRequest {
+                                            keys: keys.iter().map(|s| s.to_string()).collect(),
+                                            ids: ids.iter().map(|s| s.to_string()).collect(),
+                                            block: *block,
+                                            count: *count,
+                                        };
+                                        
+                                        let mut handler = XReadHandler::new(Arc::clone(&redis), request);
+                                        #[cfg(debug_assertions)]
+                                        println!("[ClientHandler::start] Running XReadHandler...");
+                                        match handler.run_loop() {
+                                            Ok(results) => {
+                                                #[cfg(debug_assertions)]
+                                                println!("[ClientHandler::start] Got results with {} streams", results.len());
+                                                let mut client = client.lock().unwrap();
+                                                
+                                                if results.is_empty() {
+                                                    // Return nil response for empty results
+                                                    #[cfg(debug_assertions)]
+                                                    println!("[ClientHandler::start] Empty result, sending nil response");
+                                                    client.write_all(b"*-1\r\n").unwrap();
+                                                    client.flush().unwrap();
+                                                    #[cfg(debug_assertions)]
+                                                    println!("[ClientHandler::start] Nil response written and flushed");
+                                                } else {
+                                                    // Format non-empty response
+                                                    let mut response = format!("*{}\r\n", results.len());
+                                                    for (stream_key, entries) in results {
+                                                        // Only include streams with entries
+                                                        if !entries.is_empty() {
+                                                            response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
+                                                                stream_key.len(), stream_key, entries.len()));
+                                                            
+                                                            for entry in entries {
+                                                                // Format: *2\r\n$[id_len]\r\n[id]\r\n*[field_count*2]\r\n
+                                                                let field_count = entry.fields.len() * 2; // Each field has key and value
+                                                                response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
+                                                                    entry.id.len(), entry.id, field_count));
+                                                                
+                                                                for (field, value) in entry.fields {
+                                                                    response.push_str(&format!("${}\r\n{}\r\n${}\r\n{}\r\n",
+                                                                        field.len(), field, value.len(), value));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    #[cfg(debug_assertions)]
+                                                    println!("[ClientHandler::start] Sending response: {}", response);
+                                                    client.write_all(response.as_bytes()).unwrap();
+                                                    client.flush().unwrap();
+                                                    #[cfg(debug_assertions)]
+                                                    println!("[ClientHandler::start] Non-empty response written and flushed");
+                                                }
+                                            },
+                                            Err(e) => {
+                                                #[cfg(debug_assertions)]
+                                                println!("[ClientHandler::start] Got error: {:?}", e);
+                                                let mut client = client.lock().unwrap();
+                                                client.write_all(format!("-ERR {}\r\n", e).as_bytes()).unwrap();
+                                                client.flush().unwrap();
+                                                #[cfg(debug_assertions)]
+                                                println!("[ClientHandler::start] Error response written and flushed");
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    
+                                    match redis.lock().unwrap().execute_command(&command, Some(&mut *client.lock().unwrap())) {
+                                        Ok(resp) => response = resp,
+                                        Err(e) => response = e,
+                                    }
+                                }
                             }
-                        } else {
-                            // Handle normal response
-                            if !response.is_empty() {
-                                let mut client = client.lock().unwrap();
-                                #[cfg(debug_assertions)]
-                                println!("[ClientHandler::start] Writing response to client");
-                                let _ = client.write(response.as_bytes());
-                                let _ = client.flush();
-                            }
-                            should_retry = false;
                         }
-                        if should_retry {
-                            thread::sleep(Duration::from_millis(10));
+
+                        #[cfg(debug_assertions)]
+                        println!("[CLIENT] Got response: {}", response.replace("\r\n", "\\r\\n"));
+
+                        if !response.is_empty() {
+                            let mut client = client.lock().unwrap();
+                            client.write_all(response.as_bytes()).unwrap();
+                            client.flush().unwrap();
                         }
                     }
                 }
             }
-        })        
+        })
     }
 }

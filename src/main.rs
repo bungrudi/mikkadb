@@ -77,8 +77,10 @@ fn main() {
 
     let redis = Arc::new(Mutex::new(Redis::new(config.clone())));
 
-    // Parse RDB file
-    redis.lock().unwrap().parse_rdb_file().unwrap();
+    // Parse RDB file - handle errors gracefully
+    if let Err(e) = redis.lock().unwrap().parse_rdb_file() {
+        println!("Error parsing RDB file: {}, starting with empty database", e);
+    }
 
     let listener = TcpListener::bind(format!("{}:{}", config.addr, config.port)).unwrap();
 

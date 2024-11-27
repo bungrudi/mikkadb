@@ -347,13 +347,13 @@ impl RedisCommand {
                 }
             },
             command if command.eq_ignore_ascii_case(Self::LPOS) => {
-                if params.len() < 3 {
+                if params.len() < 2 {
                     None
                 } else {
                     let key = params[0].clone();
                     let element = params[1].clone();
-                    let count = if params.len() > 3 && params[2].eq_ignore_ascii_case("COUNT") {
-                        params[3].parse::<i64>().ok()
+                    let count = if params.len() > 2 {
+                        params[2].parse::<i64>().ok()
                     } else {
                         None
                     };

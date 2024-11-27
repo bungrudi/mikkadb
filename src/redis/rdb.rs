@@ -6,15 +6,21 @@ pub struct RdbParser;
 
 impl RdbParser {
     pub fn parse(path: &Path) -> std::io::Result<Vec<(String, String, Option<u64>)>> {
-        #[cfg(debug_assertions)]
         println!("Attempting to open RDB file: {:?}", path);
+        
+        // If RDB file doesn't exist, return empty vec without error
         if !path.exists() {
-            #[cfg(debug_assertions)]
-            println!("RDB file does not exist");
+            println!("RDB file does not exist, starting with empty database");
             return Ok(vec![]);
         }
 
-        let file = File::open(path)?;
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("Failed to open RDB file: {}", e);
+                return Ok(vec![]); // Return empty vec on file open error
+            }
+        };
         let mut reader = BufReader::new(file);
         let mut buffer = Vec::new();
         reader.read_to_end(&mut buffer)?;
@@ -23,7 +29,6 @@ impl RdbParser {
         println!("RDB file size: {} bytes", buffer.len());
 
         if buffer.len() < 9 || &buffer[0..5] != b"REDIS" {
-            #[cfg(debug_assertions)]
             println!("Invalid RDB file format");
             return Err(Error::new(ErrorKind::InvalidData, "Invalid RDB file format"));
         }
