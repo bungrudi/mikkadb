@@ -202,14 +202,28 @@ impl ClientHandler {
                         #[cfg(debug_assertions)]
                         println!("[CLIENT] Executing command: {:?}", command);
 
-                        let mut response = handler.execute_command(&command);
-                        
-                        // Handle WAIT retry
-                        while response == "WAIT_RETRY" {
-                            // Drop any locks before sleeping
-                            thread::sleep(Duration::from_millis(50));
-                            response = handler.execute_command(&command);
-                        }
+                        let mut response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
+                            let start = std::time::Instant::now();
+                            let mut resp = handler.execute_command(&command);
+                            
+                            while resp == "WAIT_RETRY" {
+                                // Drop any locks before sleeping
+                                thread::sleep(Duration::from_millis(50));
+                                let total_elapsed = start.elapsed().as_millis() as i64;
+                                
+                                // Create new Wait command with updated elapsed time
+                                let updated_command = RedisCommand::Wait {
+                                    numreplicas,
+                                    timeout,
+                                    elapsed: total_elapsed,
+                                };
+                                
+                                resp = handler.execute_command(&updated_command);
+                            }
+                            resp
+                        } else {
+                            handler.execute_command(&command)
+                        };
 
                         #[cfg(debug_assertions)]
                         println!("[CLIENT] Got response: {}", response.replace("\r\n", "\\r\\n"));

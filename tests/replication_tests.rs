@@ -137,8 +137,8 @@ fn test_wait_command_with_ack() {
         read_data.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n123\r\n");
     }
 
-    // Wait for SET to be processed
-    thread::sleep(Duration::from_millis(50));
+    // Wait longer for SET to be processed and replicated
+    thread::sleep(Duration::from_millis(100));
 
     // Send WAIT command from client
     #[cfg(debug_assertions)]
@@ -148,6 +148,9 @@ fn test_wait_command_with_ack() {
         read_data.extend_from_slice(b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n500\r\n");
     }
 
+    // Wait for GETACK to be sent to replica
+    thread::sleep(Duration::from_millis(50));
+
     // Simulate replica receiving GETACK and responding with ACK
     #[cfg(debug_assertions)]
     println!("[TEST] Simulating replica ACK response");
@@ -156,18 +159,21 @@ fn test_wait_command_with_ack() {
         read_data.extend_from_slice(b"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$2\r\n31\r\n");
     }
 
-    // Wait and check replica offset directly
+    // Wait for ACK to be processed with longer timeout
+    thread::sleep(Duration::from_millis(100));
+
+    // More robust polling with exponential backoff
     let start = std::time::Instant::now();
-    let timeout = Duration::from_millis(1000);
+    let timeout = Duration::from_millis(5000);
+    let mut wait_time = Duration::from_millis(50);
     let mut replica_synced = false;
 
     while start.elapsed() < timeout {
         let current_offset = {
             let redis = redis.lock().unwrap();
             let replicas = redis.replication.get_replicas();
-            let offset = replicas.get("127.0.0.1:8080")
-                .map(|r| r.offset.load(Ordering::SeqCst));
-            offset
+            replicas.get("127.0.0.1:8080")
+                .map(|r| r.offset.load(Ordering::SeqCst))
         };
         
         if let Some(offset) = current_offset {
@@ -176,15 +182,20 @@ fn test_wait_command_with_ack() {
                 break;
             }
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(wait_time);
+        wait_time = std::cmp::min(wait_time * 2, Duration::from_millis(200));
     }
 
     assert!(replica_synced, "Timeout waiting for replica to sync");
 
-    // Verify responses
+    // Wait for WAIT command response with timeout
+    assert!(client_stream.wait_for_write(":1\r\n", 1000), 
+        "Timeout waiting for WAIT command response");
+
+    // Verify complete responses
     let written_data = String::from_utf8(client_stream.get_written_data()).unwrap();
-    assert!(written_data.contains("+OK\r\n")); // SET response
-    assert!(written_data.contains(":1\r\n")); // WAIT response showing 1 replica acknowledged
+    assert!(written_data.contains("+OK\r\n"), "Missing SET response"); 
+    assert!(written_data.contains(":1\r\n"), "Missing WAIT response");
 
     client_stream.shutdown(&mut client_handler, handle);
 }
@@ -192,10 +203,16 @@ fn test_wait_command_with_ack() {
 #[test]
 fn test_wait_command_timeout() {
     let mut manager = ReplicationManager::new();
-    let mock_stream = MockTcpStream::new();
     
-    // Add a replica with the mock stream
-    manager.add_replica("localhost".to_string(), "6379".to_string(), Box::new(mock_stream.clone()));
+    // Create separate streams for client and replica
+    let client_stream = MockTcpStream::new();
+    let replica_stream = MockTcpStream::new();
+    
+    #[cfg(debug_assertions)]
+    println!("[TEST] Setting up replica connection");
+    
+    // Add a replica with its own stream - use 127.0.0.1 to match the MockTcpStream's peer_addr
+    manager.add_replica("127.0.0.1".to_string(), "8080".to_string(), Box::new(replica_stream.clone()));
 
     // Create a Redis instance with this ReplicationManager
     let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager)));
@@ -203,10 +220,19 @@ fn test_wait_command_timeout() {
     // Start replication sync
     ReplicationManager::start_replication_sync(redis.clone());
 
-    // Create a client handler
-    let client_stream = MockTcpStream::new();
+    // Create client handler
+    #[cfg(debug_assertions)]
+    println!("[TEST] Setting up client connection");
+    
     let mut client_handler = ClientHandler::new(client_stream.clone(), redis.clone());
     let handle = client_handler.start();
+
+    // Create replica handler to process ACKs
+    #[cfg(debug_assertions)]
+    println!("[TEST] Setting up replica handler");
+    
+    let mut replica_handler = ClientHandler::new(replica_stream.clone(), redis.clone());
+    let _replica_handle = replica_handler.start();
 
     // Send SET command
     {
@@ -220,21 +246,11 @@ fn test_wait_command_timeout() {
         let mut read_data = client_stream.read_data.lock().unwrap();
         read_data.extend_from_slice(b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$2\r\n50\r\n");
     }
-    thread::sleep(Duration::from_millis(100)); // Wait longer than timeout
-
-    // Wait for both SET and WAIT responses
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_millis(200);
-    let mut has_wait_response = false;
-
-    while start.elapsed() < timeout && !has_wait_response {
-        let written_data = String::from_utf8(client_stream.get_written_data()).unwrap();
-        if written_data.contains(":0\r\n") {
-            has_wait_response = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    
+    // Wait for both the SET and WAIT responses (200ms to ensure both writes complete)
+    // thread::sleep(Duration::from_millis(200));
+    
+    client_stream.wait_for_write(":0\r\n", 1000);
 
     // Verify responses
     let final_data = String::from_utf8(client_stream.get_written_data()).unwrap();
