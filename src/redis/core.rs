@@ -97,7 +97,25 @@ impl Redis {
             RedisCommand::Multi => Ok("+OK\r\n".to_string()),
             RedisCommand::Exec => Ok("*0\r\n".to_string()),
             RedisCommand::Discard => Ok("+OK\r\n".to_string()),
-            RedisCommand::Ping => Ok("+PONG\r\n".to_string()),
+            RedisCommand::Ping => {
+                if self.config.replicaof_host.is_some() {
+                    // We're a replica, respond with REPLCONF ACK
+                    if let Some(client) = client {
+                        let bytes_processed = self.get_bytes_processed();
+                        let num_digits = bytes_processed.to_string().len();
+                        let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", 
+                            num_digits, bytes_processed);
+                        let _ = client.write(response.as_bytes());
+                        let _ = client.flush();
+                        Ok("".to_string())  // Return empty string to indicate response was sent directly
+                    } else {
+                        Err("-ERR No stream client to send REPLCONF ACK\r\n".to_string())
+                    }
+                } else {
+                    // We're not a replica, respond with normal PONG
+                    Ok("+PONG\r\n".to_string())
+                }
+            },
             RedisCommand::Echo { data } => Ok(format!("${}\r\n{}\r\n", data.len(), data)),
             RedisCommand::Get { key } => {
                 match self.get(key) {
@@ -286,15 +304,13 @@ impl Redis {
                 if let Some(client) = client {
                     let bytes_processed = self.get_bytes_processed();
                     // hacky, temporary way. we need to omit the "REPLCONF GETACK" and we assume it is 37 bytes.
-                    let ack_bytes = if bytes_processed >= 37 {
-                        bytes_processed - 37
-                    } else {
-                        0
-                    };
-                    let num_digits = ack_bytes.to_string().len();
-                    let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", num_digits, ack_bytes);
+                    let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", 
+                        bytes_processed.to_string().len(), 
+                        bytes_processed);
                     let _ = client.write(response.as_bytes());
                     let _ = client.flush();
+                    // Reset counter after reporting
+                    self.bytes_processed.store(0, Ordering::SeqCst);
                     Ok("".to_string())  // Return empty string to indicate response was sent directly
                 } else {
                     Err("-ERR No stream client to send REPLCONF GETACK\r\n".to_string())
@@ -324,7 +340,7 @@ impl Redis {
                 println!("executing WAIT command");
 
                 // First, ensure all pending commands are sent to replicas
-                let sent_commands = self.replication.send_pending_commands();
+                let _sent_commands = self.replication.send_pending_commands();
                 
                 // Check current state
                 let up_to_date_replicas = self.replication.count_up_to_date_replicas();

@@ -97,7 +97,7 @@ fn main() {
                 #[cfg(debug_assertions)]
                 println!("accepted new connection");
                 let mut client_handler = client_handler::ClientHandler::new(_stream, redis.clone());
-                client_handler.start();
+                client_handler.start().join().unwrap();
             }
             Err(_e) => {
                 #[cfg(debug_assertions)]

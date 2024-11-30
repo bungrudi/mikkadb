@@ -75,9 +75,9 @@ pub fn init_replica(config: &mut RedisConfig, redis: Arc<Mutex<Redis>>) {
                     // Read fullresync and RDB file, and no more.
                     // leave the rest to the event loop.
 
-                    read_until_end_of_rdb(&mut stream, &mut buffer);
+                    read_until_end_of_rdb(&mut stream, &mut buffer, redis.clone());
 
-                    let mut client_handler = crate::client_handler::ClientHandler::new(stream, redis.clone());
+                    let mut client_handler = crate::client_handler::ClientHandler::new_redis_handler(stream, redis.clone());
                     client_handler.start();
                     #[cfg(debug_assertions)]
                     println!("replicaof host and port is valid");

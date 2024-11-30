@@ -3,6 +3,9 @@ use std::io::{Read, Write};
 use std::thread;
 use std::time::Duration;
 use std::borrow::Cow;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use crate::redis::Redis;
 
 // Helper function to generate a replica ID
 pub fn gen_replid() -> &'static str {
@@ -28,7 +31,7 @@ pub fn read_response<'a>(stream: &mut TcpStream, buffer: &'a mut [u8; 512]) -> s
 }
 
 #[inline]
-pub fn read_until_end_of_rdb(stream: &mut TcpStream, buffer: &mut [u8; 512]) {
+pub fn read_until_end_of_rdb(stream: &mut TcpStream, buffer: &mut [u8; 512], redis: Arc<Mutex<Redis>>) {
     let mut count = 0;
     'LOOP_PEEK: while let Ok(peek_size) = stream.peek(buffer) {
         thread::sleep(Duration::from_millis(200));
@@ -73,6 +76,13 @@ pub fn read_until_end_of_rdb(stream: &mut TcpStream, buffer: &mut [u8; 512]) {
                         // Zero-copy string conversion for debug output
                         #[cfg(debug_assertions)]
                         println!("rdb_file: {}", String::from_utf8_lossy(&rdb_buffer));
+                        
+                        // After RDB transfer, reset the counter to start fresh
+                        if let Ok(redis) = redis.lock() {
+                            redis.bytes_processed.store(0, Ordering::SeqCst);
+                            #[cfg(debug_assertions)]
+                            println!("[RDB] Reset bytes_processed to 0");
+                        }
                     }
                     break 'LOOP_PEEK;
                 }

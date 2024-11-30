@@ -1,4 +1,6 @@
 use std::sync::{Arc, Mutex};
+use std::thread::sleep;
+use std::time::Duration;
 use redis_starter_rust::redis::core::Redis;
 use redis_starter_rust::redis::config::RedisConfig;
 use redis_starter_rust::client_handler::ClientHandler;
@@ -76,6 +78,7 @@ fn test_list_pop_operations() {
     }
     assert!(stream.wait_for_write(":1\r\n", 1000));
 
+    sleep(Duration::from_millis(200));
     stream.shutdown(&mut handler, handle);
 }
 

@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::thread;
 use std::time::Duration;
 use std::collections::VecDeque;
@@ -16,16 +16,26 @@ pub struct ClientHandler {
     in_transaction: Arc<Mutex<bool>>,
     queued_commands: Arc<Mutex<VecDeque<RedisCommand>>>,
     shutdown: Arc<Mutex<bool>>,
+    is_redis_connection: bool,
 }
 
 impl ClientHandler {
     pub fn new<T: TcpStreamTrait + 'static>(client: T, redis: Arc<Mutex<Redis>>) -> Self {
+        Self::new_with_connection_type(client, redis, false)
+    }
+
+    pub fn new_redis_handler<T: TcpStreamTrait + 'static>(client: T, redis: Arc<Mutex<Redis>>) -> Self {
+        Self::new_with_connection_type(client, redis, true)
+    }
+
+    fn new_with_connection_type<T: TcpStreamTrait + 'static>(client: T, redis: Arc<Mutex<Redis>>, is_redis_connection: bool) -> Self {
         ClientHandler {
             client: Arc::new(Mutex::new(Box::new(client) as Box<dyn TcpStreamTrait>)),
             redis,
             in_transaction: Arc::new(Mutex::new(false)),
             queued_commands: Arc::new(Mutex::new(VecDeque::new())),
             shutdown: Arc::new(Mutex::new(false)),
+            is_redis_connection,
         }
     }
 
@@ -36,8 +46,37 @@ impl ClientHandler {
         *self.shutdown.lock().unwrap() = true;
     }
 
+    fn format_response(&self, response: &str) -> String {
+        if response.is_empty() {
+            // Empty response means handler already wrote to stream directly
+            return response.to_string();
+        }
+
+        if self.is_redis_connection {
+            // Always use array format for Redis-to-Redis communication
+            // TODO assume array of 1 for now. implement multiple response later
+            if response.starts_with('+') || response.starts_with('-') || response.starts_with(':') {
+                // Convert simple string/error/integer to array with bulk string
+                let content = response[1..].trim_end_matches("\r\n");
+                format!("*1\r\n${}\r\n{}\r\n", content.len(), content)
+            } else if response.starts_with('$') {
+                // Convert bulk string to array with bulk string
+                format!("*1\r\n{}", response)
+            } else if response.starts_with('*') {
+                // Already in array format
+                response.to_string()
+            } else {
+                // Non-empty response without RESP prefix
+                format!("*1\r\n${}\r\n{}\r\n", response.len(), response)
+            }
+        } else {
+            // Regular client - use response as-is
+            response.to_string()
+        }
+    }
+
     pub fn execute_command(&mut self, command: &RedisCommand) -> String {
-        match &command {
+        let raw_response = match &command {
             RedisCommand::XRead { keys, ids, block, count } => {
                 #[cfg(debug_assertions)]
                 println!("[ClientHandler::execute_command] Handling XREAD command");
@@ -147,7 +186,8 @@ impl ClientHandler {
                     }
                 }
             }
-        }
+        };
+        raw_response
     }
 
     pub fn start(&mut self) -> std::thread::JoinHandle<()> {
@@ -166,83 +206,161 @@ impl ClientHandler {
                     break;
                 }
 
-                // Read from client
-                {
+                // Read from client with minimal lock scope
+                let read_result = {
                     let mut client = handler.client.lock().unwrap();
-                    match client.read(&mut read_buffer) {
-                        Ok(0) => {
-                            // Connection closed
-                            break;
-                        }
-                        Ok(n) => {
-                            #[cfg(debug_assertions)]
-                            println!("[CLIENT] Received {} bytes", n);
-                            buffer.extend_from_slice(&read_buffer[..n]);
-                        }
-                        Err(e) => {
-                            if e.kind() != std::io::ErrorKind::WouldBlock {
-                                eprintln!("[CLIENT] Error reading from client: {}", e);
-                                break;
-                            }
-                            thread::sleep(Duration::from_millis(100));
-                            continue;
-                        }
+                    client.read(&mut read_buffer)
+                };
+
+                match read_result {
+                    Ok(0) => {
+                        // Connection closed
+                        break;
                     }
-                }
-
-                // Parse commands from buffer
-                let commands = parse_resp(&buffer, buffer.len());
-                if !commands.is_empty() {
-                    buffer.clear();
-
-                    #[cfg(debug_assertions)]
-                    println!("[CLIENT] Processing {} commands", commands.len());
-
-                    for command in commands {
+                    Ok(n) => {
                         #[cfg(debug_assertions)]
-                        println!("[CLIENT] Executing command: {:?}", command);
+                        println!("[CLIENT] Received {} bytes", n);
+                        
+                        buffer.extend_from_slice(&read_buffer[..n]);
+                        
+                        // Process any complete commands in buffer
+                        let commands = parse_resp(&buffer, buffer.len());
+                        if !commands.is_empty() {
+                            buffer.clear();
 
-                        let response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
-                            let start = std::time::Instant::now();
-                            // Send GETACK only once at the start
-                            let mut sent_getack = false;
-                            let mut resp = handler.execute_command(&command);
-                    
-                            while resp == "WAIT_RETRY" {
-                                // Drop any locks before sleeping
-                                thread::sleep(Duration::from_millis(50));
-                                let total_elapsed = start.elapsed().as_millis() as i64;
-                        
-                                // Create new Wait command with updated elapsed time
-                                let updated_command = RedisCommand::Wait {
-                                    numreplicas,
-                                    timeout,
-                                    elapsed: total_elapsed,
-                                };
-                        
-                                // Only send GETACK on first try
-                                if !sent_getack {
-                                    if let Ok(redis) = handler.redis.lock() {
-                                        let _ = redis.replication.send_getack_to_replicas();
-                                        sent_getack = true;
+                            #[cfg(debug_assertions)]
+                            println!("[CLIENT] Processing {} commands", commands.len());
+
+                            // Handle multiple commands differently for Redis connections
+                            if handler.is_redis_connection && commands.len() > 1 {
+                                let mut responses = Vec::new();
+                                
+                                for command in commands {
+                                    #[cfg(debug_assertions)]
+                                    println!("[CLIENT] Executing command: {:?}", command);
+
+                                    let response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
+                                        let start = std::time::Instant::now();
+                                        let mut sent_getack = false;
+                                        let mut resp = handler.execute_command(&command);
+                                
+                                        while resp == "WAIT_RETRY" {
+                                            thread::sleep(Duration::from_millis(50));
+                                            let total_elapsed = start.elapsed().as_millis() as i64;
+                                            let updated_command = RedisCommand::Wait {
+                                                numreplicas,
+                                                timeout,
+                                                elapsed: total_elapsed,
+                                            };
+                                            
+                                            if !sent_getack {
+                                                if let Ok(redis) = handler.redis.lock() {
+                                                    let _ = redis.replication.send_getack_to_replicas();
+                                                    sent_getack = true;
+                                                }
+                                            }
+                                            
+                                            resp = handler.execute_command(&updated_command);
+                                        }
+                                        resp
+                                    } else {
+                                        handler.execute_command(&command)
+                                    };
+
+                                    #[cfg(debug_assertions)]
+                                    println!("[CLIENT] Got response: {}", response.replace("\r\n", "\\r\\n"));
+
+                                    if !response.is_empty() {
+                                        responses.push(response);
                                     }
                                 }
-                        
-                                resp = handler.execute_command(&updated_command);
+
+                                // Format all responses as a single array
+                                if !responses.is_empty() {
+                                    let mut batch_response = format!("*{}\r\n", responses.len());
+                                    for resp in responses {
+                                        if resp.starts_with('*') {
+                                            batch_response.push_str(&resp[1..]);
+                                        } else if resp.starts_with('+') || resp.starts_with('-') || resp.starts_with(':') {
+                                            let content = &resp[1..].trim_end_matches("\r\n");
+                                            batch_response.push_str(&format!("${}\r\n{}\r\n", content.len(), content));
+                                        } else if resp.starts_with('$') {
+                                            batch_response.push_str(&resp);
+                                        } else {
+                                            batch_response.push_str(&format!("${}\r\n{}\r\n", resp.len(), resp));
+                                        }
+                                    }
+                                    let mut client = handler.client.lock().unwrap();
+                                    client.write_all(batch_response.as_bytes()).unwrap();
+                                    client.flush().unwrap();
+                                }
+                            } else {
+                                // Handle single commands or non-Redis connections
+                                for command in commands {
+                                    #[cfg(debug_assertions)]
+                                    println!("[CLIENT] Executing command: {:?}", command);
+
+                                    let response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
+                                        let start = std::time::Instant::now();
+                                        let mut sent_getack = false;
+                                        let mut resp = handler.execute_command(&command);
+                                        
+                                        while resp == "WAIT_RETRY" {
+                                            thread::sleep(Duration::from_millis(50));
+                                            let total_elapsed = start.elapsed().as_millis() as i64;
+                                            let updated_command = RedisCommand::Wait {
+                                                numreplicas,
+                                                timeout,
+                                                elapsed: total_elapsed,
+                                            };
+                                            
+                                            if !sent_getack {
+                                                if let Ok(redis) = handler.redis.lock() {
+                                                    let _ = redis.replication.send_getack_to_replicas();
+                                                    sent_getack = true;
+                                                }
+                                            }
+                                            
+                                            resp = handler.execute_command(&updated_command);
+                                        }
+                                        resp
+                                    } else {
+                                        handler.execute_command(&command)
+                                    };
+
+                                    #[cfg(debug_assertions)]
+                                    println!("[CLIENT] Got response: {}", response.replace("\r\n", "\\r\\n"));
+
+                                    let formatted_response = handler.format_response(&response);
+                                    if !formatted_response.is_empty() {
+                                        let mut client = handler.client.lock().unwrap();
+                                        client.write_all(formatted_response.as_bytes()).unwrap();
+                                        client.flush().unwrap();
+                                    }
+                                }
                             }
-                            resp
-                        } else {
-                            handler.execute_command(&command)
-                        };
 
-                        #[cfg(debug_assertions)]
-                        println!("[CLIENT] Got response: {}", response.replace("\r\n", "\\r\\n"));
-
-                        if !response.is_empty() {
-                            let mut client = handler.client.lock().unwrap();
-                            client.write_all(response.as_bytes()).unwrap();
-                            client.flush().unwrap();
+                            // Only count bytes after processing commands
+                            if handler.is_redis_connection {
+                                if let Ok(redis) = handler.redis.lock() {
+                                    if redis.config.replicaof_host.is_some() {
+                                        redis.bytes_processed.fetch_add(n as u64, Ordering::SeqCst);
+                                        #[cfg(debug_assertions)]
+                                        println!("[CLIENT] Added {} bytes, total now: {}", 
+                                            n,
+                                            redis.bytes_processed.load(Ordering::SeqCst));
+                                    }
+                                }
+                            }
                         }
+                    }
+                    Err(e) => {
+                        if e.kind() != std::io::ErrorKind::WouldBlock {
+                            eprintln!("[CLIENT] Error reading from client: {}", e);
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
                     }
                 }
             }
