@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use std::thread;
 
 use crate::redis::Redis;
@@ -83,40 +83,13 @@ impl XReadHandler {
     }
 
     fn try_read(&self, ids: &[String]) -> Result<Vec<(String, Vec<StreamEntry>)>, String> {
-        #[cfg(debug_assertions)]
-        println!("\n[XReadHandler::try_read] === Starting read operation ===");
-        #[cfg(debug_assertions)]
-        println!("Request parameters:");
-        #[cfg(debug_assertions)]
-        println!("  - Keys: {:?}", self.request.keys);
-        #[cfg(debug_assertions)]
-        println!("  - IDs: {:?}", ids);
-        #[cfg(debug_assertions)]
-        println!("  - Block: {:?} ({})", 
-            self.request.block,
-            if self.request.block.is_some() { "BLOCKING" } else { "NON-BLOCKING" }
-        );
-        #[cfg(debug_assertions)]
-        println!("  - Count: {:?}", self.request.count);
-
         let mut results = Vec::new();
         let redis = self.redis.lock().unwrap();
 
         for (i, stream_key) in self.request.keys.iter().enumerate() {
-            #[cfg(debug_assertions)]
-            println!("[XReadHandler::try_read] Processing stream '{}' with ID '{}'", stream_key, ids[i]);
-
             let (ms, seq) = match Storage::parse_stream_id(&ids[i]) {
-                Ok((ms, seq)) => {
-                    #[cfg(debug_assertions)]
-                    println!("  - Parsed ID {}:{}", ms, seq);
-                    (ms, seq)
-                },
-                Err(e) => {
-                    #[cfg(debug_assertions)]
-                    println!("  - Failed to parse ID: {}", e);
-                    return Err(e);
-                }
+                Ok((ms, seq)) => (ms, seq),
+                Err(e) => return Err(e),
             };
 
             // Get entries that arrived after the specified ID
@@ -127,8 +100,6 @@ impl XReadHandler {
                 self.request.count
             );
             
-            #[cfg(debug_assertions)]
-            println!("  - Found {} entries after {}:{}", entries.len(), ms, seq);
 
             // Only include streams that have new entries
             if !entries.is_empty() {
@@ -139,20 +110,10 @@ impl XReadHandler {
         drop(redis);
 
         #[cfg(debug_assertions)]
-        println!("\n[XReadHandler::try_read] === Operation summary ===");
-        #[cfg(debug_assertions)]
-        if results.is_empty() {
-            println!("No entries found in any stream");
-            if self.request.block.is_none() {
-                println!("Returning empty result (non-blocking mode)");
-            } else {
-                println!("Will continue waiting (blocking mode)");
-            }
-        } else {
-            println!("Found entries in {} streams:", results.len());
-            for (stream, entries) in &results {
-                println!("  - {}: {} entries", stream, entries.len());
-            }
+        if !results.is_empty() {
+            println!("[XRead] Found {} entries in {} streams", 
+                results.iter().map(|(_, e)| e.len()).sum::<usize>(),
+                results.len());
         }
 
         Ok(results)

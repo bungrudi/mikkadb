@@ -41,18 +41,24 @@ impl ReplicationManager {
     }
 
     pub fn enqueue_for_replication(&self, command: &str) {
+        #[cfg(debug_assertions)]
+        println!("[REPL] Enqueueing command for replication: {}", command);
+        
         self.replica_queue.lock().unwrap().push_back(command.to_string());
-        self.replication_offset.fetch_add(command.len() as u64, Ordering::SeqCst);
+        let new_offset = self.replication_offset.fetch_add(command.len() as u64, Ordering::SeqCst);
+        
+        #[cfg(debug_assertions)]
+        println!("[REPL] Updated replication offset: {} -> {}", new_offset, new_offset + command.len() as u64);
     }
 
     pub fn update_replica_offset(&self, replica_key: &str, offset: u64) {
         if let Some(replica) = self.replicas.lock().unwrap().get_mut(replica_key) {
             #[cfg(debug_assertions)]
-            println!("updating offset for replica: {} offset: {}", replica_key, offset);
+            println!("[REPL] Updating replica {} offset: {} -> {}", replica_key, replica.offset.load(Ordering::SeqCst), offset);
             replica.offset.store(offset, Ordering::SeqCst);
         } else {
             #[cfg(debug_assertions)]
-            println!("Replica not found: {}", replica_key);
+            println!("[REPL] Error: Replica not found while updating offset: {}", replica_key);
         }
     }
 
@@ -62,19 +68,32 @@ impl ReplicationManager {
 
     pub fn count_up_to_date_replicas(&self) -> usize {
         let current_offset = self.replication_offset.load(Ordering::SeqCst);
-        self.replicas
+        let count = self.replicas
             .lock()
             .unwrap()
-            .values()
-            .filter(|replica| replica.offset.load(Ordering::SeqCst) >= current_offset)
-            .count()
+            .iter()
+            .filter(|(key, replica)| {
+                let replica_offset = replica.offset.load(Ordering::SeqCst);
+                #[cfg(debug_assertions)]
+                println!("[REPL] Checking replica {} offset: {} against current: {}", 
+                    key, replica_offset, current_offset);
+                replica_offset >= current_offset
+            })
+            .count();
+        
+        #[cfg(debug_assertions)]
+        println!("[REPL] Found {} up-to-date replicas", count);
+        
+        count
     }
 
     pub fn add_replica(&mut self, host: String, port: String, stream: Box<dyn TcpStreamTrait>) {
         let replica_key = format!("{}:{}", host, port);
         let replica = Replica::new(host, port, stream);
         #[cfg(debug_assertions)]
-        println!("adding replica: {}", replica_key);
+        println!("[REPL] Adding new replica: {} (current replication offset: {})", replica_key, self.get_replication_offset());
+        #[cfg(debug_assertions)]
+        println!("[REPL] Total replicas after add: {}", self.replicas.lock().unwrap().len() + 1);
         self.replicas.lock().unwrap().insert(replica_key, replica);
     }
 
@@ -91,24 +110,29 @@ impl ReplicationManager {
     }
 
     pub fn start_replication_sync(redis: Arc<Mutex<crate::redis::Redis>>) {
+        // TODO use main thread
         thread::spawn(move || {
             loop {
                 {
                     let redis = redis.lock().unwrap();
                     {
                         let mut replica_queue = redis.replication.replica_queue.lock().unwrap();
+                        if !replica_queue.is_empty() {
+                            #[cfg(debug_assertions)]
+                            println!("[REPL] Found {} commands in replication queue", replica_queue.len());
+                        }
+                        
                         while let Some(replica_command) = replica_queue.pop_front() {
                             let replicas = redis.replication.replicas.lock().unwrap();
                             #[cfg(debug_assertions)]
-                            println!("replicas size: {}", replicas.values().len());
+                            println!("[REPL] Sending command to {} replicas: {}", replicas.len(), replica_command);
+                            
                             for (_key, replica) in &*replicas {
-                                #[cfg(debug_assertions)]
-                                println!("sending replica command: {} \r\n to {} {}:{}", replica_command, _key, &replica.host, &replica.port);
                                 let mut stream = replica.stream.lock().unwrap();
                                 let result = stream.write(replica_command.as_bytes());
                                 if result.is_err() {
                                     #[cfg(debug_assertions)]
-                                    eprintln!("error writing to replica: {}", result.err().unwrap());
+                                    eprintln!("[REPL] Error writing to replica {}: {}", _key, result.err().unwrap());
                                 }
                             }
                         }
@@ -116,7 +140,7 @@ impl ReplicationManager {
                     // send "REPLCONF GETACK *" only when enqueue_getack is true
                     if redis.replication.should_send_getack() {
                         #[cfg(debug_assertions)]
-                        println!("sending GETACK to replicas");
+                        println!("[REPL] Sending GETACK to replicas");
                         for replica in redis.replication.get_replicas().values() {
                             let mut stream = replica.stream.lock().unwrap();
                             let result = stream.write(b"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n");

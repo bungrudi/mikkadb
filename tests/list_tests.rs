@@ -1,248 +1,307 @@
 use std::sync::{Arc, Mutex};
 use redis_starter_rust::redis::core::Redis;
 use redis_starter_rust::redis::config::RedisConfig;
-use redis_starter_rust::redis::commands::RedisCommand;
 use redis_starter_rust::client_handler::ClientHandler;
 
-// Mock TCP stream for testing
-struct MockTcpStream;
-
-impl std::io::Read for MockTcpStream {
-    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-        Ok(0)
-    }
-}
-
-impl std::io::Write for MockTcpStream {
-    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-        Ok(0)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl redis_starter_rust::redis::replication::TcpStreamTrait for MockTcpStream {
-    fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080))
-    }
-
-    fn try_clone(&self) -> std::io::Result<Box<dyn redis_starter_rust::redis::replication::TcpStreamTrait>> {
-        Ok(Box::new(MockTcpStream))
-    }
-}
+mod utils;
+use utils::mock_tcp_stream::MockTcpStream;
 
 #[test]
 fn test_basic_list_push_operations() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
-    let mut handler = ClientHandler::new(MockTcpStream, Arc::clone(&redis));
+    let stream = MockTcpStream::new();
+    let mut handler = ClientHandler::new(stream.clone(), Arc::clone(&redis));
+    let handle = handler.start();
 
     // Test LPUSH
-    let command = RedisCommand::LPush { key: "mylist".to_string(), value: "first".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, ":1\r\n"); // List length should be 1
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$5\r\nLPUSH\r\n$6\r\nmylist\r\n$5\r\nfirst\r\n");
+    }
+    assert!(stream.wait_for_write(":1\r\n", 1000));
 
     // Test RPUSH
-    let command = RedisCommand::RPush { key: "mylist".to_string(), value: "last".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, ":2\r\n"); // List length should be 2
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$4\r\nlast\r\n");
+    }
+    assert!(stream.wait_for_write(":2\r\n", 1000));
 
     // Test LRANGE to verify order
-    let command = RedisCommand::LRange { key: "mylist".to_string(), start: 0, stop: -1 };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "*2\r\n$5\r\nfirst\r\n$4\r\nlast\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*4\r\n$6\r\nLRANGE\r\n$6\r\nmylist\r\n$1\r\n0\r\n$2\r\n-1\r\n");
+    }
+    assert!(stream.wait_for_write("*2\r\n$5\r\nfirst\r\n$4\r\nlast\r\n", 1000));
+
+    stream.shutdown(&mut handler, handle);
 }
 
 #[test]
 fn test_list_pop_operations() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
-    let mut handler = ClientHandler::new(MockTcpStream, Arc::clone(&redis));
+    let stream = MockTcpStream::new();
+    let mut handler = ClientHandler::new(stream.clone(), Arc::clone(&redis));
+    let handle = handler.start();
 
     // Setup test data
-    let command = RedisCommand::LPush { key: "mylist".to_string(), value: "first".to_string() };
-    handler.execute_command(&command);
-    let command = RedisCommand::RPush { key: "mylist".to_string(), value: "second".to_string() };
-    handler.execute_command(&command);
-    let command = RedisCommand::RPush { key: "mylist".to_string(), value: "third".to_string() };
-    handler.execute_command(&command);
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$5\r\nLPUSH\r\n$6\r\nmylist\r\n$5\r\nfirst\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$6\r\nsecond\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$5\r\nthird\r\n");
+    }
+    assert!(stream.wait_for_write(":1\r\n", 1000));
+    assert!(stream.wait_for_write(":2\r\n", 1000));
+    assert!(stream.wait_for_write(":3\r\n", 1000));
 
     // Test LPOP
-    let command = RedisCommand::LPop { key: "mylist".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "$5\r\nfirst\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*2\r\n$4\r\nLPOP\r\n$6\r\nmylist\r\n");
+    }
+    assert!(stream.wait_for_write("$5\r\nfirst\r\n", 1000));
 
     // Test RPOP
-    let command = RedisCommand::RPop { key: "mylist".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "$5\r\nthird\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*2\r\n$4\r\nRPOP\r\n$6\r\nmylist\r\n");
+    }
+    assert!(stream.wait_for_write("$5\r\nthird\r\n", 1000));
 
     // Verify length
-    let command = RedisCommand::LLen { key: "mylist".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, ":1\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*2\r\n$4\r\nLLEN\r\n$6\r\nmylist\r\n");
+    }
+    assert!(stream.wait_for_write(":1\r\n", 1000));
+
+    stream.shutdown(&mut handler, handle);
 }
 
 #[test]
 fn test_empty_list_operations() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
-    let mut handler = ClientHandler::new(MockTcpStream, Arc::clone(&redis));
+    let stream = MockTcpStream::new();
+    let mut handler = ClientHandler::new(stream.clone(), Arc::clone(&redis));
+    let handle = handler.start();
 
     // Test LPOP on empty list
-    let command = RedisCommand::LPop { key: "emptylist".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "$-1\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*2\r\n$4\r\nLPOP\r\n$9\r\nemptylist\r\n");
+    }
+    assert!(stream.wait_for_write("$-1\r\n", 1000));
 
     // Test RPOP on empty list
-    let command = RedisCommand::RPop { key: "emptylist".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "$-1\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*2\r\n$4\r\nRPOP\r\n$9\r\nemptylist\r\n");
+    }
+    assert!(stream.wait_for_write("$-1\r\n", 1000));
 
     // Test LLEN on empty list
-    let command = RedisCommand::LLen { key: "emptylist".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, ":0\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*2\r\n$4\r\nLLEN\r\n$9\r\nemptylist\r\n");
+    }
+    assert!(stream.wait_for_write(":0\r\n", 1000));
+
+    stream.shutdown(&mut handler, handle);
 }
 
 #[test]
 fn test_list_range_operations() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
-    let mut handler = ClientHandler::new(MockTcpStream, Arc::clone(&redis));
+    let stream = MockTcpStream::new();
+    let mut handler = ClientHandler::new(stream.clone(), Arc::clone(&redis));
+    let handle = handler.start();
 
     // Setup test data
-    let commands = vec![
-        RedisCommand::RPush { key: "mylist".to_string(), value: "one".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "two".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "three".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "four".to_string() },
-    ];
-    for command in commands {
-        handler.execute_command(&command);
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\none\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\ntwo\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$5\r\nthree\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$4\r\nfour\r\n");
     }
+    assert!(stream.wait_for_write(":1\r\n", 1000));
+    assert!(stream.wait_for_write(":2\r\n", 1000));
+    assert!(stream.wait_for_write(":3\r\n", 1000));
+    assert!(stream.wait_for_write(":4\r\n", 1000));
 
     // Test LRANGE with positive indices
-    let command = RedisCommand::LRange { key: "mylist".to_string(), start: 1, stop: 2 };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "*2\r\n$3\r\ntwo\r\n$5\r\nthree\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*4\r\n$6\r\nLRANGE\r\n$6\r\nmylist\r\n$1\r\n1\r\n$1\r\n2\r\n");
+    }
+    assert!(stream.wait_for_write("*2\r\n$3\r\ntwo\r\n$5\r\nthree\r\n", 1000));
 
     // Test LRANGE with negative indices
-    let command = RedisCommand::LRange { key: "mylist".to_string(), start: -2, stop: -1 };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "*2\r\n$5\r\nthree\r\n$4\r\nfour\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*4\r\n$6\r\nLRANGE\r\n$6\r\nmylist\r\n$2\r\n-2\r\n$2\r\n-1\r\n");
+    }
+    assert!(stream.wait_for_write("*2\r\n$5\r\nthree\r\n$4\r\nfour\r\n", 1000));
+
+    stream.shutdown(&mut handler, handle);
 }
 
 #[test]
 fn test_list_trim_operations() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
-    let mut handler = ClientHandler::new(MockTcpStream, Arc::clone(&redis));
+    let stream = MockTcpStream::new();
+    let mut handler = ClientHandler::new(stream.clone(), Arc::clone(&redis));
+    let handle = handler.start();
 
     // Setup test data
-    let commands = vec![
-        RedisCommand::RPush { key: "mylist".to_string(), value: "one".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "two".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "three".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "four".to_string() },
-    ];
-    for command in commands {
-        handler.execute_command(&command);
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\none\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\ntwo\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$5\r\nthree\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$4\r\nfour\r\n");
     }
+    assert!(stream.wait_for_write(":1\r\n", 1000));
+    assert!(stream.wait_for_write(":2\r\n", 1000));
+    assert!(stream.wait_for_write(":3\r\n", 1000));
+    assert!(stream.wait_for_write(":4\r\n", 1000));
 
     // Test LTRIM
-    let command = RedisCommand::LTrim { key: "mylist".to_string(), start: 1, stop: 2 };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "+OK\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*4\r\n$5\r\nLTRIM\r\n$6\r\nmylist\r\n$1\r\n1\r\n$1\r\n2\r\n");
+    }
+    assert!(stream.wait_for_write("+OK\r\n", 1000));
 
     // Verify result with LRANGE
-    let command = RedisCommand::LRange { key: "mylist".to_string(), start: 0, stop: -1 };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "*2\r\n$3\r\ntwo\r\n$5\r\nthree\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*4\r\n$6\r\nLRANGE\r\n$6\r\nmylist\r\n$1\r\n0\r\n$2\r\n-1\r\n");
+    }
+    assert!(stream.wait_for_write("*2\r\n$3\r\ntwo\r\n$5\r\nthree\r\n", 1000));
 
     // Verify length
-    let command = RedisCommand::LLen { key: "mylist".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, ":2\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*2\r\n$4\r\nLLEN\r\n$6\r\nmylist\r\n");
+    }
+    assert!(stream.wait_for_write(":2\r\n", 1000));
+    
+    // Small delay to ensure response is fully written
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    
+    stream.shutdown(&mut handler, handle);
 }
 
 #[test]
 fn test_list_position_operations() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
-    let mut handler = ClientHandler::new(MockTcpStream, Arc::clone(&redis));
+    let stream = MockTcpStream::new();
+    let mut handler = ClientHandler::new(stream.clone(), Arc::clone(&redis));
+    let handle = handler.start();
 
     // Setup test data
-    let commands = vec![
-        RedisCommand::RPush { key: "mylist".to_string(), value: "one".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "two".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "two".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "three".to_string() },
-    ];
-    for command in commands {
-        handler.execute_command(&command);
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\none\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\ntwo\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\ntwo\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$5\r\nthree\r\n");
     }
+    assert!(stream.wait_for_write(":1\r\n", 1000));
+    assert!(stream.wait_for_write(":2\r\n", 1000));
+    assert!(stream.wait_for_write(":3\r\n", 1000));
+    assert!(stream.wait_for_write(":4\r\n", 1000));
 
     // Test LPOS for single occurrence
-    let command = RedisCommand::LPos { key: "mylist".to_string(), element: "two".to_string(), count: None };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, ":1\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$4\r\nLPOS\r\n$6\r\nmylist\r\n$3\r\ntwo\r\n");
+    }
+    assert!(stream.wait_for_write(":1\r\n", 1000));
 
     // Test LPOS with COUNT
-    let command = RedisCommand::LPos { key: "mylist".to_string(), element: "two".to_string(), count: Some(2) };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "*2\r\n:1\r\n:2\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*4\r\n$4\r\nLPOS\r\n$6\r\nmylist\r\n$3\r\ntwo\r\n$1\r\n2\r\n");
+    }
+    assert!(stream.wait_for_write("*2\r\n:1\r\n:2\r\n", 1000));
+
+    stream.shutdown(&mut handler, handle);
 }
 
 #[test]
 fn test_list_insert_operations() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
-    let mut handler = ClientHandler::new(MockTcpStream, Arc::clone(&redis));
+    let stream = MockTcpStream::new();
+    let mut handler = ClientHandler::new(stream.clone(), Arc::clone(&redis));
+    let handle = handler.start();
 
     // Setup test data
-    let commands = vec![
-        RedisCommand::RPush { key: "mylist".to_string(), value: "one".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "three".to_string() },
-    ];
-    for command in commands {
-        handler.execute_command(&command);
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\none\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$5\r\nthree\r\n");
     }
+    assert!(stream.wait_for_write(":1\r\n", 1000));
+    assert!(stream.wait_for_write(":2\r\n", 1000));
 
     // Test LINSERT
-    let command = RedisCommand::LInsert { key: "mylist".to_string(), before: true, pivot: "three".to_string(), element: "two".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, ":3\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*5\r\n$7\r\nLINSERT\r\n$6\r\nmylist\r\n$6\r\nBEFORE\r\n$5\r\nthree\r\n$3\r\ntwo\r\n");
+    }
+    assert!(stream.wait_for_write(":3\r\n", 1000));
 
     // Verify result with LRANGE
-    let command = RedisCommand::LRange { key: "mylist".to_string(), start: 0, stop: -1 };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "*3\r\n$3\r\none\r\n$3\r\ntwo\r\n$5\r\nthree\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*4\r\n$6\r\nLRANGE\r\n$6\r\nmylist\r\n$1\r\n0\r\n$2\r\n-1\r\n");
+    }
+    assert!(stream.wait_for_write("*3\r\n$3\r\none\r\n$3\r\ntwo\r\n$5\r\nthree\r\n", 1000));
+
+    stream.shutdown(&mut handler, handle);
 }
 
 #[test]
 fn test_list_set_and_get_operations() {
     let redis = Arc::new(Mutex::new(Redis::new(RedisConfig::default())));
-    let mut handler = ClientHandler::new(MockTcpStream, Arc::clone(&redis));
+    let stream = MockTcpStream::new();
+    let mut handler = ClientHandler::new(stream.clone(), Arc::clone(&redis));
+    let handle = handler.start();
 
     // Setup test data
-    let commands = vec![
-        RedisCommand::RPush { key: "mylist".to_string(), value: "one".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "two".to_string() },
-        RedisCommand::RPush { key: "mylist".to_string(), value: "three".to_string() },
-    ];
-    for command in commands {
-        handler.execute_command(&command);
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\none\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$3\r\ntwo\r\n");
+        read_data.extend_from_slice(b"*3\r\n$5\r\nRPUSH\r\n$6\r\nmylist\r\n$5\r\nthree\r\n");
     }
+    assert!(stream.wait_for_write(":1\r\n", 1000));
+    assert!(stream.wait_for_write(":2\r\n", 1000));
+    assert!(stream.wait_for_write(":3\r\n", 1000));
 
     // Test LSET
-    let command = RedisCommand::LSet { key: "mylist".to_string(), index: 1, element: "modified".to_string() };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "+OK\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*4\r\n$4\r\nLSET\r\n$6\r\nmylist\r\n$1\r\n1\r\n$8\r\nmodified\r\n");
+    }
+    assert!(stream.wait_for_write("+OK\r\n", 1000));
 
     // Test LINDEX
-    let command = RedisCommand::LIndex { key: "mylist".to_string(), index: 1 };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "$8\r\nmodified\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*3\r\n$6\r\nLINDEX\r\n$6\r\nmylist\r\n$1\r\n1\r\n");
+    }
+    assert!(stream.wait_for_write("$8\r\nmodified\r\n", 1000));
 
     // Verify final state with LRANGE
-    let command = RedisCommand::LRange { key: "mylist".to_string(), start: 0, stop: -1 };
-    let result = handler.execute_command(&command);
-    assert_eq!(result, "*3\r\n$3\r\none\r\n$8\r\nmodified\r\n$5\r\nthree\r\n");
+    {
+        let mut read_data = stream.read_data.lock().unwrap();
+        read_data.extend_from_slice(b"*4\r\n$6\r\nLRANGE\r\n$6\r\nmylist\r\n$1\r\n0\r\n$2\r\n-1\r\n");
+    }
+    assert!(stream.wait_for_write("*3\r\n$3\r\none\r\n$8\r\nmodified\r\n$5\r\nthree\r\n", 1000));
+
+    stream.shutdown(&mut handler, handle);
 }

@@ -9,17 +9,18 @@ pub mod rdb;
 pub mod xread_parser;
 pub mod xread_handler;
 
+use std::sync::{Arc, Mutex};
 pub use config::RedisConfig;
 pub use commands::RedisCommand;
 pub use core::Redis;
 pub use utils::*;
+
 
 // Error responses that signal retry behavior
 // pub const XREAD_RETRY_PREFIX: &str = "XREAD_RETRY"; 
 
 use std::net::TcpStream;
 use std::thread;
-use std::sync::{Arc, Mutex};
 
 /// This function is called when the Redis server is configured as a replica. It performs the following steps:
 /// 1. Connects to the master server
@@ -76,7 +77,7 @@ pub fn init_replica(config: &mut RedisConfig, redis: Arc<Mutex<Redis>>) {
 
                     read_until_end_of_rdb(&mut stream, &mut buffer);
 
-                    let mut client_handler = crate::client_handler::ClientHandler::new_master(stream, redis.clone());
+                    let mut client_handler = crate::client_handler::ClientHandler::new(stream, redis.clone());
                     client_handler.start();
                     #[cfg(debug_assertions)]
                     println!("replicaof host and port is valid");

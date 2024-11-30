@@ -326,19 +326,19 @@ impl Redis {
                     numreplicas, 
                     _current_offset);
 
+                // Set GETACK flag to true when we need to wait for replica acknowledgments
+                self.replication.set_enqueue_getack(true);
+                
                 if up_to_date_replicas >= *numreplicas as usize {
                     Ok(format!(":{}\r\n", up_to_date_replicas))
+                } else if *elapsed >= *timeout {
+                    #[cfg(debug_assertions)]
+                    println!("timeout elapsed returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
+                    Ok(format!(":{}\r\n", up_to_date_replicas))
                 } else {
-                    if *elapsed >= *timeout {
-                        println!("timeout elapsed returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
-                        Ok(format!(":{}\r\n", up_to_date_replicas))
-                    } else {
-                        // Set GETACK flag to true when we need to wait for replica acknowledgments
-                        self.replication.set_enqueue_getack(true);
-                        // Return a special error to indicate that we need to retry 
-                        Err("WAIT_RETRY".to_string())
-                    }
-                }               
+                    // Return a special error to indicate that we need to retry 
+                    Err("WAIT_RETRY".to_string())
+                }
             },
             RedisCommand::Config { subcommand, parameter } => {
                 match subcommand.as_str() {

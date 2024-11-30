@@ -187,7 +187,13 @@ impl Storage {
         let data = self.data.lock().unwrap();
         if let Some(ValueWrapper::List { values }) = data.get(key) {
             let len = values.len() as i64;
+            if len == 0 {
+                return vec![];
+            }
             let (start, stop) = normalize_indices(start, stop, len);
+            if start > stop {
+                return vec![];
+            }
             values[start as usize..=stop as usize].to_vec()
         } else {
             vec![]
@@ -200,8 +206,16 @@ impl Storage {
             match wrapper {
                 ValueWrapper::List { values } => {
                     let len = values.len() as i64;
+                    if len == 0 {
+                        return Ok(());
+                    }
                     let (start, stop) = normalize_indices(start, stop, len);
-                    *values = values[start as usize..=stop as usize].to_vec();
+                    if start > stop {
+                        values.clear();
+                    } else {
+                        let new_values: Vec<String> = values.drain(start as usize..=stop as usize).collect();
+                        *values = new_values;
+                    }
                     Ok(())
                 },
                 _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
@@ -211,23 +225,46 @@ impl Storage {
         }
     }
 
-    pub fn lpos(&self, key: &str, element: &str, count: Option<i64>) -> Vec<i64> {
+    pub fn lpos(&self, key: &str, element: &str, count: Option<i64>) -> Result<String, String> {
         let data = self.data.lock().unwrap();
-        if let Some(ValueWrapper::List { values }) = data.get(key) {
-            let mut positions = Vec::new();
-            for (i, value) in values.iter().enumerate() {
-                if value == element {
-                    positions.push(i as i64);
-                    if let Some(count) = count {
-                        if positions.len() == count as usize {
-                            break;
-                        }
+        if let Some(wrapper) = data.get(key) {
+            match wrapper {
+                ValueWrapper::List { values } => {
+                    match count {
+                        Some(count) if count > 0 => {
+                            let mut positions = Vec::new();
+                            for (i, val) in values.iter().enumerate() {
+                                if val == element {
+                                    positions.push(i);
+                                    if positions.len() >= count as usize {
+                                        break;
+                                    }
+                                }
+                            }
+                            if positions.is_empty() {
+                                Ok("*0\r\n".to_string())
+                            } else {
+                                let mut response = format!("*{}\r\n", positions.len());
+                                for pos in positions {
+                                    response.push_str(&format!(":{}\r\n", pos));
+                                }
+                                Ok(response)
+                            }
+                        },
+                        None => {
+                            if let Some(pos) = values.iter().position(|x| x == element) {
+                                Ok(format!(":{}\r\n", pos))
+                            } else {
+                                Ok(":-1\r\n".to_string())
+                            }
+                        },
+                        _ => Ok("*0\r\n".to_string())
                     }
-                }
+                },
+                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
             }
-            positions
         } else {
-            vec![]
+            Ok(":-1\r\n".to_string())
         }
     }
 
@@ -564,6 +601,9 @@ impl Storage {
 }
 
 fn normalize_indices(start: i64, stop: i64, len: i64) -> (i64, i64) {
+    if len == 0 {
+        return (0, -1); // Return invalid range for empty lists
+    }
     let start = if start < 0 { len + start } else { start };
     let stop = if stop < 0 { len + stop } else { stop };
     let start = start.max(0).min(len - 1);
