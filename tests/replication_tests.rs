@@ -70,32 +70,6 @@ fn given_replication_manager_when_multiple_commands_enqueued_then_all_sent_to_re
 }
 
 #[test]
-fn given_replication_manager_when_getack_set_then_getack_sent_to_replica() {
-    let mut manager = ReplicationManager::new();
-    let mock_stream = MockTcpStream::new();
-    
-    // Add a replica with the mock stream
-    manager.add_replica("localhost".to_string(), "6379".to_string(), Box::new(mock_stream.clone()));
-
-    // Set GETACK flag
-    manager.set_enqueue_getack(true);
-
-    // Create a Redis instance with this ReplicationManager
-    let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager)));
-
-    // Start the replication sync
-    ReplicationManager::start_replication_sync(redis.clone());
-
-    // Give some time for the sync to occur
-    thread::sleep(Duration::from_millis(100));
-
-    // Check that GETACK was sent to the replica
-    let written_data = mock_stream.get_written_data();
-    let expected_data = b"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
-    assert_eq!(written_data, expected_data);
-}
-
-#[test]
 fn test_wait_command_with_ack() {
     let mut manager = ReplicationManager::new();
     
@@ -249,7 +223,7 @@ fn test_wait_command_timeout() {
     
     // Wait for both the SET and WAIT responses (200ms to ensure both writes complete)
     // thread::sleep(Duration::from_millis(200));
-    
+
     client_stream.wait_for_write(":0\r\n", 1000);
 
     // Verify responses

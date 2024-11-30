@@ -284,10 +284,15 @@ impl Redis {
             },
             RedisCommand::ReplconfGetack => {
                 if let Some(client) = client {
+                    let bytes_processed = self.get_bytes_processed();
                     // hacky, temporary way. we need to omit the "REPLCONF GETACK" and we assume it is 37 bytes.
-                    let bytes_processed = self.get_bytes_processed() - 37;
-                    let num_digits = bytes_processed.to_string().len();
-                    let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", num_digits, bytes_processed);
+                    let ack_bytes = if bytes_processed >= 37 {
+                        bytes_processed - 37
+                    } else {
+                        0
+                    };
+                    let num_digits = ack_bytes.to_string().len();
+                    let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", num_digits, ack_bytes);
                     let _ = client.write(response.as_bytes());
                     let _ = client.flush();
                     Ok("".to_string())  // Return empty string to indicate response was sent directly
@@ -317,17 +322,12 @@ impl Redis {
             RedisCommand::Wait { numreplicas, timeout, elapsed } => {
                 #[cfg(debug_assertions)]
                 println!("executing WAIT command");
-                let _current_offset = self.replication.get_replication_offset();
+
+                // First, ensure all pending commands are sent to replicas
+                let sent_commands = self.replication.send_pending_commands();
+                
+                // Check current state
                 let up_to_date_replicas = self.replication.count_up_to_date_replicas();
-
-                #[cfg(debug_assertions)]
-                println!("up_to_date: {} target ack: {} current offset {}", 
-                    up_to_date_replicas, 
-                    numreplicas, 
-                    _current_offset);
-
-                // Set GETACK flag to true when we need to wait for replica acknowledgments
-                self.replication.set_enqueue_getack(true);
                 
                 if up_to_date_replicas >= *numreplicas as usize {
                     Ok(format!(":{}\r\n", up_to_date_replicas))
@@ -336,7 +336,7 @@ impl Redis {
                     println!("timeout elapsed returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
                     Ok(format!(":{}\r\n", up_to_date_replicas))
                 } else {
-                    // Return a special error to indicate that we need to retry 
+                    // Need to retry - commands sent but not enough ACKs yet
                     Err("WAIT_RETRY".to_string())
                 }
             },

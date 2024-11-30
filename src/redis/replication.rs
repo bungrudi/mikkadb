@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use crate::redis::replica::Replica;
 use std::io::{Read, Write, Result};
 use std::thread;
@@ -27,7 +27,6 @@ pub struct ReplicationManager {
     pub replicas: Mutex<HashMap<String, Replica>>,
     pub replica_queue: Mutex<VecDeque<String>>,
     replication_offset: AtomicU64, // bytes sent to replica (as master)
-    enqueue_getack: AtomicBool,
 }
 
 impl ReplicationManager {
@@ -36,7 +35,6 @@ impl ReplicationManager {
             replicas: Mutex::new(HashMap::new()),
             replica_queue: Mutex::new(VecDeque::new()),
             replication_offset: AtomicU64::new(0),
-            enqueue_getack: AtomicBool::new(false),
         }
     }
 
@@ -97,12 +95,42 @@ impl ReplicationManager {
         self.replicas.lock().unwrap().insert(replica_key, replica);
     }
 
-    pub fn should_send_getack(&self) -> bool {
-        self.enqueue_getack.load(Ordering::SeqCst)
+    pub fn send_pending_commands(&self) -> bool {
+        let mut sent_commands = false;
+        let mut replica_queue = self.replica_queue.lock().unwrap();
+        
+        if !replica_queue.is_empty() {
+            #[cfg(debug_assertions)]
+            println!("[REPL] Found {} commands in replication queue", replica_queue.len());
+            
+            while let Some(replica_command) = replica_queue.pop_front() {
+                let replicas = self.replicas.lock().unwrap();
+                #[cfg(debug_assertions)]
+                println!("[REPL] Sending command to {} replicas: {}", replicas.len(), replica_command);
+                
+                for (_key, replica) in &*replicas {
+                    let mut stream = replica.stream.lock().unwrap();
+                    if let Err(e) = stream.write(replica_command.as_bytes()) {
+                        #[cfg(debug_assertions)]
+                        eprintln!("[REPL] Error writing to replica {}: {}", _key, e);
+                    }
+                }
+                sent_commands = true;
+            }
+        }
+        sent_commands
     }
 
-    pub fn set_enqueue_getack(&self, value: bool) {
-        self.enqueue_getack.store(value, Ordering::SeqCst);
+    pub fn send_getack_to_replicas(&self) -> std::io::Result<()> {
+        #[cfg(debug_assertions)]
+        println!("[REPL] Sending GETACK to replicas");
+        
+        let replicas = self.replicas.lock().unwrap();
+        for (_key, replica) in &*replicas {
+            let mut stream = replica.stream.lock().unwrap();
+            stream.write_all(b"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n")?;
+        }
+        Ok(())
     }
 
     pub fn get_replicas(&self) -> std::sync::MutexGuard<HashMap<String, Replica>> {
@@ -110,48 +138,25 @@ impl ReplicationManager {
     }
 
     pub fn start_replication_sync(redis: Arc<Mutex<crate::redis::Redis>>) {
-        // TODO use main thread
         thread::spawn(move || {
+            let mut last_getack = std::time::Instant::now();
             loop {
                 {
                     let redis = redis.lock().unwrap();
-                    {
-                        let mut replica_queue = redis.replication.replica_queue.lock().unwrap();
-                        if !replica_queue.is_empty() {
-                            #[cfg(debug_assertions)]
-                            println!("[REPL] Found {} commands in replication queue", replica_queue.len());
-                        }
-                        
-                        while let Some(replica_command) = replica_queue.pop_front() {
-                            let replicas = redis.replication.replicas.lock().unwrap();
-                            #[cfg(debug_assertions)]
-                            println!("[REPL] Sending command to {} replicas: {}", replicas.len(), replica_command);
-                            
-                            for (_key, replica) in &*replicas {
-                                let mut stream = replica.stream.lock().unwrap();
-                                let result = stream.write(replica_command.as_bytes());
-                                if result.is_err() {
-                                    #[cfg(debug_assertions)]
-                                    eprintln!("[REPL] Error writing to replica {}: {}", _key, result.err().unwrap());
-                                }
-                            }
-                        }
-                    }
-                    // send "REPLCONF GETACK *" only when enqueue_getack is true
-                    if redis.replication.should_send_getack() {
+                    redis.replication.send_pending_commands();
+                    
+                    // Send GETACK every 10 seconds
+                    if last_getack.elapsed() >= Duration::from_secs(10) {
                         #[cfg(debug_assertions)]
-                        println!("[REPL] Sending GETACK to replicas");
-                        for replica in redis.replication.get_replicas().values() {
-                            let mut stream = replica.stream.lock().unwrap();
-                            let result = stream.write(b"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n");
-                            if result.is_err() {
-                                #[cfg(debug_assertions)]
-                                eprintln!("error writing to replica: {}", result.err().unwrap());
-                            }
+                        println!("[REPL] Sending periodic GETACK");
+                        
+                        if let Err(e) = redis.replication.send_getack_to_replicas() {
+                            #[cfg(debug_assertions)]
+                            println!("[REPL] Error sending periodic GETACK: {}", e);
                         }
-                        redis.replication.set_enqueue_getack(false);
+                        last_getack = std::time::Instant::now();
                     }
-                } // expecting the lock to be dropped here
+                }
                 thread::sleep(Duration::from_millis(10));
             }
         });

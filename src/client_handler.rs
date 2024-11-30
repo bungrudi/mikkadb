@@ -202,22 +202,32 @@ impl ClientHandler {
                         #[cfg(debug_assertions)]
                         println!("[CLIENT] Executing command: {:?}", command);
 
-                        let mut response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
+                        let response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
                             let start = std::time::Instant::now();
+                            // Send GETACK only once at the start
+                            let mut sent_getack = false;
                             let mut resp = handler.execute_command(&command);
-                            
+                    
                             while resp == "WAIT_RETRY" {
                                 // Drop any locks before sleeping
                                 thread::sleep(Duration::from_millis(50));
                                 let total_elapsed = start.elapsed().as_millis() as i64;
-                                
+                        
                                 // Create new Wait command with updated elapsed time
                                 let updated_command = RedisCommand::Wait {
                                     numreplicas,
                                     timeout,
                                     elapsed: total_elapsed,
                                 };
-                                
+                        
+                                // Only send GETACK on first try
+                                if !sent_getack {
+                                    if let Ok(redis) = handler.redis.lock() {
+                                        let _ = redis.replication.send_getack_to_replicas();
+                                        sent_getack = true;
+                                    }
+                                }
+                        
                                 resp = handler.execute_command(&updated_command);
                             }
                             resp

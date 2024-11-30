@@ -20,6 +20,7 @@ impl MockTcpStream {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_written_data(&self) -> Vec<u8> {
         let data = self.write_data.lock().unwrap().clone();
         #[cfg(debug_assertions)]
@@ -28,12 +29,14 @@ impl MockTcpStream {
         data
     }
 
+    #[allow(dead_code)]
     pub fn clear_written_data(&self) {
         #[cfg(debug_assertions)]
         println!("[MockTcpStream::clear_written_data] Clearing write buffer");
         self.write_data.lock().unwrap().clear();
     }
 
+    #[allow(dead_code)]
     pub fn clear_read_data(&self) {
         let mut read_data = self.read_data.lock().unwrap();
         read_data.clear();
