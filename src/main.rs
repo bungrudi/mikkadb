@@ -7,8 +7,31 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
 /**
-* This is an implementation of a key value store that immitates Redis.
-*/
+ * This is an implementation of a key value store that imitates Redis.
+ * 
+ * Main Components:
+ * 
+ * - Redis (src/redis/core.rs):
+ *   Core Redis implementation with storage and replication management
+ * 
+ * - Storage (src/redis/storage.rs): 
+ *   Handles data storage with support for strings, lists, sets and streams
+ * 
+ * - ReplicationManager (src/redis/replication.rs):
+ *   Manages master/replica relationships and command replication
+ * 
+ * - ClientHandler (src/client_handler.rs):
+ *   Handles client connections and command execution
+ * 
+ * - RdbParser (src/redis/rdb.rs):
+ *   Parses Redis database files for persistence
+ * 
+ * - XReadHandler (src/redis/xread_handler.rs):
+ *   Specialized handler for Redis Streams XREAD command
+ * 
+ * - RESP Parser (src/resp/command.rs):
+ *   Parses Redis protocol messages
+ */
 fn main() {
     #[cfg(debug_assertions)]
     println!("Logs from your program will appear here!");

@@ -52,26 +52,25 @@ impl ClientHandler {
             return response.to_string();
         }
 
-        if self.is_redis_connection {
-            // Always use array format for Redis-to-Redis communication
-            // TODO assume array of 1 for now. implement multiple response later
-            if response.starts_with('+') || response.starts_with('-') || response.starts_with(':') {
-                // Convert simple string/error/integer to array with bulk string
-                let content = response[1..].trim_end_matches("\r\n");
-                format!("*1\r\n${}\r\n{}\r\n", content.len(), content)
-            } else if response.starts_with('$') {
-                // Convert bulk string to array with bulk string
-                format!("*1\r\n{}", response)
-            } else if response.starts_with('*') {
-                // Already in array format
-                response.to_string()
-            } else {
-                // Non-empty response without RESP prefix
-                format!("*1\r\n${}\r\n{}\r\n", response.len(), response)
-            }
-        } else {
-            // Regular client - use response as-is
+        // For Redis CLI connections, we should return the response as-is
+        if !self.is_redis_connection {
+            return response.to_string();
+        }
+
+        // Redis-to-Redis communication formatting
+        if response.starts_with('+') || response.starts_with('-') || response.starts_with(':') {
+            // Convert simple string/error/integer to array with bulk string
+            let content = response[1..].trim_end_matches("\r\n");
+            format!("*1\r\n${}\r\n{}\r\n", content.len(), content)
+        } else if response.starts_with('$') {
+            // Convert bulk string to array with bulk string
+            format!("*1\r\n{}", response)
+        } else if response.starts_with('*') {
+            // Already in array format
             response.to_string()
+        } else {
+            // Non-empty response without RESP prefix
+            format!("*1\r\n${}\r\n{}\r\n", response.len(), response)
         }
     }
 
@@ -331,11 +330,14 @@ impl ClientHandler {
                                     #[cfg(debug_assertions)]
                                     println!("[CLIENT] Got response: {}", response.replace("\r\n", "\\r\\n"));
 
-                                    let formatted_response = handler.format_response(&response);
-                                    if !formatted_response.is_empty() {
-                                        let mut client = handler.client.lock().unwrap();
-                                        client.write_all(formatted_response.as_bytes()).unwrap();
-                                        client.flush().unwrap();
+                                    // Only send response if it's not empty and not already handled
+                                    if !response.is_empty() {
+                                        let formatted_response = handler.format_response(&response);
+                                        if !formatted_response.is_empty() {
+                                            let mut client = handler.client.lock().unwrap();
+                                            client.write_all(formatted_response.as_bytes()).unwrap();
+                                            client.flush().unwrap();
+                                        }
                                     }
                                 }
                             }
