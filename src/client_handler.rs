@@ -15,6 +15,7 @@ pub struct ClientHandler {
     redis: Arc<Mutex<Redis>>,
     in_transaction: Arc<Mutex<bool>>,
     queued_commands: Arc<Mutex<VecDeque<RedisCommand>>>,
+    ready: Arc<Mutex<bool>>,
     shutdown: Arc<Mutex<bool>>,
     is_redis_connection: bool,
 }
@@ -35,8 +36,14 @@ impl ClientHandler {
             in_transaction: Arc::new(Mutex::new(false)),
             queued_commands: Arc::new(Mutex::new(VecDeque::new())),
             shutdown: Arc::new(Mutex::new(false)),
+            ready: Arc::new(Mutex::new(false)),
             is_redis_connection,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn is_ready(&self) -> bool {
+        *self.ready.lock().unwrap()
     }
 
     #[allow(dead_code)]
@@ -201,6 +208,10 @@ impl ClientHandler {
             let mut read_buffer = [0; 1024];
 
             loop {
+
+                // after entering the first loop, before blocking on anything, set the ready flag
+                *handler.ready.lock().unwrap() = true;
+
                 if *handler.shutdown.lock().unwrap() {
                     break;
                 }

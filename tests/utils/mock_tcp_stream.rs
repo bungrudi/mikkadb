@@ -131,7 +131,7 @@ impl Read for MockTcpStream {
             
             #[cfg(debug_assertions)]
             println!("[MockTcpStream::read] No data available, sleeping");
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(150));
         }
     }
 }
