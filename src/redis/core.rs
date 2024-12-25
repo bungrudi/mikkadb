@@ -181,7 +181,7 @@ impl Redis {
                 }
             },
             RedisCommand::LPos { key, element, count } => {
-                match self.storage.lpos(key, element, *count) {
+                match self.storage.lpos(key, element, None, *count) {
                     Ok(response) => Ok(response),
                     Err(err) => Err(err),
                 }

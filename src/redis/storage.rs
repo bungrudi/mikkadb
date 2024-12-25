@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
+use dashmap::DashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct StreamEntry {
@@ -11,7 +11,7 @@ pub struct StreamEntry {
 
 #[derive(Default, Clone)]
 pub struct StreamMetadata {
-    pub last_sequences: HashMap<u64, u64>,
+    pub last_sequences: DashMap<u64, u64>,
     pub last_dollar_id: Option<String>,
 }
 
@@ -31,23 +31,21 @@ pub enum ValueWrapper {
 }
 
 pub struct Storage {
-    data: Mutex<HashMap<String, ValueWrapper>>,
+    data: DashMap<String, ValueWrapper>,
 }
 
 impl Storage {
     pub fn new() -> Self {
         Storage {
-            data: Mutex::new(HashMap::new()),
+            data: DashMap::new(),
         }
     }
 
     pub fn flushdb(&self) {
-        let mut data = self.data.lock().unwrap();
-        data.clear();
+        self.data.clear();
     }
 
     pub fn set(&self, key: &str, value: &str, ttl: Option<usize>) {
-        let mut data = self.data.lock().unwrap();
         let expiration = ttl.map(|ttl| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -57,7 +55,7 @@ impl Storage {
         });
         #[cfg(debug_assertions)]
         println!("DEBUG: Setting key '{}' with value '{}' and expiration {:?}", key, value, expiration);
-        data.insert(
+        self.data.insert(
             key.to_string(),
             ValueWrapper::String {
                 value: value.to_string(),
@@ -66,10 +64,9 @@ impl Storage {
         );
     }
 
-    pub fn get(&self, key: &str) -> Option<String> {
-        let mut data = self.data.lock().unwrap();
-        if let Some(wrapper) = data.get(key) {
-            match wrapper {
+   pub fn get(&self, key: &str) -> Option<String> {
+        if let Some(entry) = self.data.get(key) {
+            match &*entry {
                 ValueWrapper::String { value, expiration } => {
                     if let Some(expiration) = expiration {
                         let now = SystemTime::now()
@@ -79,7 +76,8 @@ impl Storage {
                         if now > *expiration {
                             #[cfg(debug_assertions)]
                             println!("DEBUG: Key '{}' has expired. Current time: {}, Expiration: {}", key, now, expiration);
-                            data.remove(key);
+                            drop(entry); // Release the entry lock before removing the key
+                            self.data.remove(key);
                             return None;
                         }
                     }
@@ -97,10 +95,9 @@ impl Storage {
         }
     }
 
-    pub fn lpush(&self, key: &str, value: &str) -> Result<i64, String> {
-        let mut data = self.data.lock().unwrap();
-        match data.entry(key.to_string()) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
+   pub fn lpush(&self, key: &str, value: &str) -> Result<i64, String> {
+        match self.data.entry(key.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 match entry.get_mut() {
                     ValueWrapper::List { values } => {
                         values.insert(0, value.to_string());
@@ -109,7 +106,7 @@ impl Storage {
                     _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
                 }
             },
-            std::collections::hash_map::Entry::Vacant(entry) => {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
                 entry.insert(ValueWrapper::List {
                     values: vec![value.to_string()],
                 });
@@ -118,10 +115,9 @@ impl Storage {
         }
     }
 
-    pub fn rpush(&self, key: &str, value: &str) -> Result<i64, String> {
-        let mut data = self.data.lock().unwrap();
-        match data.entry(key.to_string()) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
+   pub fn rpush(&self, key: &str, value: &str) -> Result<i64, String> {
+        match self.data.entry(key.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 match entry.get_mut() {
                     ValueWrapper::List { values } => {
                         values.push(value.to_string());
@@ -130,7 +126,7 @@ impl Storage {
                     _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
                 }
             },
-            std::collections::hash_map::Entry::Vacant(entry) => {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
                 entry.insert(ValueWrapper::List {
                     values: vec![value.to_string()],
                 });
@@ -139,129 +135,116 @@ impl Storage {
         }
     }
 
-    pub fn lpop(&self, key: &str) -> Option<String> {
-        let mut data = self.data.lock().unwrap();
-        if let Some(wrapper) = data.get_mut(key) {
-            match wrapper {
-                ValueWrapper::List { values } => {
-                    if values.is_empty() {
-                        None
-                    } else {
-                        Some(values.remove(0))
-                    }
-                },
-                _ => None,
+   pub fn lpop(&self, key: &str) -> Option<String> {
+        self.data.get_mut(key).and_then(|mut entry| {
+            if let ValueWrapper::List { values } = entry.value_mut() {
+                (!values.is_empty()).then(|| values.remove(0))
+            } else {
+                None
             }
-        } else {
-            None
+        })
+    }
+
+   pub fn rpop(&self, key: &str) -> Option<String> {
+        self.data.get_mut(key).and_then(|mut entry| {
+            if let ValueWrapper::List { values } = entry.value_mut() {
+                values.pop()
+            } else {
+                None
+            }
+        })
+    }
+
+   pub fn llen(&self, key: &str) -> i64 {
+        match self.data.get(key) {
+            Some(entry) => {
+                if let ValueWrapper::List { values } = &*entry {
+                    values.len() as i64
+                } else {
+                    0
+                }
+            },
+            None => 0,
         }
     }
 
-    pub fn rpop(&self, key: &str) -> Option<String> {
-        let mut data = self.data.lock().unwrap();
-        if let Some(wrapper) = data.get_mut(key) {
-            match wrapper {
-                ValueWrapper::List { values } => {
-                    if values.is_empty() {
-                        None
-                    } else {
-                        values.pop()
-                    }
-                },
-                _ => None,
+   pub fn lrange(&self, key: &str, start: i64, stop: i64) -> Vec<String> {
+        if let Some(entry) = self.data.get(key) {
+            if let ValueWrapper::List { values } = &*entry {
+                let len = values.len() as i64;
+                if len == 0 {
+                    return vec![];
+                }
+                let (start, stop) = normalize_indices(start, stop, len);
+                if start > stop {
+                    return vec![];
+                }
+                values[start..=stop].to_vec()
+            } else {
+                vec![]
             }
-        } else {
-            None
-        }
-    }
-
-    pub fn llen(&self, key: &str) -> i64 {
-        let data = self.data.lock().unwrap();
-        match data.get(key) {
-            Some(ValueWrapper::List { values }) => values.len() as i64,
-            _ => 0,
-        }
-    }
-
-    pub fn lrange(&self, key: &str, start: i64, stop: i64) -> Vec<String> {
-        let data = self.data.lock().unwrap();
-        if let Some(ValueWrapper::List { values }) = data.get(key) {
-            let len = values.len() as i64;
-            if len == 0 {
-                return vec![];
-            }
-            let (start, stop) = normalize_indices(start, stop, len);
-            if start > stop {
-                return vec![];
-            }
-            values[start as usize..=stop as usize].to_vec()
         } else {
             vec![]
         }
     }
 
-    pub fn ltrim(&self, key: &str, start: i64, stop: i64) -> Result<(), String> {
-        let mut data = self.data.lock().unwrap();
-        if let Some(wrapper) = data.get_mut(key) {
-            match wrapper {
-                ValueWrapper::List { values } => {
-                    let len = values.len() as i64;
-                    if len == 0 {
-                        return Ok(());
-                    }
-                    let (start, stop) = normalize_indices(start, stop, len);
-                    if start > stop {
-                        values.clear();
-                    } else {
-                        let new_values: Vec<String> = values.drain(start as usize..=stop as usize).collect();
-                        *values = new_values;
-                    }
-                    Ok(())
-                },
-                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+   pub fn ltrim(&self, key: &str, start: i64, stop: i64) -> Result<(), String> {
+        if let Some(mut entry) = self.data.get_mut(key) {
+            if let ValueWrapper::List { values } = &mut *entry {
+                let len = values.len() as i64;
+                if len == 0 {
+                    return Ok(());
+                }
+                let (start, stop) = normalize_indices(start, stop, len);
+                if start > stop {
+                    values.clear();
+                } else {
+                    values.drain(start..=stop);
+                }
+                return Ok(());
             }
-        } else {
-            Ok(())
         }
+        Ok(())
     }
 
-    pub fn lpos(&self, key: &str, element: &str, count: Option<i64>) -> Result<String, String> {
-        let data = self.data.lock().unwrap();
-        if let Some(wrapper) = data.get(key) {
-            match wrapper {
-                ValueWrapper::List { values } => {
-                    match count {
-                        Some(count) if count > 0 => {
-                            let mut positions = Vec::new();
-                            for (i, val) in values.iter().enumerate() {
-                                if val == element {
-                                    positions.push(i);
-                                    if positions.len() >= count as usize {
-                                        break;
-                                    }
-                                }
-                            }
-                            if positions.is_empty() {
-                                Ok("*0\r\n".to_string())
-                            } else {
-                                let mut response = format!("*{}\r\n", positions.len());
-                                for pos in positions {
-                                    response.push_str(&format!(":{}\r\n", pos));
-                                }
-                                Ok(response)
-                            }
-                        },
-                        None => {
-                            if let Some(pos) = values.iter().position(|x| x == element) {
-                                Ok(format!(":{}\r\n", pos))
-                            } else {
-                                Ok(":-1\r\n".to_string())
-                            }
-                        },
-                        _ => Ok("*0\r\n".to_string())
+   pub fn lpos(&self, key: &str, element: &str, rank: Option<i64>, count: Option<i64>) -> Result<String, String> {
+        if let Some(entry) = self.data.get(key) {
+            if let ValueWrapper::List { values } = &*entry {
+                let mut results = Vec::new();
+                let start_index = if let Some(rank) = rank {
+                    if rank >= 0 {
+                        rank as usize
+                    } else {
+                        (values.len() as i64 + rank) as usize
                     }
-                },
-                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+                } else {
+                    0
+                };
+
+                for (i, val) in values.iter().enumerate().skip(start_index) {
+                    if val == element {
+                        results.push(i);
+                        if let Some(num) = count {
+                            if results.len() >= num as usize {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if results.is_empty() {
+                    Ok("*-1\r\n".to_string())
+                } else if count.is_none() || count == Some(1) {
+                    Ok(format!(":{}\r\n", results[0]))
+                } else {
+                    let mut response = format!("*{}\r\n", results.len());
+                    for pos in results {
+                        response.push_str(&format!(":{}\r\n", pos));
+                    }
+                    Ok(response)
+                }
+            } else {
+                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
             }
         } else {
             Ok(":-1\r\n".to_string())
@@ -269,106 +252,90 @@ impl Storage {
     }
 
     pub fn linsert(&self, key: &str, before: bool, pivot: &str, element: &str) -> Result<i64, String> {
-        let mut data = self.data.lock().unwrap();
-        if let Some(wrapper) = data.get_mut(key) {
-            match wrapper {
+        match self.data.get_mut(key) {
+            Some(mut entry) => match entry.value_mut() {
                 ValueWrapper::List { values } => {
                     if let Some(pos) = values.iter().position(|x| x == pivot) {
-                        if before {
-                            values.insert(pos, element.to_string());
-                        } else {
-                            values.insert(pos + 1, element.to_string());
-                        }
+                        let insert_pos = if before { pos } else { pos + 1 };
+                        values.insert(insert_pos, element.to_string());
                         Ok(values.len() as i64)
                     } else {
                         Ok(-1)
                     }
                 },
                 _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
-            }
-        } else {
-            Ok(0)
+            },
+            None => Ok(0),
         }
     }
 
     pub fn lset(&self, key: &str, index: i64, element: &str) -> Result<(), String> {
-        let mut data = self.data.lock().unwrap();
-        if let Some(wrapper) = data.get_mut(key) {
-            match wrapper {
+        match self.data.get_mut(key) {
+            Some(mut entry) => match entry.value_mut() {
                 ValueWrapper::List { values } => {
                     let len = values.len() as i64;
-                    let real_index = if index < 0 { len + index } else { index };
-                    if real_index < 0 || real_index >= len {
+                    let normalized_index = if index < 0 { len + index } else { index };
+                    
+                    if normalized_index < 0 || normalized_index >= len {
                         return Err("ERR index out of range".to_string());
                     }
-                    values[real_index as usize] = element.to_string();
+                    
+                    values[normalized_index as usize] = element.to_string();
                     Ok(())
                 },
                 _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
-            }
-        } else {
-            Err("ERR no such key".to_string())
+            },
+            None => Err("ERR no such key".to_string()),
         }
     }
 
     pub fn lindex(&self, key: &str, index: i64) -> Option<String> {
-        let data = self.data.lock().unwrap();
-        if let Some(ValueWrapper::List { values }) = data.get(key) {
-            let len = values.len() as i64;
-            let real_index = if index < 0 { len + index } else { index };
-            if real_index < 0 || real_index >= len {
-                None
-            } else {
-                Some(values[real_index as usize].clone())
-            }
-        } else {
-            None
+        match self.data.get(key) {
+            Some(entry) => match entry.value() {
+                ValueWrapper::List { values } => {
+                    let len = values.len() as i64;
+                    let normalized_index = if index < 0 { len + index } else { index };
+                    
+                    if normalized_index < 0 || normalized_index >= len {
+                        None
+                    } else {
+                        Some(values[normalized_index as usize].clone())
+                    }
+                },
+                _ => None,
+            },
+            None => None,
         }
     }
 
     pub fn incr(&self, key: &str) -> Result<i64, String> {
-        let mut data = self.data.lock().unwrap();
-        
-        let wrapper = match data.get(key) {
-            Some(w) => w.clone(),  // Clone the wrapper to avoid borrow issues
-            None => {
-                // Key doesn't exist - create it with value "1"
-                data.insert(
-                    key.to_string(), 
-                    ValueWrapper::String {
-                        value: "1".to_string(),
-                        expiration: None,
-                    }
-                );
-                return Ok(1);
-            }
-        };
-
-        // Process existing value
-        match wrapper {
-            ValueWrapper::String { value, expiration } => {
-                match value.parse::<i64>() {
-                    Ok(num) => {
-                        let new_value = num + 1;
-                        data.insert(
-                            key.to_string(),
-                            ValueWrapper::String {
-                                value: new_value.to_string(),
-                                expiration,
+        match self.data.entry(key.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                match entry.get_mut() {
+                    ValueWrapper::String { value, .. } => {
+                        match value.parse::<i64>() {
+                            Ok(num) => {
+                                let new_num = num + 1;
+                                *value = new_num.to_string();
+                                Ok(new_num)
                             },
-                        );
-                        Ok(new_value)
+                            Err(_) => Err("ERR value is not an integer or out of range".to_string()),
+                        }
                     },
-                    Err(_) => Err("ERR value is not an integer or out of range".to_string()),
+                    _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
                 }
             },
-            ValueWrapper::Stream { .. } | ValueWrapper::List { .. } => {
-                Err("ERR value is not an integer or out of range".to_string())
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(ValueWrapper::String {
+                    value: "1".to_string(),
+                    expiration: None,
+                });
+                Ok(1)
             },
         }
     }
 
-    fn compare_stream_ids(id1: &str, id2: &str) -> std::cmp::Ordering {
+    pub fn compare_stream_ids(id1: &str, id2: &str) -> std::cmp::Ordering {
         #[cfg(debug_assertions)]
         println!("DEBUG: Comparing stream IDs: {} and {}", id1, id2);
         
@@ -400,16 +367,16 @@ impl Storage {
         }
     }
 
-    fn get_next_sequence(metadata: &mut StreamMetadata, time_part: u64) -> u64 {
+    pub fn get_next_sequence(metadata: &mut StreamMetadata, time_part: u64) -> u64 {
         let next_seq = match metadata.last_sequences.get(&time_part) {
-            Some(&seq) => seq + 1,
+            Some(seq) => *seq + 1,
             None => if time_part == 0 { 1 } else { 0 }
         };
         metadata.last_sequences.insert(time_part, next_seq);
         next_seq
     }
 
-    fn validate_new_id(&self, entries: &[StreamEntry], new_id: &str) -> Result<(), Cow<'static, str>> {
+    pub fn validate_new_id(&self, entries: &[StreamEntry], new_id: &str) -> Result<(), Cow<'static, str>> {
         if let Some(last_entry) = entries.last() {
             if Self::compare_stream_ids(new_id, &last_entry.id) != std::cmp::Ordering::Greater {
                 return Err("ERR The ID specified in XADD is equal or smaller than the target stream top item".into());
@@ -426,8 +393,6 @@ impl Storage {
     }
 
     pub fn xadd(&self, key: &str, id: &str, fields: HashMap<String, String>) -> Result<String, Cow<'static, str>> {
-        let mut data = self.data.lock().unwrap();
-        
         let (time_part, sequence) = if id == "*" {
             (Self::get_current_time_ms(), None)
         } else {
@@ -444,8 +409,8 @@ impl Storage {
             }
         }
 
-        let result = match data.entry(key.to_string()) {
-            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+        match self.data.entry(key.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
                 match occupied.get_mut() {
                     ValueWrapper::Stream { entries, metadata } => {
                         let new_sequence = sequence.unwrap_or_else(|| Self::get_next_sequence(metadata, time_part));
@@ -465,7 +430,7 @@ impl Storage {
                     _ => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
                 }
             },
-            std::collections::hash_map::Entry::Vacant(vacant) => {
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 let mut metadata = StreamMetadata::default();
                 let new_sequence = sequence.unwrap_or_else(|| Self::get_next_sequence(&mut metadata, time_part));
                 let new_id = format!("{}-{}", time_part, new_sequence);
@@ -480,133 +445,117 @@ impl Storage {
                 });
                 Ok(new_id)
             },
-        };
-
-        result
+        }
     }
 
     pub fn xrange(&self, key: &str, start: &str, end: &str) -> Result<Vec<StreamEntry>, Cow<'static, str>> {
-        let data = self.data.lock().unwrap();
-        
-        match data.get(key) {
-            Some(ValueWrapper::Stream { entries, .. }) => {
-                let filtered_entries: Vec<StreamEntry> = entries.iter()
-                    .filter(|entry| {
-                        Self::compare_stream_ids(&entry.id, start) >= std::cmp::Ordering::Equal &&
-                        Self::compare_stream_ids(&entry.id, end) <= std::cmp::Ordering::Equal
-                    })
-                    .map(|entry| StreamEntry {
-                        id: entry.id.clone(),
-                        fields: entry.fields.clone(),
-                    })
-                    .collect();
-                Ok(filtered_entries)
+        match self.data.get(key) {
+            Some(entry) => match entry.value() {
+                ValueWrapper::Stream { entries, .. } => {
+                    let filtered_entries: Vec<StreamEntry> = entries
+                        .iter()
+                        .filter(|entry| {
+                            Self::compare_stream_ids(&entry.id, start) != std::cmp::Ordering::Less &&
+                            Self::compare_stream_ids(&entry.id, end) != std::cmp::Ordering::Greater
+                        })
+                        .cloned()
+                        .collect();
+                    Ok(filtered_entries)
+                },
+                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".into()),
             },
-            Some(_) => Err("ERR WRONGTYPE Operation against a key holding the wrong kind of value".into()),
-            None => Ok(vec![]),
+            None => Ok(Vec::new()),
         }
     }
 
     pub fn get_stream_entries(&self, stream_key: &str, ms: u64, seq: u64, count: Option<usize>) -> Vec<StreamEntry> {
-        let data = self.data.lock().unwrap();
-        if let Some(ValueWrapper::Stream { entries, .. }) = data.get(stream_key) {
-            let mut matching_entries: Vec<StreamEntry> = entries
-                .iter()
-                .filter(|entry| {
-                    if let Ok((entry_ms, entry_seq)) = Self::parse_stream_id(&entry.id) {
-                        (entry_ms > ms) || (entry_ms == ms && entry_seq > seq)
-                    } else {
-                        false
+        match self.data.get(stream_key) {
+            Some(entry) => match entry.value() {
+                ValueWrapper::Stream { entries, .. } => {
+                    let search_id = format!("{}-{}", ms, seq);
+                    let mut matching_entries: Vec<StreamEntry> = entries
+                        .iter()
+                        .filter(|entry| Self::compare_stream_ids(&entry.id, &search_id) == std::cmp::Ordering::Greater)
+                        .cloned()
+                        .collect();
+
+                    matching_entries.sort_by(|a, b| Self::compare_stream_ids(&a.id, &b.id));
+                    
+                    if let Some(count) = count {
+                        matching_entries.truncate(count);
                     }
-                })
-                .cloned()
-                .collect();
-
-            matching_entries.sort_by(|a, b| Storage::compare_stream_ids(&a.id, &b.id));
-
-            if let Some(count) = count {
-                matching_entries.truncate(count);
-            }
-
-            matching_entries
-        } else {
-            vec![]
+                    
+                    matching_entries
+                },
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
         }
     }
 
     pub fn parse_stream_id(id: &str) -> Result<(u64, u64), String> {
-        if id == "$" {
-            return Ok((u64::MAX, 0));
-        }
-
         let parts: Vec<&str> = id.split('-').collect();
-        match parts.len() {
-            1 => {
-                let ms = parts[0].parse::<u64>()
-                    .map_err(|_| format!("Invalid stream ID format: {}", id))?;
-                Ok((ms, 0))
-            }
-            2 => {
-                let ms = parts[0].parse::<u64>()
-                    .map_err(|_| format!("Invalid stream ID format: {}", id))?;
-                let seq = parts[1].parse::<u64>()
-                    .map_err(|_| format!("Invalid stream ID format: {}", id))?;
-                Ok((ms, seq))
-            }
-            _ => Err(format!("Invalid stream ID format: {}", id))
+        if parts.len() != 2 {
+            return Err("ERR Invalid stream ID format".to_string());
         }
+        
+        let ms = parts[0].parse::<u64>()
+            .map_err(|_| "ERR Invalid stream ID milliseconds")?;
+        let seq = parts[1].parse::<u64>()
+            .map_err(|_| "ERR Invalid stream ID sequence number")?;
+            
+        Ok((ms, seq))
     }
 
     pub fn keys(&self, pattern: &str) -> Vec<String> {
-        let data = self.data.lock().unwrap();
-        if pattern == "*" {
-            data.keys()
-                .filter(|k| !k.starts_with("redis-"))
-                .cloned()
-                .collect()
-        } else {
-            vec![]
+        let mut keys = Vec::new();
+        for entry in self.data.iter() {
+            let key = entry.key();
+            if pattern == "*" || key == pattern {
+                keys.push(key.clone());
+            }
         }
+        keys
     }
 
     pub fn get_type(&self, key: &str) -> Cow<'static, str> {
-        let data = self.data.lock().unwrap();
-        match data.get(key) {
-            Some(ValueWrapper::String { .. }) => "string".into(),
-            Some(ValueWrapper::Stream { .. }) => "stream".into(),
-            Some(ValueWrapper::List { .. }) => "list".into(),
+        match self.data.get(key) {
+            Some(entry) => match entry.value() {
+                ValueWrapper::String { .. } => "string".into(),
+                ValueWrapper::Stream { .. } => "stream".into(),
+                ValueWrapper::List { .. } => "list".into(),
+            },
             None => "none".into(),
         }
     }
 
     pub fn get_last_stream_id(&self, stream_key: &str) -> Option<String> {
-        let data = self.data.lock().unwrap();
-        if let Some(ValueWrapper::Stream { entries, metadata }) = data.get(stream_key) {
-            if let Some(last_id) = &metadata.last_dollar_id {
-                return Some(last_id.clone());
-            }
-            
-            if !entries.is_empty() {
-                let mut last_entry = entries[0].id.clone();
-                for entry in entries.iter().skip(1) {
-                    if Self::compare_stream_ids(&entry.id, &last_entry) == std::cmp::Ordering::Greater {
-                        last_entry = entry.id.clone();
+        match self.data.get(stream_key) {
+            Some(entry) => match entry.value() {
+                ValueWrapper::Stream { entries, metadata } => {
+                    if entries.is_empty() {
+                        metadata.last_dollar_id.clone()
+                    } else {
+                        Some(entries.last()?.id.clone())
                     }
-                }
-                return Some(last_entry);
-            }
+                },
+                _ => None,
+            },
+            None => None,
         }
-        None
     }
 }
 
-fn normalize_indices(start: i64, stop: i64, len: i64) -> (i64, i64) {
-    if len == 0 {
-        return (0, -1); // Return invalid range for empty lists
-    }
-    let start = if start < 0 { len + start } else { start };
-    let stop = if stop < 0 { len + stop } else { stop };
-    let start = start.max(0).min(len - 1);
-    let stop = stop.max(0).min(len - 1);
+fn normalize_indices(start: i64, stop: i64, len: i64) -> (usize, usize) {
+    let start = if start < 0 {
+        (len + start).max(0)
+    } else {
+        start.min(len)
+    } as usize;
+    let stop = if stop < 0 {
+        (len + stop + 1).max(0)
+    } else {
+        (stop + 1).min(len)
+    } as usize;
     (start, stop)
 }

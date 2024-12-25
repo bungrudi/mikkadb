@@ -79,10 +79,14 @@ impl MockTcpStream {
             }
 
             // Try to find pattern in written data
-            let data = self.write_data.lock().unwrap();
+            let mut data = self.write_data.lock().unwrap();
             if data.windows(pattern_bytes.len()).any(|window| window == pattern_bytes) {
                 #[cfg(debug_assertions)]
                 println!("[MockTcpStream::wait_for_write] Pattern found");
+                // Copy the response to read buffer
+                self.read_data.lock().unwrap().extend_from_slice(&data);
+                // Clear write buffer
+                data.clear();
                 return true;
             }
             
