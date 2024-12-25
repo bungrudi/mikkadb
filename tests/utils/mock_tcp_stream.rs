@@ -6,97 +6,97 @@ use redis_starter_rust::client_handler::ClientHandler;
 
 #[derive(Clone)]
 pub struct MockTcpStream {
+    // What client writes, server reads
     pub read_data: Arc<Mutex<Vec<u8>>>,
+    // What server writes, client reads
     pub write_data: Arc<Mutex<Vec<u8>>>,
+    pub is_server: bool,
     pub shutdown: Arc<Mutex<bool>>,
 }
 
 impl MockTcpStream {
     pub fn new() -> Self {
-        MockTcpStream {
-            read_data: Arc::new(Mutex::new(Vec::new())),
-            write_data: Arc::new(Mutex::new(Vec::new())),
-            shutdown: Arc::new(Mutex::new(false)),
-        }
+        let (client, _) = Self::new_pair();
+        client
     }
 
-    #[allow(dead_code)]
-    pub fn get_written_data(&self) -> Vec<u8> {
-        let data = self.write_data.lock().unwrap().clone();
-        #[cfg(debug_assertions)]
-        println!("[MockTcpStream::get_written_data] Current written data (len={}): {:?}", 
-            data.len(), String::from_utf8_lossy(&data));
-        data
+    pub fn new_pair() -> (Self, Self) {
+        let read_data = Arc::new(Mutex::new(Vec::new()));
+        let write_data = Arc::new(Mutex::new(Vec::new()));
+        let shutdown = Arc::new(Mutex::new(false));
+
+        let client = MockTcpStream {
+            read_data: read_data.clone(),
+            write_data: write_data.clone(),
+            is_server: false,
+            shutdown: shutdown.clone(),
+        };
+
+        let server = MockTcpStream {
+            read_data: write_data,
+            write_data: read_data,
+            is_server: true,
+            shutdown,
+        };
+
+        (client, server)
     }
 
-    #[allow(dead_code)]
-    pub fn clear_written_data(&self) {
-        #[cfg(debug_assertions)]
-        println!("[MockTcpStream::clear_written_data] Clearing write buffer");
-        self.write_data.lock().unwrap().clear();
-    }
-
-    #[allow(dead_code)]
-    pub fn clear_read_data(&self) {
-        let mut read_data = self.read_data.lock().unwrap();
-        read_data.clear();
-    }
-
-    /// Shutdown the mock TCP stream and associated client handler
-    pub fn shutdown(&self, client_handler: &mut ClientHandler, handle: JoinHandle<()>) {
-        // Set shutdown flag
-        {
-            let mut shutdown = self.shutdown.lock().unwrap();
-            *shutdown = true;
-        }
-
-        // Shutdown client handler
-        client_handler.shutdown();
-
-        // Give time for shutdown to propagate and wait for handle
-        thread::sleep(Duration::from_millis(100));
-        handle.join().unwrap();
-    }
-
-    /// Wait for a specific pattern to be written to the stream
     pub fn wait_for_write(&self, pattern: &str, timeout_ms: u64) -> bool {
+        self.wait_for_pattern(pattern, timeout_ms)
+    }
+
+    pub fn wait_for_pattern(&self, pattern: &str, timeout_ms: u64) -> bool {
         let start_time = Instant::now();
         let pattern_bytes = pattern.as_bytes();
         
         loop {
-            // Check timeout
             if start_time.elapsed() > Duration::from_millis(timeout_ms) {
                 #[cfg(debug_assertions)]
-                println!("[MockTcpStream::wait_for_write] Timeout after {}ms", timeout_ms);
+                println!("[MockTcpStream::wait_for_pattern] Timeout after {}ms", timeout_ms);
                 return false;
             }
 
-            // Check shutdown flag
             if *self.shutdown.lock().unwrap() {
                 #[cfg(debug_assertions)]
-                println!("[MockTcpStream::wait_for_write] Stream is shutdown");
+                println!("[MockTcpStream::wait_for_pattern] Stream is shutdown");
                 return false;
             }
 
-            // Try to find pattern in written data
-            let mut data = self.write_data.lock().unwrap();
+            let data = self.write_data.lock().unwrap();
             if data.windows(pattern_bytes.len()).any(|window| window == pattern_bytes) {
                 #[cfg(debug_assertions)]
-                println!("[MockTcpStream::wait_for_write] Pattern found");
-                // Copy the response to read buffer
-                self.read_data.lock().unwrap().extend_from_slice(&data);
-                // Clear write buffer
-                data.clear();
+                println!("[MockTcpStream::wait_for_pattern] Pattern found");
                 return true;
             }
             
-            // No pattern found, release lock before sleeping
             drop(data);
-            
             #[cfg(debug_assertions)]
-            println!("[MockTcpStream::wait_for_write] No pattern found, sleeping");
+            println!("[MockTcpStream::wait_for_pattern] No pattern found, sleeping");
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    pub fn clear_written_data(&self) {
+        self.write_data.lock().unwrap().clear();
+    }
+
+    pub fn clear_read_data(&self) {
+        self.read_data.lock().unwrap().clear();
+    }
+
+    pub fn get_written_data(&self) -> Vec<u8> {
+        self.write_data.lock().unwrap().clone()
+    }
+
+    pub fn shutdown(self, client_handler: &mut ClientHandler, handle: JoinHandle<()>) {
+        {
+            let mut shutdown = self.shutdown.lock().unwrap();
+            *shutdown = true;
+        }
+        client_handler.shutdown();
+        thread::sleep(Duration::from_millis(100));
+        let _ = handle.join();
     }
 }
 
@@ -104,38 +104,26 @@ impl Read for MockTcpStream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let start_time = Instant::now();
         loop {
-            // Check timeout
             if start_time.elapsed() > Duration::from_secs(2) {
                 #[cfg(debug_assertions)]
-                println!("[MockTcpStream::read] Timeout after 2s, setting shutdown flag");
+                println!("[MockTcpStream::read] Timeout after 2s");
                 *self.shutdown.lock().unwrap() = true;
                 return Ok(0);
             }
 
-            // Check shutdown flag
             if *self.shutdown.lock().unwrap() {
-                #[cfg(debug_assertions)]
-                println!("[MockTcpStream::read] Stream is shutdown, returning 0");
                 return Ok(0);
             }
 
-            // Try to read data
             let mut data = self.read_data.lock().unwrap();
-            let n = std::cmp::min(buf.len(), data.len());
-            if n > 0 {
+            if !data.is_empty() {
+                let n = std::cmp::min(buf.len(), data.len());
                 buf[..n].copy_from_slice(&data[..n]);
-                *data = data[n..].to_vec();
-                #[cfg(debug_assertions)]
-                println!("[MockTcpStream::read] Read {} bytes, remaining data len: {}", n, data.len());
+                data.drain(..n);
                 return Ok(n);
             }
-            
-            // No data available, release lock before sleeping
             drop(data);
-            
-            #[cfg(debug_assertions)]
-            println!("[MockTcpStream::read] No data available, sleeping");
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(50));
         }
     }
 }
@@ -143,27 +131,20 @@ impl Read for MockTcpStream {
 impl Write for MockTcpStream {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         if *self.shutdown.lock().unwrap() {
-            #[cfg(debug_assertions)]
-            println!("[MockTcpStream::write] Stream is shutdown, returning error");
-            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Stream is shutdown"));
+            return Ok(0);
         }
-        #[cfg(debug_assertions)]
-        println!("[MockTcpStream::write] Writing {} bytes: {:?}", 
-            buf.len(), String::from_utf8_lossy(buf));
         self.write_data.lock().unwrap().extend_from_slice(buf);
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> Result<()> {
-        #[cfg(debug_assertions)]
-        println!("[MockTcpStream::flush] Flushing stream");
         Ok(())
     }
 }
 
 impl redis_starter_rust::redis::replication::TcpStreamTrait for MockTcpStream {
     fn peer_addr(&self) -> Result<std::net::SocketAddr> {
-        Ok("127.0.0.1:8080".parse().unwrap())
+        Ok("127.0.0.1:6379".parse().unwrap())
     }
 
     fn try_clone(&self) -> Result<Box<dyn redis_starter_rust::redis::replication::TcpStreamTrait>> {

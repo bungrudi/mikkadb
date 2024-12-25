@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 use std::collections::VecDeque;
 use crate::redis::{Redis, RedisCommand};
+use crate::redis::core::RedisResponse;
 use crate::resp::parse_resp;
 use crate::redis::replication::TcpStreamTrait;
 use crate::redis::xread_handler::{XReadHandler, XReadRequest};
@@ -53,35 +54,11 @@ impl ClientHandler {
         *self.shutdown.lock().unwrap() = true;
     }
 
-    fn format_response(&self, response: &str) -> String {
-        if response.is_empty() {
-            // Empty response means handler already wrote to stream directly
-            return response.to_string();
-        }
-
-        // For Redis CLI connections, we should return the response as-is
-        if !self.is_redis_connection {
-            return response.to_string();
-        }
-
-        // Redis-to-Redis communication formatting
-        if response.starts_with('+') || response.starts_with('-') || response.starts_with(':') {
-            // Convert simple string/error/integer to array with bulk string
-            let content = response[1..].trim_end_matches("\r\n");
-            format!("*1\r\n${}\r\n{}\r\n", content.len(), content)
-        } else if response.starts_with('$') {
-            // Convert bulk string to array with bulk string
-            format!("*1\r\n{}", response)
-        } else if response.starts_with('*') {
-            // Already in array format
-            response.to_string()
-        } else {
-            // Non-empty response without RESP prefix
-            format!("*1\r\n${}\r\n{}\r\n", response.len(), response)
-        }
+    fn format_response(&self, response: &RedisResponse) -> String {
+        response.format()
     }
 
-    pub fn execute_command(&mut self, command: &RedisCommand) -> String {
+    pub fn execute_command(&mut self, command: &RedisCommand) -> RedisResponse {
         let raw_response = match &command {
             RedisCommand::XRead { keys, ids, block, count } => {
                 #[cfg(debug_assertions)]
@@ -98,49 +75,48 @@ impl ClientHandler {
                 match handler.run_loop() {
                     Ok(results) => {
                         if results.is_empty() {
-                            "*-1\r\n".to_string()
+                            RedisResponse::Error("-1".to_string())
                         } else {
-                            let mut response = format!("*{}\r\n", results.len());
+                            let mut streams = Vec::new();
                             for (stream_key, entries) in results {
-                                if !entries.is_empty() {
-                                    response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
-                                        stream_key.len(), stream_key, entries.len()));
+                                let mut stream_entries = Vec::new();
+                                for entry in entries {
+                                    let mut entry_data = Vec::new();
+                                    entry_data.push(RedisResponse::BulkString(entry.id));
                                     
-                                    for entry in entries {
-                                        let field_count = entry.fields.len() * 2;
-                                        response.push_str(&format!("*2\r\n${}\r\n{}\r\n*{}\r\n", 
-                                            entry.id.len(), entry.id, field_count));
-                                        
-                                        for (field, value) in entry.fields {
-                                            response.push_str(&format!("${}\r\n{}\r\n${}\r\n{}\r\n",
-                                                field.len(), field, value.len(), value));
-                                        }
+                                    let mut fields = Vec::new();
+                                    for (field, value) in entry.fields {
+                                        fields.push(RedisResponse::BulkString(field));
+                                        fields.push(RedisResponse::BulkString(value));
                                     }
+                                    entry_data.push(RedisResponse::Array(fields));
+                                    stream_entries.push(RedisResponse::Array(entry_data));
                                 }
+                                
+                                let mut stream_data = Vec::new();
+                                stream_data.push(RedisResponse::BulkString(stream_key));
+                                stream_data.push(RedisResponse::Array(stream_entries));
+                                streams.push(RedisResponse::Array(stream_data));
                             }
-                            response
+                            RedisResponse::Array(streams)
                         }
                     },
-                    Err(e) => format!("-ERR {}\r\n", e)
+                    Err(e) => RedisResponse::Error(e)
                 }
             },
             RedisCommand::Multi => {
                 let mut in_transaction = self.in_transaction.lock().unwrap();
                 if *in_transaction {
-                    let error = "-ERR MULTI calls can not be nested\r\n".to_string();
-                    println!("{}", error.trim());
-                    error
+                    RedisResponse::Error("MULTI calls can not be nested".to_string())
                 } else {
                     *in_transaction = true;
-                    "+OK\r\n".to_string()
+                    RedisResponse::Ok("OK".to_string())
                 }
             },
             RedisCommand::Exec => {
                 let mut in_transaction = self.in_transaction.lock().unwrap();
                 if !*in_transaction {
-                    let error = "-ERR EXEC without MULTI\r\n".to_string();
-                    println!("{}", error.trim());
-                    error
+                    RedisResponse::Error("EXEC without MULTI".to_string())
                 } else {
                     *in_transaction = false;
                     let mut responses = Vec::new();
@@ -152,43 +128,47 @@ impl ClientHandler {
                             .expect("failed to lock redis")
                             .execute_command(&cmd, Some(&mut client));
                         match result {
-                            Ok(response) => responses.push(response),
-                            Err(_e) => {
-                                println!("{}", _e.trim());
-                                responses.push(_e)
+                            RedisResponse::Ok(response) => responses.push(RedisResponse::Ok(response)),
+                            RedisResponse::Error(e) => {
+                                println!("{}", e.trim());
+                                responses.push(RedisResponse::Error(e))
                             },
+                            RedisResponse::Retry => continue,
+                            RedisResponse::Array(items) => responses.push(RedisResponse::Array(items)),
+                            RedisResponse::BulkString(s) => responses.push(RedisResponse::BulkString(s)),
                         }
                     }
 
-                    let mut result = format!("*{}\r\n", responses.len());
-                    for response in responses {
-                        result.push_str(&response);
-                    }
+                    let mut result = RedisResponse::Array(responses);
                     result
                 }
             },
             RedisCommand::Discard => {
                 let mut in_transaction = self.in_transaction.lock().unwrap();
                 if !*in_transaction {
-                    let error = "-ERR DISCARD without MULTI\r\n".to_string();
-                    println!("{}", error.trim());
-                    error
+                    RedisResponse::Error("DISCARD without MULTI".to_string())
                 } else {
                     *in_transaction = false;
                     self.queued_commands.lock().unwrap().clear();
-                    "+OK\r\n".to_string()
+                    RedisResponse::Ok("OK".to_string())
                 }
             },
             _ => {
                 if *self.in_transaction.lock().unwrap() {
                     let owned_command = command.clone();
                     self.queued_commands.lock().unwrap().push_back(owned_command);
-                    "+QUEUED\r\n".to_string()
+                    RedisResponse::Ok("QUEUED".to_string())
                 } else {
                     // defer to redis.execute_command()
-                    match self.redis.lock().unwrap().execute_command(command, Some(&mut *self.client.lock().unwrap())) {
-                        Ok(response) => response,
-                        Err(e) => e,
+                    let mut redis_guard = self.redis.lock().unwrap();
+                    let mut client_guard = self.client.lock().unwrap();
+                    let response = redis_guard.execute_command(command, Some(&mut *client_guard));
+                    match response {
+                        RedisResponse::Ok(r) => RedisResponse::Ok(r),
+                        RedisResponse::Error(e) => RedisResponse::Error(e),
+                        RedisResponse::Retry => RedisResponse::Retry,
+                        RedisResponse::Array(items) => RedisResponse::Array(items),
+                        RedisResponse::BulkString(s) => RedisResponse::BulkString(s),
                     }
                 }
             }
@@ -218,8 +198,12 @@ impl ClientHandler {
 
                 // Read from client with minimal lock scope
                 let read_result = {
+                    println!("[CLIENT] Attempting to acquire client lock for read");
                     let mut client = handler.client.lock().unwrap();
-                    client.read(&mut read_buffer)
+                    println!("[CLIENT] Acquired client lock for read");
+                    let result = client.read(&mut read_buffer);
+                    println!("[CLIENT] Released client lock after read");
+                    result
                 };
 
                 match read_result {
@@ -228,7 +212,6 @@ impl ClientHandler {
                         break;
                     }
                     Ok(n) => {
-                        #[cfg(debug_assertions)]
                         println!("[CLIENT] Received {} bytes", n);
                         
                         buffer.extend_from_slice(&read_buffer[..n]);
@@ -238,7 +221,6 @@ impl ClientHandler {
                         if !commands.is_empty() {
                             buffer.clear();
 
-                            #[cfg(debug_assertions)]
                             println!("[CLIENT] Processing {} commands", commands.len());
 
                             // Handle multiple commands differently for Redis connections
@@ -246,15 +228,16 @@ impl ClientHandler {
                                 let mut responses = Vec::new();
                                 
                                 for command in commands {
-                                    #[cfg(debug_assertions)]
                                     println!("[CLIENT] Executing command: {:?}", command);
 
-                                    let response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
+                                    let mut response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
                                         let start = std::time::Instant::now();
                                         let mut sent_getack = false;
+                                        println!("[CLIENT] Attempting to acquire redis lock for command");
                                         let mut resp = handler.execute_command(&command);
-                                
-                                        while resp == "WAIT_RETRY" {
+                                        println!("[CLIENT] Released redis lock after command");
+                                        
+                                        while let RedisResponse::Retry = resp {
                                             thread::sleep(Duration::from_millis(50));
                                             let total_elapsed = start.elapsed().as_millis() as i64;
                                             let updated_command = RedisCommand::Wait {
@@ -264,24 +247,35 @@ impl ClientHandler {
                                             };
                                             
                                             if !sent_getack {
+                                                println!("[CLIENT] Attempting to acquire redis lock for getack");
                                                 if let Ok(redis) = handler.redis.lock() {
+                                                    println!("[CLIENT] Acquired redis lock for getack");
                                                     let _ = redis.replication.send_getack_to_replicas();
                                                     sent_getack = true;
                                                 }
+                                                println!("[CLIENT] Released redis lock after getack");
                                             }
                                             
                                             resp = handler.execute_command(&updated_command);
                                         }
                                         resp
                                     } else {
-                                        handler.execute_command(&command)
+                                        println!("[CLIENT] Attempting to acquire redis lock for command");
+                                        let resp = handler.execute_command(&command);
+                                        println!("[CLIENT] Released redis lock after command");
+                                        resp
                                     };
 
-                                    #[cfg(debug_assertions)]
-                                    println!("[CLIENT] Got response: {}", response.replace("\r\n", "\\r\\n"));
+                                    println!("[CLIENT] Got response: {}", response.format().replace("\r\n", "\\r\\n"));
 
-                                    if !response.is_empty() {
-                                        responses.push(response);
+                                    // Only send response if it's not a retry
+                                    if let RedisResponse::Retry = response {
+                                        continue;
+                                    }
+
+                                    let formatted = response.format();
+                                    if !formatted.is_empty() {
+                                        responses.push(formatted);
                                     }
                                 }
 
@@ -307,15 +301,16 @@ impl ClientHandler {
                             } else {
                                 // Handle single commands or non-Redis connections
                                 for command in commands {
-                                    #[cfg(debug_assertions)]
                                     println!("[CLIENT] Executing command: {:?}", command);
 
-                                    let response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
+                                    let mut response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
                                         let start = std::time::Instant::now();
                                         let mut sent_getack = false;
+                                        println!("[CLIENT] Attempting to acquire redis lock for command");
                                         let mut resp = handler.execute_command(&command);
+                                        println!("[CLIENT] Released redis lock after command");
                                         
-                                        while resp == "WAIT_RETRY" {
+                                        while let RedisResponse::Retry = resp {
                                             thread::sleep(Duration::from_millis(50));
                                             let total_elapsed = start.elapsed().as_millis() as i64;
                                             let updated_command = RedisCommand::Wait {
@@ -325,30 +320,37 @@ impl ClientHandler {
                                             };
                                             
                                             if !sent_getack {
+                                                println!("[CLIENT] Attempting to acquire redis lock for getack");
                                                 if let Ok(redis) = handler.redis.lock() {
+                                                    println!("[CLIENT] Acquired redis lock for getack");
                                                     let _ = redis.replication.send_getack_to_replicas();
                                                     sent_getack = true;
                                                 }
+                                                println!("[CLIENT] Released redis lock after getack");
                                             }
                                             
                                             resp = handler.execute_command(&updated_command);
                                         }
                                         resp
                                     } else {
-                                        handler.execute_command(&command)
+                                        println!("[CLIENT] Attempting to acquire redis lock for command");
+                                        let resp = handler.execute_command(&command);
+                                        println!("[CLIENT] Released redis lock after command");
+                                        resp
                                     };
 
-                                    #[cfg(debug_assertions)]
-                                    println!("[CLIENT] Got response: {}", response.replace("\r\n", "\\r\\n"));
+                                    println!("[CLIENT] Got response: {}", response.format().replace("\r\n", "\\r\\n"));
 
-                                    // Only send response if it's not empty and not already handled
-                                    if !response.is_empty() {
-                                        let formatted_response = handler.format_response(&response);
-                                        if !formatted_response.is_empty() {
-                                            let mut client = handler.client.lock().unwrap();
-                                            client.write_all(formatted_response.as_bytes()).unwrap();
-                                            client.flush().unwrap();
-                                        }
+                                    // Only send response if it's not a retry
+                                    if let RedisResponse::Retry = response {
+                                        continue;
+                                    }
+
+                                    let formatted = response.format();
+                                    if !formatted.is_empty() {
+                                        let mut client = handler.client.lock().unwrap();
+                                        client.write_all(formatted.as_bytes()).unwrap();
+                                        client.flush().unwrap();
                                     }
                                 }
                             }

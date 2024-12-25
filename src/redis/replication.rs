@@ -1,11 +1,8 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use crate::redis::replica::Replica;
+use std::sync::{Arc, Mutex};
 use std::io::{Read, Write, Result};
 use std::thread;
 use std::time::Duration;
-use std::sync::Arc;
 use std::net::SocketAddr;
 
 pub trait TcpStreamTrait: Read + Write + Send + 'static {
@@ -23,114 +20,109 @@ impl TcpStreamTrait for std::net::TcpStream {
     }
 }
 
+pub struct Replica {
+    pub host: String,
+    pub port: String,
+    pub stream: Box<dyn TcpStreamTrait>,
+    pub offset: u64,
+}
+
 pub struct ReplicationManager {
-    pub replicas: Mutex<HashMap<String, Replica>>,
-    pub replica_queue: Mutex<VecDeque<String>>,
-    replication_offset: AtomicU64, // bytes sent to replica (as master)
+    replicas: Arc<Mutex<HashMap<String, Replica>>>,
+    command_queue: Arc<Mutex<VecDeque<String>>>,
+    current_offset: Arc<Mutex<u64>>,
 }
 
 impl ReplicationManager {
     pub fn new() -> Self {
         ReplicationManager {
-            replicas: Mutex::new(HashMap::new()),
-            replica_queue: Mutex::new(VecDeque::new()),
-            replication_offset: AtomicU64::new(0),
+            replicas: Arc::new(Mutex::new(HashMap::new())),
+            command_queue: Arc::new(Mutex::new(VecDeque::new())),
+            current_offset: Arc::new(Mutex::new(0)),
         }
-    }
-
-    pub fn enqueue_for_replication(&self, command: &str) {
-        #[cfg(debug_assertions)]
-        println!("[REPL] Enqueueing command for replication: {}", command);
-        
-        self.replica_queue.lock().unwrap().push_back(command.to_string());
-        let new_offset = self.replication_offset.fetch_add(command.len() as u64, Ordering::SeqCst);
-        
-        #[cfg(debug_assertions)]
-        println!("[REPL] Updated replication offset: {} -> {}", new_offset, new_offset + command.len() as u64);
-    }
-
-    pub fn update_replica_offset(&self, replica_key: &str, offset: u64) {
-        if let Some(replica) = self.replicas.lock().unwrap().get_mut(replica_key) {
-            #[cfg(debug_assertions)]
-            println!("[REPL] Updating replica {} offset: {} -> {}", replica_key, replica.offset.load(Ordering::SeqCst), offset);
-            replica.offset.store(offset, Ordering::SeqCst);
-        } else {
-            #[cfg(debug_assertions)]
-            println!("[REPL] Error: Replica not found while updating offset: {}", replica_key);
-        }
-    }
-
-    pub fn get_replication_offset(&self) -> u64 {
-        self.replication_offset.load(Ordering::SeqCst)
-    }
-
-    pub fn count_up_to_date_replicas(&self) -> usize {
-        let current_offset = self.replication_offset.load(Ordering::SeqCst);
-        let count = self.replicas
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(key, replica)| {
-                let replica_offset = replica.offset.load(Ordering::SeqCst);
-                #[cfg(debug_assertions)]
-                println!("[REPL] Checking replica {} offset: {} against current: {}", 
-                    key, replica_offset, current_offset);
-                replica_offset >= current_offset
-            })
-            .count();
-        
-        #[cfg(debug_assertions)]
-        println!("[REPL] Found {} up-to-date replicas", count);
-        
-        count
     }
 
     pub fn add_replica(&mut self, host: String, port: String, stream: Box<dyn TcpStreamTrait>) {
-        let replica_key = format!("{}:{}", host, port);
-        let replica = Replica::new(host, port, stream);
+        let replica = Replica {
+            host: host.clone(),
+            port: port.clone(),
+            stream,
+            offset: 0,
+        };
+
+        let key = format!("{}:{}", host, port);
         #[cfg(debug_assertions)]
-        println!("[REPL] Adding new replica: {} (current replication offset: {})", replica_key, self.get_replication_offset());
+        println!("[REPL] Adding new replica: {} (current replication offset: {})", key, self.get_current_offset());
+        self.replicas.lock().unwrap().insert(key, replica);
         #[cfg(debug_assertions)]
-        println!("[REPL] Total replicas after add: {}", self.replicas.lock().unwrap().len() + 1);
-        self.replicas.lock().unwrap().insert(replica_key, replica);
+        println!("[REPL] Total replicas after add: {}", self.replicas.lock().unwrap().len());
     }
 
-    pub fn send_pending_commands(&self) -> bool {
-        let mut sent_commands = false;
-        let mut replica_queue = self.replica_queue.lock().unwrap();
-        
-        if !replica_queue.is_empty() {
+    pub fn enqueue_for_replication(&mut self, command: &str) {
+        let mut current_offset = self.current_offset.lock().unwrap();
+        *current_offset += command.len() as u64;
+        #[cfg(debug_assertions)]
+        println!("[REPL] Updated replication offset: {} -> {}", *current_offset - command.len() as u64, *current_offset);
+
+        #[cfg(debug_assertions)]
+        println!("[REPL] Enqueueing command for replication: {}", command);
+        self.command_queue.lock().unwrap().push_back(command.to_string());
+    }
+
+    pub fn send_pending_commands(&mut self) -> usize {
+        let mut queue = self.command_queue.lock().unwrap();
+        if !queue.is_empty() {
             #[cfg(debug_assertions)]
-            println!("[REPL] Found {} commands in replication queue", replica_queue.len());
-            
-            while let Some(replica_command) = replica_queue.pop_front() {
-                let replicas = self.replicas.lock().unwrap();
+            println!("[REPL] Found {} commands in replication queue", queue.len());
+            while let Some(command) = queue.pop_front() {
                 #[cfg(debug_assertions)]
-                println!("[REPL] Sending command to {} replicas: {}", replicas.len(), replica_command);
-                
-                for (_key, replica) in &*replicas {
-                    let mut stream = replica.stream.lock().unwrap();
-                    if let Err(e) = stream.write(replica_command.as_bytes()) {
-                        #[cfg(debug_assertions)]
-                        eprintln!("[REPL] Error writing to replica {}: {}", _key, e);
-                    }
+                println!("[REPL] Sending command to {} replicas: {}", self.replicas.lock().unwrap().len(), command);
+                for replica in self.replicas.lock().unwrap().values_mut() {
+                    let _ = replica.stream.write_all(command.as_bytes());
+                    let _ = replica.stream.flush();
                 }
-                sent_commands = true;
             }
         }
-        sent_commands
+        queue.len()
     }
 
     pub fn send_getack_to_replicas(&self) -> std::io::Result<()> {
         #[cfg(debug_assertions)]
         println!("[REPL] Sending GETACK to replicas");
-        
-        let replicas = self.replicas.lock().unwrap();
-        for (_key, replica) in &*replicas {
-            let mut stream = replica.stream.lock().unwrap();
-            stream.write_all(b"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n")?;
+        for replica in self.replicas.lock().unwrap().values_mut() {
+            let getack_command = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
+            replica.stream.write_all(getack_command.as_bytes())?;
+            replica.stream.flush()?;
         }
         Ok(())
+    }
+
+    pub fn update_replica_offset(&mut self, replica_key: &str, offset: u64) {
+        if let Some(replica) = self.replicas.lock().unwrap().get_mut(replica_key) {
+            #[cfg(debug_assertions)]
+            println!("[REPL] Updating replica {} offset: {} -> {}", replica_key, replica.offset, offset);
+            replica.offset = offset;
+        }
+    }
+
+    pub fn count_up_to_date_replicas(&self) -> usize {
+        let current_offset = *self.current_offset.lock().unwrap();
+        let mut count = 0;
+        for replica in self.replicas.lock().unwrap().values() {
+            #[cfg(debug_assertions)]
+            println!("[REPL] Checking replica {}:{} offset: {} against current: {}", 
+                replica.host, replica.port, replica.offset, current_offset);
+            if replica.offset >= current_offset {
+                count += 1;
+            }
+        }
+        #[cfg(debug_assertions)]
+        println!("[REPL] Found {} up-to-date replicas", count);
+        count
+    }
+
+    pub fn get_current_offset(&self) -> u64 {
+        *self.current_offset.lock().unwrap()
     }
 
     pub fn get_replicas(&self) -> std::sync::MutexGuard<HashMap<String, Replica>> {
@@ -142,7 +134,7 @@ impl ReplicationManager {
             let mut last_getack = std::time::Instant::now();
             loop {
                 {
-                    let redis = redis.lock().unwrap();
+                    let mut redis = redis.lock().unwrap();
                     redis.replication.send_pending_commands();
                     
                     // Send GETACK every 10 seconds
