@@ -41,7 +41,7 @@ fn test_multi_exec_basic() {
     assert_eq!(value, "42");
 
     // Cleanup
-    mock_stream.shutdown(&mut client_handler, handle);
+    mock_stream.shutdown();
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn test_nested_multi() {
     assert!(mock_stream.wait_for_write("-ERR MULTI calls can not be nested\r\n", 1000));
 
     // Cleanup
-    mock_stream.shutdown(&mut client_handler, handle);
+    mock_stream.shutdown();
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn test_exec_without_multi() {
     assert!(mock_stream.wait_for_write("-ERR EXEC without MULTI\r\n", 1000));
 
     // Cleanup
-    mock_stream.shutdown(&mut client_handler, handle);
+    mock_stream.shutdown();
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn test_discard_transaction() {
     assert!(redis.lock().unwrap().get("foo").is_none());
 
     // Cleanup
-    mock_stream.shutdown(&mut client_handler, handle);
+    mock_stream.shutdown();
 }
 
 #[test]
@@ -127,5 +127,5 @@ fn test_discard_without_multi() {
     assert!(mock_stream.wait_for_write("-ERR DISCARD without MULTI\r\n", 1000));
 
     // Cleanup
-    mock_stream.shutdown(&mut client_handler, handle);
+    mock_stream.shutdown();
 }

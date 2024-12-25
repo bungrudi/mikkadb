@@ -5,6 +5,7 @@ use super::xread_parser;
 pub enum RedisCommand {
     /// Represents an invalid or unrecognized command.
     /// This variant is used in pattern matching but never constructed directly.
+    #[allow(dead_code)]
     None,
     Multi,
     Exec,

@@ -258,7 +258,7 @@ fn test_xread_blocking_with_new_data() {
     assert!(!response.contains("old_value"), "Response should not contain old field value");
 
     // Clean shutdown
-    stream.shutdown(&mut client_handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -282,7 +282,7 @@ fn test_xread_non_blocking_empty() {
         "Should return nil for non-blocking empty read");
 
     // Clean shutdown
-    stream.shutdown(&mut client_handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn test_xread_blocking_timeout() {
         "Should return nil for blocking read timeout");
 
     // Clean shutdown
-    stream.shutdown(&mut client_handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -360,7 +360,7 @@ fn test_xread_blocking_multiple_streams_protocol() {
     }
 
     // Clean shutdown
-    stream.shutdown(&mut client_handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -408,7 +408,7 @@ fn test_xread_empty_vs_nil_response() {
         "Should return nil for blocking read timeout");
 
     // Clean shutdown
-    stream.shutdown(&mut client_handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -456,5 +456,5 @@ fn test_xread_empty_responses() {
         "Should return nil for blocking read timeout");
 
     // Clean shutdown
-    stream.shutdown(&mut client_handler, handle);
+    stream.shutdown();
 }

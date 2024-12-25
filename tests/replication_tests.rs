@@ -135,7 +135,7 @@ fn test_wait_command_with_ack() {
     // Wait for WAIT command response
     assert!(client_stream.wait_for_pattern(":1\r\n", 1000), "Missing WAIT response");
 
-    client_stream.shutdown(&mut client_handler, handle);
+    client_stream.shutdown();
 }
 
 #[test]
@@ -186,5 +186,5 @@ fn test_wait_command_timeout() {
     // The client handler will retry internally until timeout elapses
     assert!(client_stream.wait_for_pattern(":0\r\n", 1000), "Missing WAIT timeout response");
 
-    client_stream.shutdown(&mut client_handler, handle);
+    client_stream.shutdown();
 }

@@ -54,9 +54,9 @@ impl ClientHandler {
         *self.shutdown.lock().unwrap() = true;
     }
 
-    fn format_response(&self, response: &RedisResponse) -> String {
-        response.format()
-    }
+    // fn format_response(&self, response: &RedisResponse) -> String {
+    //     response.format()
+    // }
 
     pub fn execute_command(&mut self, command: &RedisCommand) -> RedisResponse {
         let raw_response = match &command {
@@ -139,8 +139,7 @@ impl ClientHandler {
                         }
                     }
 
-                    let mut result = RedisResponse::Array(responses);
-                    result
+                    RedisResponse::Array(responses)
                 }
             },
             RedisCommand::Discard => {
@@ -230,7 +229,7 @@ impl ClientHandler {
                                 for command in commands {
                                     println!("[CLIENT] Executing command: {:?}", command);
 
-                                    let mut response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
+                                    let response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
                                         let start = std::time::Instant::now();
                                         let mut sent_getack = false;
                                         println!("[CLIENT] Attempting to acquire redis lock for command");
@@ -303,7 +302,7 @@ impl ClientHandler {
                                 for command in commands {
                                     println!("[CLIENT] Executing command: {:?}", command);
 
-                                    let mut response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
+                                    let response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
                                         let start = std::time::Instant::now();
                                         let mut sent_getack = false;
                                         println!("[CLIENT] Attempting to acquire redis lock for command");

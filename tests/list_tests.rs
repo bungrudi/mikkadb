@@ -36,7 +36,7 @@ fn test_basic_list_push_operations() {
     }
     assert!(stream.wait_for_write("*2\r\n$5\r\nfirst\r\n$4\r\nlast\r\n", 1000));
 
-    stream.shutdown(&mut handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn test_list_pop_operations() {
     assert!(stream.wait_for_write(":1\r\n", 1000));
 
     sleep(Duration::from_millis(200));
-    stream.shutdown(&mut handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn test_empty_list_operations() {
     }
     assert!(stream.wait_for_write(":0\r\n", 1000));
 
-    stream.shutdown(&mut handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn test_list_range_operations() {
     }
     assert!(stream.wait_for_write("*2\r\n$5\r\nthree\r\n$4\r\nfour\r\n", 1000));
 
-    stream.shutdown(&mut handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn test_list_trim_operations() {
     // Small delay to ensure response is fully written
     std::thread::sleep(std::time::Duration::from_millis(50));
     
-    stream.shutdown(&mut handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn test_list_position_operations() {
     }
     assert!(stream.wait_for_write("*2\r\n:1\r\n:2\r\n", 1000));
 
-    stream.shutdown(&mut handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn test_list_insert_operations() {
     }
     assert!(stream.wait_for_write("*3\r\n$3\r\none\r\n$3\r\ntwo\r\n$5\r\nthree\r\n", 1000));
 
-    stream.shutdown(&mut handler, handle);
+    stream.shutdown();
 }
 
 #[test]
@@ -306,5 +306,5 @@ fn test_list_set_and_get_operations() {
     }
     assert!(stream.wait_for_write("*3\r\n$3\r\none\r\n$8\r\nmodified\r\n$5\r\nthree\r\n", 1000));
 
-    stream.shutdown(&mut handler, handle);
+    stream.shutdown();
 }

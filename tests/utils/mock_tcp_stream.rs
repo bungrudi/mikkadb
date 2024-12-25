@@ -63,7 +63,7 @@ impl MockTcpStream {
                 return false;
             }
 
-            let data = self.write_data.lock().unwrap();
+            let data = self.read_data.lock().unwrap();
             if data.windows(pattern_bytes.len()).any(|window| window == pattern_bytes) {
                 #[cfg(debug_assertions)]
                 println!("[MockTcpStream::wait_for_pattern] Pattern found");
@@ -89,14 +89,8 @@ impl MockTcpStream {
         self.write_data.lock().unwrap().clone()
     }
 
-    pub fn shutdown(self, client_handler: &mut ClientHandler, handle: JoinHandle<()>) {
-        {
-            let mut shutdown = self.shutdown.lock().unwrap();
-            *shutdown = true;
-        }
-        client_handler.shutdown();
-        thread::sleep(Duration::from_millis(100));
-        let _ = handle.join();
+    pub fn shutdown(&self) {
+        *self.shutdown.lock().unwrap() = true;
     }
 }
 
@@ -107,7 +101,6 @@ impl Read for MockTcpStream {
             if start_time.elapsed() > Duration::from_secs(2) {
                 #[cfg(debug_assertions)]
                 println!("[MockTcpStream::read] Timeout after 2s");
-                *self.shutdown.lock().unwrap() = true;
                 return Ok(0);
             }
 
@@ -131,7 +124,7 @@ impl Read for MockTcpStream {
 impl Write for MockTcpStream {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         if *self.shutdown.lock().unwrap() {
-            return Ok(0);
+            return Ok(0); // Just ignore writes after shutdown
         }
         self.write_data.lock().unwrap().extend_from_slice(buf);
         Ok(buf.len())

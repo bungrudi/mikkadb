@@ -125,9 +125,10 @@ impl ReplicationManager {
         *self.current_offset.lock().unwrap()
     }
 
-    pub fn get_replicas(&self) -> std::sync::MutexGuard<HashMap<String, Replica>> {
-        self.replicas.lock().unwrap()
-    }
+    // #[allow(dead_code)]
+    // pub fn get_replicas(&self) -> std::sync::MutexGuard<HashMap<String, Replica>> {
+    //     self.replicas.lock().unwrap()
+    // }
 
     pub fn start_replication_sync(redis: Arc<Mutex<crate::redis::Redis>>) {
         thread::spawn(move || {

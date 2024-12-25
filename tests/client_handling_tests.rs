@@ -21,6 +21,13 @@ fn read_response(stream: &mut MockTcpStream) -> std::io::Result<String> {
     Ok(response)
 }
 
+fn wait_for_response(stream: &mut MockTcpStream, expected: &str, timeout_ms: u64) -> std::io::Result<String> {
+    if !stream.wait_for_pattern(expected, timeout_ms) {
+        return Ok(String::new());
+    }
+    read_response(stream)
+}
+
 #[test]
 fn test_concurrent_set_get() -> std::io::Result<()> {
     #[cfg(debug_assertions)]
@@ -62,43 +69,52 @@ fn test_concurrent_set_get() -> std::io::Result<()> {
 
     // Client 1 operations
     send_command(&mut client1, "*3\r\n$3\r\nSET\r\n$4\r\nkey1\r\n$6\r\nvalue1\r\n")?;
-    client1.wait_for_pattern("+OK\r\n", 1000);
-    let response1 = read_response(&mut client1)?;
+    let response1 = wait_for_response(&mut client1, "+OK\r\n", 1000)?;
     assert_eq!(response1, "+OK\r\n");
 
     send_command(&mut client1, "*2\r\n$3\r\nGET\r\n$4\r\nkey1\r\n")?;
-    client1.wait_for_pattern("$6\r\nvalue1\r\n", 1000);
-    let response1 = read_response(&mut client1)?;
+    let response1 = wait_for_response(&mut client1, "$6\r\nvalue1\r\n", 1000)?;
     assert_eq!(response1, "$6\r\nvalue1\r\n");
 
     // Client 2 operations
     send_command(&mut client2, "*3\r\n$3\r\nSET\r\n$4\r\nkey2\r\n$6\r\nvalue2\r\n")?;
-    client2.wait_for_pattern("+OK\r\n", 1000);
-    let response2 = read_response(&mut client2)?;
+    let response2 = wait_for_response(&mut client2, "+OK\r\n", 1000)?;
     assert_eq!(response2, "+OK\r\n");
 
     send_command(&mut client2, "*2\r\n$3\r\nGET\r\n$4\r\nkey2\r\n")?;
-    client2.wait_for_pattern("$6\r\nvalue2\r\n", 1000);
-    let response2 = read_response(&mut client2)?;
+    let response2 = wait_for_response(&mut client2, "$6\r\nvalue2\r\n", 1000)?;
     assert_eq!(response2, "$6\r\nvalue2\r\n");
 
     // Client 3 operations
     send_command(&mut client3, "*3\r\n$3\r\nSET\r\n$4\r\nkey3\r\n$6\r\nvalue3\r\n")?;
-    client3.wait_for_pattern("+OK\r\n", 1000);
-    let response3 = read_response(&mut client3)?;
+    let response3 = wait_for_response(&mut client3, "+OK\r\n", 1000)?;
     assert_eq!(response3, "+OK\r\n");
 
     send_command(&mut client3, "*2\r\n$3\r\nGET\r\n$4\r\nkey3\r\n")?;
-    client3.wait_for_pattern("$6\r\nvalue3\r\n", 1000);
-    let response3 = read_response(&mut client3)?;
+    let response3 = wait_for_response(&mut client3, "$6\r\nvalue3\r\n", 1000)?;
     assert_eq!(response3, "$6\r\nvalue3\r\n");
 
-    // Shutdown
+    // Shutdown gracefully
     #[cfg(debug_assertions)]
     println!("[TEST] Shutting down client handlers");
-    client1.shutdown(&mut client_handler1, handle1);
-    client2.shutdown(&mut client_handler2, handle2);
-    client3.shutdown(&mut client_handler3, handle3);
+    
+    // First shutdown client handlers
+    client_handler1.shutdown();
+    client_handler2.shutdown();
+    client_handler3.shutdown();
+    
+    // Wait for handlers to process shutdown
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    
+    // Then shutdown streams
+    client1.shutdown();
+    client2.shutdown();
+    client3.shutdown();
+    
+    // Wait for threads to finish
+    let _ = handle1.join();
+    let _ = handle2.join();
+    let _ = handle3.join();
 
     Ok(())
 }
