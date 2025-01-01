@@ -353,11 +353,15 @@ impl RedisCommand {
                 } else {
                     let key = params[0].clone();
                     let element = params[1].clone();
-                    let count = if params.len() > 2 {
-                        params[2].parse::<i64>().ok()
-                    } else {
-                        None
-                    };
+                    let mut count = None;
+                    let mut i = 2;
+                    while i < params.len() {
+                        if params[i].eq_ignore_ascii_case("COUNT") && i + 1 < params.len() {
+                            count = params[i + 1].parse::<i64>().ok();
+                            break;
+                        }
+                        i += 1;
+                    }
                     if key.is_empty() || element.is_empty() {
                         None
                     } else {

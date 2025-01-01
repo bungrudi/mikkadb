@@ -59,14 +59,15 @@ impl ReplicationManager {
     }
 
     pub fn enqueue_for_replication(&mut self, command: &str) {
+        #[cfg(debug_assertions)]
+        println!("[REPL] Enqueueing command for replication: {}", command);
+        self.command_queue.lock().unwrap().push_back(command.to_string());
+        
+        // Update current offset immediately when command is enqueued
         let mut current_offset = self.current_offset.lock().unwrap();
         *current_offset += command.len() as u64;
         #[cfg(debug_assertions)]
         println!("[REPL] Updated replication offset: {} -> {}", *current_offset - command.len() as u64, *current_offset);
-
-        #[cfg(debug_assertions)]
-        println!("[REPL] Enqueueing command for replication: {}", command);
-        self.command_queue.lock().unwrap().push_back(command.to_string());
     }
 
     pub fn send_pending_commands(&mut self) -> usize {
@@ -74,25 +75,64 @@ impl ReplicationManager {
         if !queue.is_empty() {
             #[cfg(debug_assertions)]
             println!("[REPL] Found {} commands in replication queue", queue.len());
-            while let Some(command) = queue.pop_front() {
-                #[cfg(debug_assertions)]
-                println!("[REPL] Sending command to {} replicas: {}", self.replicas.lock().unwrap().len(), command);
-                for replica in self.replicas.lock().unwrap().values_mut() {
-                    let _ = replica.stream.write_all(command.as_bytes());
-                    let _ = replica.stream.flush();
+            
+            // Get all commands first
+            let commands: Vec<String> = queue.drain(..).collect();
+            let mut sent_count = 0;
+            
+            // Send all commands to each replica
+            for replica in self.replicas.lock().unwrap().values_mut() {
+                for command in &commands {
+                    #[cfg(debug_assertions)]
+                    println!("[REPL] Sending command to replica: {}", command);
+                    
+                    match (replica.stream.write_all(command.as_bytes()), replica.stream.flush()) {
+                        (Ok(_), Ok(_)) => {
+                            // Only increment sent count, don't update offset
+                            // Offset will be updated when replica sends REPLCONF ACK
+                            sent_count += 1;
+                        }
+                        (Err(e), _) | (_, Err(e)) => {
+                            #[cfg(debug_assertions)]
+                            println!("[REPL] Error sending command to replica: {}", e);
+                        }
+                    }
                 }
             }
+            
+            sent_count
+        } else {
+            0
         }
-        queue.len()
     }
 
     pub fn send_getack_to_replicas(&self) -> std::io::Result<()> {
         #[cfg(debug_assertions)]
         println!("[REPL] Sending GETACK to replicas");
-        for replica in self.replicas.lock().unwrap().values_mut() {
+        
+        let mut replicas = self.replicas.lock().unwrap();
+        if replicas.is_empty() {
+            #[cfg(debug_assertions)]
+            println!("[REPL] No replicas to send GETACK to");
+            return Ok(());
+        }
+        
+        for replica in replicas.values_mut() {
+            #[cfg(debug_assertions)]
+            println!("[REPL] Sending GETACK to replica {}:{} (current offset: {})", replica.host, replica.port, replica.offset);
+            
             let getack_command = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
-            replica.stream.write_all(getack_command.as_bytes())?;
-            replica.stream.flush()?;
+            match (replica.stream.write_all(getack_command.as_bytes()), replica.stream.flush()) {
+                (Ok(_), Ok(_)) => {
+                    #[cfg(debug_assertions)]
+                    println!("[REPL] Successfully sent GETACK to replica {}:{}", replica.host, replica.port);
+                },
+                (Err(e), _) | (_, Err(e)) => {
+                    #[cfg(debug_assertions)]
+                    println!("[REPL] Error sending GETACK to replica {}:{}: {}", replica.host, replica.port, e);
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
@@ -107,17 +147,36 @@ impl ReplicationManager {
 
     pub fn count_up_to_date_replicas(&self) -> usize {
         let current_offset = *self.current_offset.lock().unwrap();
-        let mut count = 0;
-        for replica in self.replicas.lock().unwrap().values() {
+        let replicas = self.replicas.lock().unwrap();
+        
+        #[cfg(debug_assertions)]
+        println!("[REPL] Counting up-to-date replicas. Current offset: {}", current_offset);
+        
+        // If there are no replicas, return 0 immediately
+        if replicas.is_empty() {
             #[cfg(debug_assertions)]
-            println!("[REPL] Checking replica {}:{} offset: {} against current: {}", 
+            println!("[REPL] No replicas found");
+            return 0;
+        }
+        
+        let mut count = 0;
+        for replica in replicas.values() {
+            #[cfg(debug_assertions)]
+            println!("[REPL] Checking replica {}:{} - offset: {} against current: {}", 
                 replica.host, replica.port, replica.offset, current_offset);
             if replica.offset >= current_offset {
                 count += 1;
+                #[cfg(debug_assertions)]
+                println!("[REPL] Replica {}:{} is up to date", replica.host, replica.port);
+            } else {
+                #[cfg(debug_assertions)]
+                println!("[REPL] Replica {}:{} is behind (offset {} < current {})", 
+                    replica.host, replica.port, replica.offset, current_offset);
             }
         }
+        
         #[cfg(debug_assertions)]
-        println!("[REPL] Found {} up-to-date replicas", count);
+        println!("[REPL] Found {} up-to-date replicas out of {}", count, replicas.len());
         count
     }
 

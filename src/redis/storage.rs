@@ -175,11 +175,11 @@ impl Storage {
                 if len == 0 {
                     return vec![];
                 }
-                let (start, stop) = normalize_indices(start, stop, len);
-                if start > stop {
+                let (start, stop) = self.normalize_indices(start, stop, len);
+                if start >= stop {
                     return vec![];
                 }
-                values[start..=stop].to_vec()
+                values[start..stop].to_vec()
             } else {
                 vec![]
             }
@@ -188,104 +188,92 @@ impl Storage {
         }
     }
 
-   pub fn ltrim(&self, key: &str, start: i64, stop: i64) -> Result<(), String> {
+   pub fn ltrim(&mut self, key: &str, start: i64, stop: i64) -> Result<(), String> {
         if let Some(mut entry) = self.data.get_mut(key) {
-            if let ValueWrapper::List { values } = &mut *entry {
+            if let ValueWrapper::List { values } = entry.value_mut() {
                 let len = values.len() as i64;
-                if len == 0 {
-                    return Ok(());
-                }
-                let (start, stop) = normalize_indices(start, stop, len);
-                if start > stop {
+                let (start_idx, stop_idx) = self.normalize_indices(start, stop, len);
+                if start_idx >= values.len() || start_idx >= stop_idx {
                     values.clear();
                 } else {
-                    values.drain(start..=stop);
+                    // First remove elements from the end
+                    if stop_idx < values.len() {
+                        values.drain(stop_idx..);
+                    }
+                    // Then remove elements from the start
+                    values.drain(..start_idx);
                 }
-                return Ok(());
+                Ok(())
+            } else {
+                Err("ERR value is not a list".to_string())
             }
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
-   pub fn lpos(&self, key: &str, element: &str, rank: Option<i64>, count: Option<i64>) -> Result<String, String> {
+   pub fn lpos(&self, key: &str, element: &str, count: Option<usize>) -> Option<Vec<usize>> {
         if let Some(entry) = self.data.get(key) {
             if let ValueWrapper::List { values } = &*entry {
-                let mut results = Vec::new();
-                let start_index = if let Some(rank) = rank {
-                    if rank >= 0 {
-                        rank as usize
-                    } else {
-                        (values.len() as i64 + rank) as usize
-                    }
-                } else {
-                    0
-                };
-
-                for (i, val) in values.iter().enumerate().skip(start_index) {
+                let mut positions = Vec::new();
+                for (i, val) in values.iter().enumerate() {
                     if val == element {
-                        results.push(i);
-                        if let Some(num) = count {
-                            if results.len() >= num as usize {
+                        positions.push(i);
+                        if let Some(c) = count {
+                            if positions.len() >= c {
                                 break;
                             }
+                        } else {
+                            break;  // If no count specified, only return first match
                         }
                     }
                 }
-
-                if results.is_empty() {
-                    Ok("*-1\r\n".to_string())
-                } else if count.is_none() || count == Some(1) {
-                    Ok(format!(":{}\r\n", results[0]))
+                if positions.is_empty() {
+                    None  // Element not found
                 } else {
-                    let mut response = format!("*{}\r\n", results.len());
-                    for pos in results {
-                        response.push_str(&format!(":{}\r\n", pos));
-                    }
-                    Ok(response)
+                    Some(positions)
                 }
             } else {
-                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
+                None
             }
         } else {
-            Ok(":-1\r\n".to_string())
+            None  // Key doesn't exist
         }
     }
 
-    pub fn linsert(&self, key: &str, before: bool, pivot: &str, element: &str) -> Result<i64, String> {
+    pub fn linsert(&self, key: &str, before: bool, pivot: &str, element: &str) -> Option<usize> {
         match self.data.get_mut(key) {
             Some(mut entry) => match entry.value_mut() {
                 ValueWrapper::List { values } => {
                     if let Some(pos) = values.iter().position(|x| x == pivot) {
                         let insert_pos = if before { pos } else { pos + 1 };
                         values.insert(insert_pos, element.to_string());
-                        Ok(values.len() as i64)
+                        Some(values.len())
                     } else {
-                        Ok(-1)
+                        Some(0)
                     }
                 },
-                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+                _ => None,
             },
-            None => Ok(0),
+            None => Some(0),
         }
     }
 
-    pub fn lset(&self, key: &str, index: i64, element: &str) -> Result<(), String> {
-        match self.data.get_mut(key) {
-            Some(mut entry) => match entry.value_mut() {
-                ValueWrapper::List { values } => {
-                    let len = values.len() as i64;
-                    let normalized_index = if index < 0 { len + index } else { index };
-                    
-                    if normalized_index < 0 || normalized_index >= len {
-                        return Err("ERR index out of range".to_string());
-                    }
-                    
-                    values[normalized_index as usize] = element.to_string();
-                    Ok(())
-                },
-                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
-            },
-            None => Err("ERR no such key".to_string()),
+    pub fn lset(&mut self, key: &str, index: i64, element: &str) -> Result<(), String> {
+        if let Some(mut entry) = self.data.get_mut(key) {
+            if let ValueWrapper::List { values } = entry.value_mut() {
+                let len = values.len() as i64;
+                let idx = if index < 0 { len + index } else { index };
+                if idx < 0 || idx >= len {
+                    return Err("ERR index out of range".to_string());
+                }
+                values[idx as usize] = element.to_string();
+                Ok(())
+            } else {
+                Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
+            }
+        } else {
+            Err("ERR no such key".to_string())
         }
     }
 
@@ -294,12 +282,11 @@ impl Storage {
             Some(entry) => match entry.value() {
                 ValueWrapper::List { values } => {
                     let len = values.len() as i64;
-                    let normalized_index = if index < 0 { len + index } else { index };
-                    
-                    if normalized_index < 0 || normalized_index >= len {
+                    let index = if index < 0 { len + index } else { index };
+                    if index < 0 || index >= len {
                         None
                     } else {
-                        Some(values[normalized_index as usize].clone())
+                        Some(values[index as usize].clone())
                     }
                 },
                 _ => None,
@@ -544,18 +531,12 @@ impl Storage {
             None => None,
         }
     }
-}
 
-fn normalize_indices(start: i64, stop: i64, len: i64) -> (usize, usize) {
-    let start = if start < 0 {
-        (len + start).max(0)
-    } else {
-        start.min(len)
-    } as usize;
-    let stop = if stop < 0 {
-        (len + stop + 1).max(0)
-    } else {
-        (stop + 1).min(len)
-    } as usize;
-    (start, stop)
+    pub fn normalize_indices(&self, start: i64, stop: i64, len: i64) -> (usize, usize) {
+        let start_idx = if start < 0 { len + start } else { start };
+        let stop_idx = if stop < 0 { len + stop } else { stop };
+        let start_idx = start_idx.max(0) as usize;
+        let stop_idx = (stop_idx.min(len - 1) + 1) as usize;  // +1 to make range exclusive
+        (start_idx, stop_idx)
+    }
 }

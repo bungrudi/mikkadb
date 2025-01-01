@@ -26,15 +26,15 @@ impl MockTcpStream {
         let shutdown = Arc::new(Mutex::new(false));
 
         let client = MockTcpStream {
-            read_data: read_data.clone(),
-            write_data: write_data.clone(),
+            read_data: write_data.clone(),
+            write_data: read_data.clone(),
             is_server: false,
             shutdown: shutdown.clone(),
         };
 
         let server = MockTcpStream {
-            read_data: write_data,
-            write_data: read_data,
+            read_data: read_data,
+            write_data: write_data,
             is_server: true,
             shutdown,
         };

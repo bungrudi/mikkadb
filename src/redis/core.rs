@@ -3,7 +3,8 @@ use std::io::Write;
 use base64::engine::general_purpose;
 use base64::Engine;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::thread;
 use std::collections::{HashMap, BTreeMap};
 
 use crate::redis::config::RedisConfig;
@@ -20,22 +21,28 @@ pub enum RedisResponse {
     Error(String),
     Array(Vec<RedisResponse>),
     BulkString(String),
+    NullBulkString,
+    Integer(i64),
+    SimpleString(String),
 }
 
 impl RedisResponse {
     pub fn format(&self) -> String {
         match self {
-            RedisResponse::Ok(msg) => msg.clone(),
-            RedisResponse::Error(err) => format!("-{}\r\n", err),
-            RedisResponse::Retry => unreachable!("Retry should be handled internally"),
-            RedisResponse::Array(items) => {
-                let mut response = format!("*{}\r\n", items.len());
-                for item in items {
-                    response.push_str(&item.format());
-                }
-                response
-            },
+            RedisResponse::Ok(s) => format!("+{}\r\n", s),
+            RedisResponse::Error(e) => format!("-{}\r\n", e),
+            RedisResponse::SimpleString(s) => format!("+{}\r\n", s),
+            RedisResponse::Integer(i) => format!(":{}\r\n", i),
             RedisResponse::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s),
+            RedisResponse::NullBulkString => "$-1\r\n".to_string(),
+            RedisResponse::Array(arr) => {
+                let mut result = format!("*{}\r\n", arr.len());
+                for item in arr {
+                    result.push_str(&item.format());
+                }
+                result
+            },
+            RedisResponse::Retry => String::new(),
         }
     }
 }
@@ -121,9 +128,9 @@ impl Redis {
             RedisCommand::None => {
                 RedisResponse::Error("Unknown command".to_string())
             },
-            RedisCommand::Multi => RedisResponse::Ok("+OK\r\n".to_string()),
-            RedisCommand::Exec => RedisResponse::Ok("*0\r\n".to_string()),
-            RedisCommand::Discard => RedisResponse::Ok("+OK\r\n".to_string()),
+            RedisCommand::Multi => RedisResponse::Ok("OK".to_string()),
+            RedisCommand::Exec => RedisResponse::Ok("*0".to_string()),
+            RedisCommand::Discard => RedisResponse::Ok("OK".to_string()),
             RedisCommand::Ping => {
                 if self.config.replicaof_host.is_some() {
                     // We're a replica, respond with REPLCONF ACK
@@ -140,7 +147,7 @@ impl Redis {
                     }
                 } else {
                     // We're not a replica, respond with normal PONG
-                    RedisResponse::Ok("+PONG\r\n".to_string())
+                    RedisResponse::Ok("PONG".to_string())
                 }
             },
             RedisCommand::Echo { data } => RedisResponse::BulkString(data.clone()),
@@ -153,7 +160,7 @@ impl Redis {
             RedisCommand::Set { key, value, ttl, original_resp } => {
                 self.set(key, value, *ttl);
                 self.enqueue_for_replication(original_resp);
-                RedisResponse::Ok("+OK\r\n".to_string())
+                RedisResponse::Ok("OK".to_string())
             },
             RedisCommand::Type { key } => {
                 let type_str = self.storage.get_type(key).into_owned();
@@ -161,74 +168,85 @@ impl Redis {
             },
             RedisCommand::Incr { key } => {
                 match self.storage.incr(key) {
-                    Ok(value) => RedisResponse::BulkString(format!("{}", value)),
+                    Ok(value) => RedisResponse::Integer(value),
                     Err(e) => RedisResponse::Error(format!("{}", e)),
                 }
             },
             RedisCommand::LPush { key, value } => {
                 match self.storage.lpush(key, value) {
-                    Ok(len) => RedisResponse::BulkString(format!("{}", len)),
+                    Ok(len) => RedisResponse::Integer(len),
                     Err(e) => RedisResponse::Error(format!("{}", e)),
                 }
             },
             RedisCommand::RPush { key, value } => {
                 match self.storage.rpush(key, value) {
-                    Ok(len) => RedisResponse::BulkString(format!("{}", len)),
+                    Ok(len) => RedisResponse::Integer(len),
                     Err(e) => RedisResponse::Error(format!("{}", e)),
                 }
             },
             RedisCommand::LPop { key } => {
                 match self.storage.lpop(key) {
                     Some(value) => RedisResponse::BulkString(value),
-                    None => RedisResponse::BulkString("".to_string()),
+                    None => RedisResponse::NullBulkString,
                 }
             },
             RedisCommand::RPop { key } => {
                 match self.storage.rpop(key) {
                     Some(value) => RedisResponse::BulkString(value),
-                    None => RedisResponse::BulkString("".to_string()),
+                    None => RedisResponse::NullBulkString,
                 }
             },
             RedisCommand::LLen { key } => {
                 let len = self.storage.llen(key);
-                RedisResponse::BulkString(format!("{}", len))
+                RedisResponse::Integer(len as i64)
             },
             RedisCommand::LRange { key, start, stop } => {
                 let values = self.storage.lrange(key, *start, *stop);
-                let mut response = Vec::new();
-                for value in values {
-                    response.push(RedisResponse::BulkString(value));
+                if values.is_empty() {
+                    RedisResponse::Array(vec![])
+                } else {
+                    RedisResponse::Array(
+                        values.iter()
+                            .map(|value| RedisResponse::BulkString(value.to_string()))
+                            .collect()
+                    )
                 }
-                RedisResponse::Array(response)
             },
             RedisCommand::LTrim { key, start, stop } => {
                 match self.storage.ltrim(key, *start, *stop) {
-                    Ok(_) => RedisResponse::Ok("+OK\r\n".to_string()),
-                    Err(e) => RedisResponse::Error(format!("{}", e)),
-                }
-            },
-            RedisCommand::LPos { key, element, count } => {
-                match self.storage.lpos(key, element, None, *count) {
-                    Ok(response) => RedisResponse::BulkString(response),
-                    Err(err) => RedisResponse::Error(err),
-                }
-            },
-            RedisCommand::LInsert { key, before, pivot, element } => {
-                match self.storage.linsert(key, *before, pivot, element) {
-                    Ok(len) => RedisResponse::BulkString(format!("{}", len)),
-                    Err(e) => RedisResponse::Error(format!("{}", e)),
-                }
-            },
-            RedisCommand::LSet { key, index, element } => {
-                match self.storage.lset(key, *index, element) {
-                    Ok(_) => RedisResponse::Ok("+OK\r\n".to_string()),
-                    Err(e) => RedisResponse::Error(format!("{}", e)),
+                    Ok(_) => RedisResponse::Ok("OK".to_string()),
+                    Err(e) => RedisResponse::Error(e),
                 }
             },
             RedisCommand::LIndex { key, index } => {
                 match self.storage.lindex(key, *index) {
                     Some(value) => RedisResponse::BulkString(value),
-                    None => RedisResponse::BulkString("".to_string()),
+                    None => RedisResponse::NullBulkString,
+                }
+            },
+            RedisCommand::LPos { key, element, count } => {
+                match self.storage.lpos(key, element, count.map(|c| c as usize)) {
+                    Some(positions) if positions.is_empty() => RedisResponse::Integer(-1),
+                    Some(positions) => {
+                        if count.is_some() {
+                            RedisResponse::Array(positions.iter().map(|&pos| RedisResponse::Integer(pos as i64)).collect())
+                        } else {
+                            RedisResponse::Integer(positions[0] as i64)
+                        }
+                    },
+                    None => RedisResponse::Integer(-1)
+                }
+            },
+            RedisCommand::LInsert { key, before, pivot, element } => {
+                match self.storage.linsert(key, *before, pivot, element) {
+                    Some(len) => RedisResponse::Integer(len as i64),
+                    None => RedisResponse::Integer(-1),
+                }
+            },
+            RedisCommand::LSet { key, index, element } => {
+                match self.storage.lset(key, *index, element) {
+                    Ok(_) => RedisResponse::SimpleString("OK".to_string()),
+                    Err(e) => RedisResponse::Error(e),
                 }
             },
             RedisCommand::XAdd { key, id, fields, original_resp } => {
@@ -266,21 +284,24 @@ impl Redis {
                 RedisResponse::Error("ERR XREAD command is handled by XReadHandler".to_string())
             },
             RedisCommand::Info { subcommand } => {
-                match subcommand.as_str() {
-                    "replication" => {
-                        let ret = if self.config.replicaof_host.is_some() {
-                            format!("role:slave\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nmaster_host:{}\r\nmaster_port:{}",
-                                    gen_replid(),
-                                    self.config.replicaof_host.as_ref().unwrap(),
-                                    self.config.replicaof_port.as_ref().unwrap())
-                        } else {
-                            format!("role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:0\r\nconnected_slaves:0",
-                                    gen_replid())
-                        };
-                        RedisResponse::BulkString(ret)
-                    },
-                    _ => RedisResponse::Error(format!("Unknown INFO subcommand: {}", subcommand)),
+                let mut info = String::new();
+                
+                // Add replication info
+                info.push_str("# Replication\n");
+                if self.config.replicaof_host.is_some() {
+                    info.push_str("role:slave\n");
+                    info.push_str(&format!("master_replid:{}\n", gen_replid()));
+                    info.push_str(&format!("master_repl_offset:0\n"));
+                    info.push_str(&format!("master_host:{}\n", self.config.replicaof_host.as_ref().unwrap()));
+                    info.push_str(&format!("master_port:{}\n", self.config.replicaof_port.as_ref().unwrap()));
+                } else {
+                    info.push_str("role:master\n");
+                    info.push_str(&format!("master_replid:{}\n", gen_replid()));
+                    info.push_str(&format!("master_repl_offset:0\n"));
+                    info.push_str(&format!("connected_slaves:0\n"));
                 }
+                
+                RedisResponse::BulkString(info)
             },
             RedisCommand::Replconf { subcommand, params } => {
                 match subcommand.to_lowercase().as_str() {
@@ -294,14 +315,14 @@ impl Redis {
                                 println!("replica_host: {} replica_port: {}", replica_host, _port);
 
                                 self.replication.add_replica(replica_host, real_port.to_string(), client.try_clone().unwrap());
-                                return RedisResponse::Ok("+OK\r\n".to_string());
+                                return RedisResponse::Ok("+OK".to_string());
                             }
                         }
                         RedisResponse::Error("Cannot establish replica connection".to_string())
                     },
                     "capa" => {
                         // TODO: Implement the actual logic for these subcommands
-                        RedisResponse::Ok("+OK\r\n".to_string())
+                        RedisResponse::Ok("+OK".to_string())
                     },
                     "ack" => {
                         if let Some(offset_str) = params.get(0) {
@@ -338,7 +359,7 @@ impl Redis {
             RedisCommand::Psync { replica_id, offset } => {
                 if *offset == -1 && *replica_id == "?" {
                     if let Some(client) = client {
-                        let _ = client.write(format!("+FULLRESYNC {} {}\r\n", gen_replid(), 0).as_bytes());
+                        let _ = client.write(format!("+FULLRESYNC {} {}", gen_replid(), 0).as_bytes());
 
                         let rdb_file_base64 = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
                         // Decode the base64 string into a byte array
@@ -356,24 +377,48 @@ impl Redis {
             },
             RedisCommand::Wait { numreplicas, timeout, elapsed } => {
                 #[cfg(debug_assertions)]
-                println!("executing WAIT command");
+                println!("[WAIT] Starting WAIT command execution: target_replicas={}, timeout={}ms, elapsed={}ms", numreplicas, timeout, elapsed);
+                
+                // Send initial GETACK to replicas to get their current offsets
+                #[cfg(debug_assertions)]
+                println!("[WAIT] Sending GETACK to replicas");
+                
+                let mut elapsed_time = *elapsed;
+                let start = std::time::Instant::now();
 
-                // First, ensure all pending commands are sent to replicas
-                let _sent_commands = self.replication.send_pending_commands();
-                
-                // Check current state
-                let up_to_date_replicas = self.replication.count_up_to_date_replicas();
-                
-                if up_to_date_replicas >= *numreplicas as usize {
-                    RedisResponse::BulkString(format!("{}", up_to_date_replicas))
-                } else if *elapsed >= *timeout {
+                while elapsed_time < *timeout {
+                    // Send GETACK to replicas
+                    if let Err(_) = self.replication.send_getack_to_replicas() {
+                        #[cfg(debug_assertions)]
+                        println!("[WAIT] Failed to send GETACK to replicas");
+                        return RedisResponse::Integer(0);
+                    }
+
+                    // Give replicas a chance to respond
+                    thread::sleep(Duration::from_millis(10));
+
+                    // Check if we have enough replicas
                     #[cfg(debug_assertions)]
-                    println!("timeout elapsed returning up_to_date_replicas: {} target ack: {}", up_to_date_replicas, numreplicas);
-                    RedisResponse::BulkString(format!("{}", up_to_date_replicas))
-                } else {
-                    // Need to retry - commands sent but not enough ACKs yet
-                    RedisResponse::Retry
+                    println!("[WAIT] Checking replica acknowledgments");
+                    
+                    let acks = self.replication.count_up_to_date_replicas();
+                    if acks >= *numreplicas as usize {
+                        #[cfg(debug_assertions)]
+                        println!("[WAIT] Found {} up-to-date replicas (target: {})", acks, numreplicas);
+                        return RedisResponse::Integer(acks as i64);
+                    }
+
+                    // Update elapsed time
+                    elapsed_time = start.elapsed().as_millis() as u64;
+
+                    #[cfg(debug_assertions)]
+                    println!("[WAIT] Not enough replicas acknowledged (got {}, need {}). Elapsed: {}ms", acks, numreplicas, elapsed_time);
                 }
+
+                // If we've exceeded the timeout, return 0
+                #[cfg(debug_assertions)]
+                println!("[WAIT] Command timed out after {}ms", elapsed_time);
+                RedisResponse::Integer(0)
             },
             RedisCommand::Config { subcommand, parameter } => {
                 match subcommand.as_str() {
@@ -405,7 +450,7 @@ impl Redis {
             },
             RedisCommand::FlushDB => {
                 self.storage.flushdb();
-                RedisResponse::Ok("+OK\r\n".to_string())
+                RedisResponse::Ok("OK".to_string())
             },
             RedisCommand::Error { message } => {
                 RedisResponse::Error(message.clone())

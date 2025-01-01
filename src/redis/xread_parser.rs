@@ -28,7 +28,7 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
 
     let streams_pos = match streams_index {
         Some(pos) => pos,
-        None => return Err("-ERR Missing 'STREAMS' keyword\r\n".to_string()),
+        None => return Err("-ERR Missing 'STREAMS' keyword".to_string()),
     };
 
     #[cfg(debug_assertions)]
@@ -44,10 +44,10 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
                         block = Some(block_value);
                         i += 2;
                     } else {
-                        return Err("-ERR syntax error in BLOCK parameter\r\n".to_string());
+                        return Err("-ERR syntax error in BLOCK parameter".to_string());
                     }
                 } else {
-                    return Err("-ERR syntax error in BLOCK parameter\r\n".to_string());
+                    return Err("-ERR syntax error in BLOCK parameter".to_string());
                 }
             },
             "COUNT" => {
@@ -56,14 +56,14 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
                         count = Some(count_value);
                         i += 2;
                     } else {
-                        return Err("-ERR syntax error in COUNT parameter\r\n".to_string());
+                        return Err("-ERR syntax error in COUNT parameter".to_string());
                     }
                 } else {
-                    return Err("-ERR syntax error in COUNT parameter\r\n".to_string());
+                    return Err("-ERR syntax error in COUNT parameter".to_string());
                 }
             },
             _ => {
-                return Err("-ERR syntax error in XREAD command\r\n".to_string());
+                return Err("-ERR syntax error in XREAD command".to_string());
             }
         }
     }
@@ -71,7 +71,7 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
     // Process parameters after STREAMS
     let remaining = &params[streams_pos + 1..];
     if remaining.is_empty() {
-        return Err("-ERR wrong number of arguments for 'xread' command\r\n".to_string());
+        return Err("-ERR wrong number of arguments for 'xread' command".to_string());
     }
 
     #[cfg(debug_assertions)]
@@ -80,7 +80,7 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
     // Split remaining parameters into stream names and IDs
     let num_params = remaining.len();
     if num_params % 2 != 0 {
-        return Err("-ERR wrong number of arguments for 'xread' command\r\n".to_string());
+        return Err("-ERR wrong number of arguments for 'xread' command".to_string());
     }
 
     let mid = num_params / 2;
@@ -95,13 +95,13 @@ pub fn parse_xread(params: &[String]) -> Result<XReadParams, String> {
     println!("  - Stream IDs: {:?}", stream_ids);
 
     if stream_names.is_empty() || stream_ids.len() != stream_names.len() {
-        return Err("-ERR wrong number of arguments for 'xread' command\r\n".to_string());
+        return Err("-ERR wrong number of arguments for 'xread' command".to_string());
     }
 
     // Validate all IDs
     for id in &stream_ids {
         if !is_stream_id(id) {
-            return Err(format!("-ERR Invalid stream ID format: {}\r\n", id));
+            return Err(format!("-ERR Invalid stream ID format: {}", id));
         }
     }
 

@@ -54,10 +54,6 @@ impl ClientHandler {
         *self.shutdown.lock().unwrap() = true;
     }
 
-    // fn format_response(&self, response: &RedisResponse) -> String {
-    //     response.format()
-    // }
-
     pub fn execute_command(&mut self, command: &RedisCommand) -> RedisResponse {
         let raw_response = match &command {
             RedisCommand::XRead { keys, ids, block, count } => {
@@ -136,6 +132,9 @@ impl ClientHandler {
                             RedisResponse::Retry => continue,
                             RedisResponse::Array(items) => responses.push(RedisResponse::Array(items)),
                             RedisResponse::BulkString(s) => responses.push(RedisResponse::BulkString(s)),
+                            RedisResponse::Integer(i) => responses.push(RedisResponse::Integer(i)),
+                            RedisResponse::SimpleString(s) => responses.push(RedisResponse::SimpleString(s)),
+                            RedisResponse::NullBulkString => responses.push(RedisResponse::NullBulkString),
                         }
                     }
 
@@ -168,6 +167,9 @@ impl ClientHandler {
                         RedisResponse::Retry => RedisResponse::Retry,
                         RedisResponse::Array(items) => RedisResponse::Array(items),
                         RedisResponse::BulkString(s) => RedisResponse::BulkString(s),
+                        RedisResponse::Integer(i) => RedisResponse::Integer(i),
+                        RedisResponse::SimpleString(s) => RedisResponse::SimpleString(s),
+                        RedisResponse::NullBulkString => RedisResponse::NullBulkString,
                     }
                 }
             }
@@ -267,11 +269,6 @@ impl ClientHandler {
 
                                     println!("[CLIENT] Got response: {}", response.format().replace("\r\n", "\\r\\n"));
 
-                                    // Only send response if it's not a retry
-                                    if let RedisResponse::Retry = response {
-                                        continue;
-                                    }
-
                                     let formatted = response.format();
                                     if !formatted.is_empty() {
                                         responses.push(formatted);
@@ -282,20 +279,24 @@ impl ClientHandler {
                                 if !responses.is_empty() {
                                     let mut batch_response = format!("*{}\r\n", responses.len());
                                     for resp in responses {
-                                        if resp.starts_with('*') {
-                                            batch_response.push_str(&resp[1..]);
-                                        } else if resp.starts_with('+') || resp.starts_with('-') || resp.starts_with(':') {
-                                            let content = &resp[1..].trim_end_matches("\r\n");
-                                            batch_response.push_str(&format!("${}\r\n{}\r\n", content.len(), content));
-                                        } else if resp.starts_with('$') {
-                                            batch_response.push_str(&resp);
-                                        } else {
-                                            batch_response.push_str(&format!("${}\r\n{}\r\n", resp.len(), resp));
-                                        }
+                                        batch_response.push_str(&resp);
                                     }
                                     let mut client = handler.client.lock().unwrap();
                                     client.write_all(batch_response.as_bytes()).unwrap();
                                     client.flush().unwrap();
+                                }
+
+                                // Only count bytes after processing commands
+                                if handler.is_redis_connection {
+                                    if let Ok(redis) = handler.redis.lock() {
+                                        if redis.config.replicaof_host.is_some() {
+                                            redis.bytes_processed.fetch_add(n as u64, Ordering::SeqCst);
+                                            #[cfg(debug_assertions)]
+                                            println!("[CLIENT] Added {} bytes, total now: {}", 
+                                                n,
+                                                redis.bytes_processed.load(Ordering::SeqCst));
+                                        }
+                                    }
                                 }
                             } else {
                                 // Handle single commands or non-Redis connections
@@ -339,11 +340,6 @@ impl ClientHandler {
                                     };
 
                                     println!("[CLIENT] Got response: {}", response.format().replace("\r\n", "\\r\\n"));
-
-                                    // Only send response if it's not a retry
-                                    if let RedisResponse::Retry = response {
-                                        continue;
-                                    }
 
                                     let formatted = response.format();
                                     if !formatted.is_empty() {
