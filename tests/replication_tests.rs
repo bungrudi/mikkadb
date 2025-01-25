@@ -191,6 +191,9 @@ fn test_wait_command_no_replicas() {
     // Send WAIT command - should return immediately with 0
     let wait_command = b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n500\r\n";
     master_stream.write_all(wait_command).unwrap();
+    master_stream.flush().unwrap();
+    thread::sleep(Duration::from_millis(600)); // Wait longer than timeout
+
 
     // Should return immediately with 0 replicas
     assert!(master_stream.wait_for_pattern(":0\r\n", 1000), "Missing WAIT response");

@@ -315,14 +315,14 @@ impl Redis {
                                 println!("replica_host: {} replica_port: {}", replica_host, _port);
 
                                 self.replication.add_replica(replica_host, real_port.to_string(), client.try_clone().unwrap());
-                                return RedisResponse::Ok("+OK".to_string());
+                                return RedisResponse::Ok("OK".to_string());
                             }
                         }
                         RedisResponse::Error("Cannot establish replica connection".to_string())
                     },
                     "capa" => {
                         // TODO: Implement the actual logic for these subcommands
-                        RedisResponse::Ok("+OK".to_string())
+                        RedisResponse::Ok("OK".to_string())
                     },
                     "ack" => {
                         if let Some(offset_str) = params.get(0) {
@@ -331,7 +331,7 @@ impl Redis {
                                     let addr = client.peer_addr().unwrap();
                                     let replica_key = format!("{}:{}", addr.ip(), addr.port());
                                     self.update_replica_offset(&replica_key, offset);
-                                    return RedisResponse::Ok("".to_string());
+                                    return RedisResponse::Ok("OK".to_string());
                                 }
                             }
                         }
@@ -383,10 +383,10 @@ impl Redis {
                 #[cfg(debug_assertions)]
                 println!("[WAIT] Sending GETACK to replicas");
                 
-                let mut elapsed_time = *elapsed;
+                let mut elapsed_time = *elapsed as i64;
                 let start = std::time::Instant::now();
 
-                while elapsed_time < *timeout {
+                while elapsed_time < *timeout as i64 {
                     // Send GETACK to replicas
                     if let Err(_) = self.replication.send_getack_to_replicas() {
                         #[cfg(debug_assertions)]
@@ -409,7 +409,7 @@ impl Redis {
                     }
 
                     // Update elapsed time
-                    elapsed_time = start.elapsed().as_millis() as u64;
+                    elapsed_time = start.elapsed().as_millis() as i64;
 
                     #[cfg(debug_assertions)]
                     println!("[WAIT] Not enough replicas acknowledged (got {}, need {}). Elapsed: {}ms", acks, numreplicas, elapsed_time);

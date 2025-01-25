@@ -70,9 +70,11 @@ impl MockTcpStream {
                 return true;
             }
             
-            drop(data);
             #[cfg(debug_assertions)]
-            println!("[MockTcpStream::wait_for_pattern] No pattern found, sleeping");
+            // print current data and sleep
+            println!("[MockTcpStream::wait_for_pattern] No pattern found, sleeping with current data: {:?}", String::from_utf8_lossy(&data));
+            
+            drop(data);
             thread::sleep(Duration::from_millis(50));
         }
     }

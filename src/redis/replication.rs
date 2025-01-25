@@ -79,6 +79,7 @@ impl ReplicationManager {
             // Get all commands first
             let commands: Vec<String> = queue.drain(..).collect();
             let mut sent_count = 0;
+            let mut offset = self.get_current_offset();
             
             // Send all commands to each replica
             for replica in self.replicas.lock().unwrap().values_mut() {
@@ -88,6 +89,8 @@ impl ReplicationManager {
                     
                     match (replica.stream.write_all(command.as_bytes()), replica.stream.flush()) {
                         (Ok(_), Ok(_)) => {
+                            // Update replica offset
+                            replica.offset = offset + command.len() as u64;
                             // Only increment sent count, don't update offset
                             // Offset will be updated when replica sends REPLCONF ACK
                             sent_count += 1;
@@ -97,6 +100,7 @@ impl ReplicationManager {
                             println!("[REPL] Error sending command to replica: {}", e);
                         }
                     }
+                    offset += command.len() as u64;
                 }
             }
             
@@ -142,6 +146,14 @@ impl ReplicationManager {
             #[cfg(debug_assertions)]
             println!("[REPL] Updating replica {} offset: {} -> {}", replica_key, replica.offset, offset);
             replica.offset = offset;
+            
+            // Update current offset if this replica has a higher offset
+            let mut current_offset = self.current_offset.lock().unwrap();
+            if offset > *current_offset {
+                #[cfg(debug_assertions)]
+                println!("[REPL] Updating current offset: {} -> {}", *current_offset, offset);
+                *current_offset = offset;
+            }
         }
     }
 
