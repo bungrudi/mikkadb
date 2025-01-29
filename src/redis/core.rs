@@ -174,13 +174,19 @@ impl Redis {
             },
             RedisCommand::LPush { key, value } => {
                 match self.storage.lpush(key, value) {
-                    Ok(len) => RedisResponse::Integer(len),
+                    Ok(len) => {
+                        self.replication.increment_offset();
+                        RedisResponse::Integer(len)
+                    },
                     Err(e) => RedisResponse::Error(format!("{}", e)),
                 }
             },
             RedisCommand::RPush { key, value } => {
                 match self.storage.rpush(key, value) {
-                    Ok(len) => RedisResponse::Integer(len),
+                    Ok(len) => {
+                        self.replication.increment_offset();
+                        RedisResponse::Integer(len)
+                    },
                     Err(e) => RedisResponse::Error(format!("{}", e)),
                 }
             },
@@ -214,7 +220,10 @@ impl Redis {
             },
             RedisCommand::LTrim { key, start, stop } => {
                 match self.storage.ltrim(key, *start, *stop) {
-                    Ok(_) => RedisResponse::Ok("OK".to_string()),
+                    Ok(_) => {
+                        self.replication.increment_offset();
+                        RedisResponse::Ok("OK".to_string())
+                    },
                     Err(e) => RedisResponse::Error(e),
                 }
             },
@@ -239,7 +248,10 @@ impl Redis {
             },
             RedisCommand::LInsert { key, before, pivot, element } => {
                 match self.storage.linsert(key, *before, pivot, element) {
-                    Some(len) => RedisResponse::Integer(len as i64),
+                    Some(len) => {
+                        self.replication.increment_offset();
+                        RedisResponse::Integer(len as i64)
+                    },
                     None => RedisResponse::Integer(-1),
                 }
             },
@@ -452,6 +464,7 @@ impl Redis {
             },
             RedisCommand::FlushDB => {
                 self.storage.flushdb();
+                self.replication.increment_offset();
                 RedisResponse::Ok("OK".to_string())
             },
             RedisCommand::Error { message } => {

@@ -76,12 +76,17 @@ fn test_wait_command_with_ack() {
     // Start replication sync
     ReplicationManager::start_replication_sync(redis.clone());
 
-    // Create client handler
+    // Create client handlers
     #[cfg(debug_assertions)]
     println!("[TEST] Setting up client connection");
     
     let mut client_handler = ClientHandler::new(master_server, redis.clone());
     let _handle = client_handler.start();
+
+    #[cfg(debug_assertions)]
+    println!("[TEST] Setting up replica handler");
+    let mut replica_handler = ClientHandler::new(repl_server.clone(), redis.clone());
+    let _replica_handle = replica_handler.start();
 
     // Send SET command from client
     #[cfg(debug_assertions)]
