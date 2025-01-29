@@ -24,7 +24,8 @@ pub struct Replica {
     pub host: String,
     pub port: String,
     pub stream: Box<dyn TcpStreamTrait>,
-    pub offset: u64,
+    pub last_sent_offset: u64,
+    pub last_acked_offset: u64,
 }
 
 pub struct ReplicationManager {
@@ -47,7 +48,8 @@ impl ReplicationManager {
             host: host.clone(),
             port: port.clone(),
             stream,
-            offset: 0,
+            last_sent_offset: 0,
+            last_acked_offset: 0,
         };
 
         let key = format!("{}:{}", host, port);
@@ -63,11 +65,11 @@ impl ReplicationManager {
         println!("[REPL] Enqueueing command for replication: {}", command);
         self.command_queue.lock().unwrap().push_back(command.to_string());
         
-        // Update current offset immediately when command is enqueued
+        // Update current offset by 1 for each command
         let mut current_offset = self.current_offset.lock().unwrap();
-        *current_offset += command.len() as u64;
+        *current_offset += 1;
         #[cfg(debug_assertions)]
-        println!("[REPL] Updated replication offset: {} -> {}", *current_offset - command.len() as u64, *current_offset);
+        println!("[REPL] Updated replication offset: {} -> {}", *current_offset - 1, *current_offset);
     }
 
     pub fn send_pending_commands(&mut self) -> usize {
@@ -79,8 +81,6 @@ impl ReplicationManager {
             // Get all commands first
             let commands: Vec<String> = queue.drain(..).collect();
             let mut sent_count = 0;
-            let mut offset = self.get_current_offset();
-            
             // Send all commands to each replica
             for replica in self.replicas.lock().unwrap().values_mut() {
                 for command in &commands {
@@ -89,10 +89,8 @@ impl ReplicationManager {
                     
                     match (replica.stream.write_all(command.as_bytes()), replica.stream.flush()) {
                         (Ok(_), Ok(_)) => {
-                            // Update replica offset
-                            replica.offset = offset + command.len() as u64;
-                            // Only increment sent count, don't update offset
-                            // Offset will be updated when replica sends REPLCONF ACK
+                            // Update replica offset by 1 for each command
+                            replica.last_sent_offset += 1;
                             sent_count += 1;
                         }
                         (Err(e), _) | (_, Err(e)) => {
@@ -100,7 +98,6 @@ impl ReplicationManager {
                             println!("[REPL] Error sending command to replica: {}", e);
                         }
                     }
-                    offset += command.len() as u64;
                 }
             }
             
@@ -123,7 +120,7 @@ impl ReplicationManager {
         
         for replica in replicas.values_mut() {
             #[cfg(debug_assertions)]
-            println!("[REPL] Sending GETACK to replica {}:{} (current offset: {})", replica.host, replica.port, replica.offset);
+            println!("[REPL] Sending GETACK to replica {}:{} (last acked: {})", replica.host, replica.port, replica.last_acked_offset);
             
             let getack_command = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
             match (replica.stream.write_all(getack_command.as_bytes()), replica.stream.flush()) {
@@ -143,26 +140,25 @@ impl ReplicationManager {
 
     pub fn update_replica_offset(&mut self, replica_key: &str, offset: u64) {
         if let Some(replica) = self.replicas.lock().unwrap().get_mut(replica_key) {
-            #[cfg(debug_assertions)]
-            println!("[REPL] Updating replica {} offset: {} -> {}", replica_key, replica.offset, offset);
-            replica.offset = offset;
-            
-            // Update current offset if this replica has a higher offset
-            let mut current_offset = self.current_offset.lock().unwrap();
-            if offset > *current_offset {
+            // Validate that ACK offset doesn't exceed what we've sent
+            if offset > replica.last_sent_offset {
                 #[cfg(debug_assertions)]
-                println!("[REPL] Updating current offset: {} -> {}", *current_offset, offset);
-                *current_offset = offset;
+                println!("[REPL] Warning: Replica {} sent invalid ACK offset {} > last_sent_offset {}", 
+                    replica_key, offset, replica.last_sent_offset);
+                return;
             }
+
+            #[cfg(debug_assertions)]
+            println!("[REPL] Updating replica {} acked offset: {} -> {}", replica_key, replica.last_acked_offset, offset);
+            replica.last_acked_offset = offset;
         }
     }
 
-    pub fn count_up_to_date_replicas(&self) -> usize {
-        let current_offset = *self.current_offset.lock().unwrap();
+    pub fn count_up_to_date_replicas_with_offset(&self, offset: u64) -> usize {
         let replicas = self.replicas.lock().unwrap();
         
         #[cfg(debug_assertions)]
-        println!("[REPL] Counting up-to-date replicas. Current offset: {}", current_offset);
+        println!("[REPL] Counting up-to-date replicas. Current offset: {}", offset);
         
         // If there are no replicas, return 0 immediately
         if replicas.is_empty() {
@@ -174,16 +170,16 @@ impl ReplicationManager {
         let mut count = 0;
         for replica in replicas.values() {
             #[cfg(debug_assertions)]
-            println!("[REPL] Checking replica {}:{} - offset: {} against current: {}", 
-                replica.host, replica.port, replica.offset, current_offset);
-            if replica.offset >= current_offset {
+            println!("[REPL] Checking replica {}:{} - acked offset: {} against current: {}", 
+                replica.host, replica.port, replica.last_acked_offset, offset);
+            if replica.last_acked_offset >= offset {
                 count += 1;
                 #[cfg(debug_assertions)]
                 println!("[REPL] Replica {}:{} is up to date", replica.host, replica.port);
             } else {
                 #[cfg(debug_assertions)]
-                println!("[REPL] Replica {}:{} is behind (offset {} < current {})", 
-                    replica.host, replica.port, replica.offset, current_offset);
+                println!("[REPL] Replica {}:{} is behind (acked offset {} < current {})", 
+                    replica.host, replica.port, replica.last_acked_offset, offset);
             }
         }
         

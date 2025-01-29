@@ -110,6 +110,7 @@ fn main() {
     init_replica(&mut config, redis.clone());
 
     // if we are master and there are replicas connected, start replication sync
+    // TODO replication sync need to run mid flight if replica gets promoted to master
     if config.replicaof_host.is_none() {
         redis::replication::ReplicationManager::start_replication_sync(redis.clone());
     }
@@ -120,7 +121,7 @@ fn main() {
                 #[cfg(debug_assertions)]
                 println!("accepted new connection");
                 let mut client_handler = client_handler::ClientHandler::new(_stream, redis.clone());
-                client_handler.start().join().unwrap();
+                client_handler.start();
             }
             Err(_e) => {
                 #[cfg(debug_assertions)]
