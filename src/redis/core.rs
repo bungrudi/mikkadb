@@ -174,13 +174,19 @@ impl Redis {
             },
             RedisCommand::LPush { key, value } => {
                 match self.storage.lpush(key, value) {
-                    Ok(len) => RedisResponse::Integer(len),
+                    Ok(len) => {
+                        self.replication.increment_offset();
+                        RedisResponse::Integer(len)
+                    },
                     Err(e) => RedisResponse::Error(format!("{}", e)),
                 }
             },
             RedisCommand::RPush { key, value } => {
                 match self.storage.rpush(key, value) {
-                    Ok(len) => RedisResponse::Integer(len),
+                    Ok(len) => {
+                        self.replication.increment_offset();
+                        RedisResponse::Integer(len)
+                    },
                     Err(e) => RedisResponse::Error(format!("{}", e)),
                 }
             },
@@ -214,7 +220,10 @@ impl Redis {
             },
             RedisCommand::LTrim { key, start, stop } => {
                 match self.storage.ltrim(key, *start, *stop) {
-                    Ok(_) => RedisResponse::Ok("OK".to_string()),
+                    Ok(_) => {
+                        self.replication.increment_offset();
+                        RedisResponse::Ok("OK".to_string())
+                    },
                     Err(e) => RedisResponse::Error(e),
                 }
             },
@@ -239,7 +248,10 @@ impl Redis {
             },
             RedisCommand::LInsert { key, before, pivot, element } => {
                 match self.storage.linsert(key, *before, pivot, element) {
-                    Some(len) => RedisResponse::Integer(len as i64),
+                    Some(len) => {
+                        self.replication.increment_offset();
+                        RedisResponse::Integer(len as i64)
+                    },
                     None => RedisResponse::Integer(-1),
                 }
             },
@@ -308,30 +320,31 @@ impl Redis {
                     "listening-port" => {
                         if let Some(_port) = params.get(0) {
                             if let Some(client) = client {
-                                let peer = client.peer_addr().unwrap();
-                                let replica_host = peer.ip().to_string();
-                                let real_port = peer.port();
+                                let replica_host = client.peer_addr().unwrap().ip().to_string();
+                                let replica_port = params[0].clone();
                                 #[cfg(debug_assertions)]
-                                println!("replica_host: {} replica_port: {}", replica_host, _port);
+                                println!("replica_host: {} replica_port: {}", replica_host, replica_port);
 
-                                self.replication.add_replica(replica_host, real_port.to_string(), client.try_clone().unwrap());
-                                return RedisResponse::Ok("+OK".to_string());
+                                self.replication.add_replica(replica_host, replica_port, client.try_clone().unwrap());
+                                return RedisResponse::Ok("OK".to_string());
                             }
                         }
                         RedisResponse::Error("Cannot establish replica connection".to_string())
                     },
                     "capa" => {
                         // TODO: Implement the actual logic for these subcommands
-                        RedisResponse::Ok("+OK".to_string())
+                        RedisResponse::Ok("OK".to_string())
                     },
                     "ack" => {
                         if let Some(offset_str) = params.get(0) {
                             if let Ok(offset) = offset_str.parse::<u64>() {
                                 if let Some(client) = client {
-                                    let addr = client.peer_addr().unwrap();
-                                    let replica_key = format!("{}:{}", addr.ip(), addr.port());
-                                    self.update_replica_offset(&replica_key, offset);
-                                    return RedisResponse::Ok("".to_string());
+                                    let peer_addr = client.peer_addr().unwrap();
+                                    let replica_key = format!("{}:{}", peer_addr.ip(), peer_addr.port());
+                                    #[cfg(debug_assertions)]
+                                    println!("[REPL] Received ACK from {} with offset {}", replica_key, offset);
+                                    self.replication.update_replica_offset(&replica_key, offset);
+                                    return RedisResponse::Ok("OK".to_string());
                                 }
                             }
                         }
@@ -383,10 +396,11 @@ impl Redis {
                 #[cfg(debug_assertions)]
                 println!("[WAIT] Sending GETACK to replicas");
                 
-                let mut elapsed_time = *elapsed;
+                let mut elapsed_time = *elapsed as i64;
                 let start = std::time::Instant::now();
+                let current_offset_at_start = self.replication.get_current_offset();
 
-                while elapsed_time < *timeout {
+                while elapsed_time < *timeout as i64 {
                     // Send GETACK to replicas
                     if let Err(_) = self.replication.send_getack_to_replicas() {
                         #[cfg(debug_assertions)]
@@ -401,7 +415,7 @@ impl Redis {
                     #[cfg(debug_assertions)]
                     println!("[WAIT] Checking replica acknowledgments");
                     
-                    let acks = self.replication.count_up_to_date_replicas();
+                    let acks = self.replication.count_up_to_date_replicas_with_offset(current_offset_at_start);
                     if acks >= *numreplicas as usize {
                         #[cfg(debug_assertions)]
                         println!("[WAIT] Found {} up-to-date replicas (target: {})", acks, numreplicas);
@@ -409,7 +423,7 @@ impl Redis {
                     }
 
                     // Update elapsed time
-                    elapsed_time = start.elapsed().as_millis() as u64;
+                    elapsed_time = start.elapsed().as_millis() as i64;
 
                     #[cfg(debug_assertions)]
                     println!("[WAIT] Not enough replicas acknowledged (got {}, need {}). Elapsed: {}ms", acks, numreplicas, elapsed_time);
@@ -450,6 +464,7 @@ impl Redis {
             },
             RedisCommand::FlushDB => {
                 self.storage.flushdb();
+                self.replication.increment_offset();
                 RedisResponse::Ok("OK".to_string())
             },
             RedisCommand::Error { message } => {

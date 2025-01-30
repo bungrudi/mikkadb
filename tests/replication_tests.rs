@@ -15,8 +15,8 @@ fn given_replication_manager_when_command_enqueued_then_sent_to_replica() {
     let mut manager = ReplicationManager::new();
     
     // Create separate streams for replica connection
-    let (replica_stream, mut _replica_server) = MockTcpStream::new_pair();
-    manager.add_replica("localhost".to_string(), "6379".to_string(), Box::new(replica_stream));
+    let (repl_stream, mut repl_server) = MockTcpStream::new_pair();
+    manager.add_replica("localhost".to_string(), "6379".to_string(), Box::new(repl_stream));
 
     // Act
     let command = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
@@ -27,7 +27,7 @@ fn given_replication_manager_when_command_enqueued_then_sent_to_replica() {
     thread::sleep(Duration::from_millis(100));
 
     // Assert - check what was received by the replica server
-    let read_data = _replica_server.read_data.lock().unwrap().clone();
+    let read_data = repl_server.read_data.lock().unwrap().clone();
     assert_eq!(read_data, command.as_bytes().to_vec());
 }
 
@@ -37,8 +37,8 @@ fn given_replication_manager_when_multiple_commands_enqueued_then_all_sent_to_re
     let mut manager = ReplicationManager::new();
     
     // Create separate streams for replica connection
-    let (replica_stream, mut _replica_server) = MockTcpStream::new_pair();
-    manager.add_replica("localhost".to_string(), "6379".to_string(), Box::new(replica_stream));
+    let (repl_stream, mut repl_server) = MockTcpStream::new_pair();
+    manager.add_replica("localhost".to_string(), "6379".to_string(), Box::new(repl_stream));
 
     // Act
     let commands = vec![
@@ -56,7 +56,7 @@ fn given_replication_manager_when_multiple_commands_enqueued_then_all_sent_to_re
     thread::sleep(Duration::from_millis(100));
 
     // Assert - check what was received by the replica server
-    let read_data = _replica_server.read_data.lock().unwrap().clone();
+    let read_data = repl_server.read_data.lock().unwrap().clone();
     let expected_data: Vec<u8> = commands.join("").as_bytes().to_vec();
     assert_eq!(read_data, expected_data);
 }
@@ -67,8 +67,8 @@ fn test_wait_command_with_ack() {
     
     // Create separate streams for master and replica
     let (mut master_stream, master_server) = MockTcpStream::new_pair();
-    let (replica_stream, mut _replica_server) = MockTcpStream::new_pair();
-    manager.add_replica("127.0.0.1".to_string(), "8080".to_string(), Box::new(replica_stream.clone()));
+    let (mut repl_stream, mut repl_server) = MockTcpStream::new_pair();
+    manager.add_replica("127.0.0.1".to_string(), "8080".to_string(), Box::new(repl_stream));
 
     // Create a Redis instance with this ReplicationManager
     let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager)));
@@ -76,18 +76,16 @@ fn test_wait_command_with_ack() {
     // Start replication sync
     ReplicationManager::start_replication_sync(redis.clone());
 
-    // Create client handler
+    // Create client handlers
     #[cfg(debug_assertions)]
     println!("[TEST] Setting up client connection");
     
     let mut client_handler = ClientHandler::new(master_server, redis.clone());
     let _handle = client_handler.start();
 
-    // Create replica handler to process ACKs
     #[cfg(debug_assertions)]
     println!("[TEST] Setting up replica handler");
-    
-    let mut replica_handler = ClientHandler::new(replica_stream, redis.clone());
+    let mut replica_handler = ClientHandler::new(repl_server.clone(), redis.clone());
     let _replica_handle = replica_handler.start();
 
     // Send SET command from client
@@ -108,11 +106,10 @@ fn test_wait_command_with_ack() {
     // Wait for GETACK to be sent to replica
     thread::sleep(Duration::from_millis(50));
 
-    // Calculate expected offset based on command length
-    let expected_offset = set_command.len() as u64;
-    let ack_command = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", 
-        expected_offset.to_string().len(), expected_offset);
-    _replica_server.write_all(ack_command.as_bytes()).unwrap();
+    // Send ACK with offset 1 (one command processed)
+    let ack_command = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n1\r\n";
+    repl_server.write_all(ack_command.as_bytes()).unwrap();
+    repl_server.flush().unwrap();
 
     // Wait for WAIT command response
     assert!(master_stream.wait_for_pattern(":1\r\n", 1000), "Missing WAIT response");
@@ -126,8 +123,8 @@ fn test_wait_command_timeout() {
     
     // Create separate streams for master and replica
     let (mut master_stream, master_server) = MockTcpStream::new_pair();
-    let (replica_stream, _replica_server) = MockTcpStream::new_pair();
-    manager.add_replica("127.0.0.1".to_string(), "8080".to_string(), Box::new(replica_stream.clone()));
+    let (repl_stream, mut repl_server) = MockTcpStream::new_pair();
+    manager.add_replica("127.0.0.1".to_string(), "8080".to_string(), Box::new(repl_stream));
 
     // Create a Redis instance with this ReplicationManager
     let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager)));
@@ -141,13 +138,6 @@ fn test_wait_command_timeout() {
     
     let mut client_handler = ClientHandler::new(master_server, redis.clone());
     let _handle = client_handler.start();
-
-    // Create replica handler to process ACKs
-    #[cfg(debug_assertions)]
-    println!("[TEST] Setting up replica handler");
-    
-    let mut replica_handler = ClientHandler::new(replica_stream, redis.clone());
-    let _replica_handle = replica_handler.start();
 
     // Send SET command
     let set_command = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n123\r\n";
@@ -191,6 +181,9 @@ fn test_wait_command_no_replicas() {
     // Send WAIT command - should return immediately with 0
     let wait_command = b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n500\r\n";
     master_stream.write_all(wait_command).unwrap();
+    master_stream.flush().unwrap();
+    thread::sleep(Duration::from_millis(600)); // Wait longer than timeout
+
 
     // Should return immediately with 0 replicas
     assert!(master_stream.wait_for_pattern(":0\r\n", 1000), "Missing WAIT response");
