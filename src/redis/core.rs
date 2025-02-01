@@ -50,27 +50,53 @@ impl RedisResponse {
 pub struct Redis {
     pub config: RedisConfig,
     pub storage: Storage,
-    pub bytes_processed: AtomicU64, // bytes processed by the server. important for a replica    
+    pub bytes_processed: AtomicU64, // bytes processed by the server. important for a replica
     pub replication: ReplicationManager,
+    pub instance_id: String,
 }
 
 impl Redis {
+    
     pub fn new(config: RedisConfig) -> Self {
+        let instance_id = "master-instance".to_string();
         Redis {
             config,
             storage: Storage::new(),
             bytes_processed: AtomicU64::new(0),
-            replication: ReplicationManager::new(),
+            replication: ReplicationManager::new(instance_id.clone()),
+            instance_id,
+        }
+    }
+
+    pub fn new_with_id(config: RedisConfig, instance_id: String) -> Self {
+        Redis {
+            config,
+            storage: Storage::new(),
+            bytes_processed: AtomicU64::new(0),
+            replication: ReplicationManager::new(instance_id.clone()),
+            instance_id,
         }
     }
 
     #[allow(dead_code)]
-    pub fn new_with_replication(replication: ReplicationManager) -> Self {
+    pub fn new_with_replication(replication: ReplicationManager, instance_id: Option<String>) -> Self {
         Redis {
             config: RedisConfig::default(),
             storage: Storage::new(),
             bytes_processed: AtomicU64::new(0),
             replication,
+            instance_id: instance_id.unwrap_or_else(|| "master-instance".to_string()),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_replica(config: RedisConfig) -> Self {
+        Redis {
+            config,
+            storage: Storage::new(),
+            bytes_processed: AtomicU64::new(0),
+            replication: ReplicationManager::new("replica".to_string()),
+            instance_id: "replica".to_string(),
         }
     }
 
@@ -323,7 +349,7 @@ impl Redis {
                                 let replica_host = client.peer_addr().unwrap().ip().to_string();
                                 let replica_port = params[0].clone();
                                 #[cfg(debug_assertions)]
-                                println!("replica_host: {} replica_port: {}", replica_host, replica_port);
+                                println!("[{}][REPL] replica_host: {} replica_port: {}", self.instance_id, replica_host, replica_port);
 
                                 self.replication.add_replica(replica_host, replica_port, client.try_clone().unwrap());
                                 return RedisResponse::Ok("OK".to_string());
@@ -342,7 +368,7 @@ impl Redis {
                                     let peer_addr = client.peer_addr().unwrap();
                                     let replica_key = format!("{}:{}", peer_addr.ip(), peer_addr.port());
                                     #[cfg(debug_assertions)]
-                                    println!("[REPL] Received ACK from {} with offset {}", replica_key, offset);
+                                    println!("[{}][REPL] Received ACK from {} with offset {}", self.instance_id, replica_key, offset);
                                     self.replication.update_replica_offset(&replica_key, offset);
                                     return RedisResponse::Ok("OK".to_string());
                                 }
@@ -360,6 +386,10 @@ impl Redis {
                     let response = format!("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${}\r\n{}\r\n", 
                         bytes_processed.to_string().len(), 
                         bytes_processed);
+
+                    #[cfg(debug_assertions)]
+                    println!("[{}][REPL] Sending ACK response to master: {}", self.instance_id, response.replace("\r\n", "\\r\\n"));
+
                     let _ = client.write(response.as_bytes());
                     let _ = client.flush();
                     // Reset counter after reporting
@@ -390,11 +420,11 @@ impl Redis {
             },
             RedisCommand::Wait { numreplicas, timeout, elapsed } => {
                 #[cfg(debug_assertions)]
-                println!("[WAIT] Starting WAIT command execution: target_replicas={}, timeout={}ms, elapsed={}ms", numreplicas, timeout, elapsed);
+                println!("[{}][WAIT] Starting WAIT command execution: target_replicas={}, timeout={}ms, elapsed={}ms", self.instance_id, numreplicas, timeout, elapsed);
                 
                 // Send initial GETACK to replicas to get their current offsets
                 #[cfg(debug_assertions)]
-                println!("[WAIT] Sending GETACK to replicas");
+                println!("[{}][WAIT] Sending GETACK to replicas", self.instance_id);
                 
                 let mut elapsed_time = *elapsed as i64;
                 let start = std::time::Instant::now();
@@ -404,7 +434,7 @@ impl Redis {
                     // Send GETACK to replicas
                     if let Err(_) = self.replication.send_getack_to_replicas() {
                         #[cfg(debug_assertions)]
-                        println!("[WAIT] Failed to send GETACK to replicas");
+                        println!("[{}][WAIT] Failed to send GETACK to replicas", self.instance_id);
                         return RedisResponse::Integer(0);
                     }
 
@@ -413,12 +443,12 @@ impl Redis {
 
                     // Check if we have enough replicas
                     #[cfg(debug_assertions)]
-                    println!("[WAIT] Checking replica acknowledgments");
+                    println!("[{}][WAIT] Checking replica acknowledgments", self.instance_id);
                     
                     let acks = self.replication.count_up_to_date_replicas_with_offset(current_offset_at_start);
                     if acks >= *numreplicas as usize {
                         #[cfg(debug_assertions)]
-                        println!("[WAIT] Found {} up-to-date replicas (target: {})", acks, numreplicas);
+                        println!("[{}][WAIT] Found {} up-to-date replicas (target: {})", self.instance_id, acks, numreplicas);
                         return RedisResponse::Integer(acks as i64);
                     }
 
@@ -426,12 +456,12 @@ impl Redis {
                     elapsed_time = start.elapsed().as_millis() as i64;
 
                     #[cfg(debug_assertions)]
-                    println!("[WAIT] Not enough replicas acknowledged (got {}, need {}). Elapsed: {}ms", acks, numreplicas, elapsed_time);
+                    println!("[{}][WAIT] Not enough replicas acknowledged (got {}, need {}). Elapsed: {}ms", self.instance_id, acks, numreplicas, elapsed_time);
                 }
 
                 // If we've exceeded the timeout, return 0
                 #[cfg(debug_assertions)]
-                println!("[WAIT] Command timed out after {}ms", elapsed_time);
+                println!("[{}][WAIT] Command timed out after {}ms", self.instance_id, elapsed_time);
                 RedisResponse::Integer(0)
             },
             RedisCommand::Config { subcommand, parameter } => {

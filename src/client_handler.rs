@@ -199,13 +199,19 @@ impl ClientHandler {
 
                 // Read from client with minimal lock scope
                 let read_result = {
+                    #[cfg(debug_assertions)]
                     println!("[CLIENT] Attempting to acquire client lock for read");
                     let mut client = handler.client.lock().unwrap();
+                    #[cfg(debug_assertions)]
                     println!("[CLIENT] Acquired client lock for read");
                     let result = client.read(&mut read_buffer);
+                    #[cfg(debug_assertions)]
                     println!("[CLIENT] Released client lock after read");
                     result
                 };
+                
+                #[cfg(debug_assertions)]
+                println!("[CLIENT] Read result: {:?}", read_result);
 
                 match read_result {
                     Ok(0) => {
@@ -234,8 +240,10 @@ impl ClientHandler {
                                     let response = if let RedisCommand::Wait { numreplicas, timeout, elapsed: _ } = command {
                                         let start = std::time::Instant::now();
                                         let mut sent_getack = false;
+                                        #[cfg(debug_assertions)]
                                         println!("[CLIENT] Attempting to acquire redis lock for command");
                                         let mut resp = handler.execute_command(&command);
+                                        #[cfg(debug_assertions)]
                                         println!("[CLIENT] Released redis lock after command");
                                         
                                         while let RedisResponse::Retry = resp {
@@ -281,6 +289,10 @@ impl ClientHandler {
                                     for resp in responses {
                                         batch_response.push_str(&resp);
                                     }
+                                    
+                                    #[cfg(debug_assertions)]
+                                    println!("[CLIENT] Writing batch response: {}", batch_response.replace("\r\n", "\\r\\n"));
+                                    
                                     let mut client = handler.client.lock().unwrap();
                                     client.write_all(batch_response.as_bytes()).unwrap();
                                     client.flush().unwrap();
@@ -343,6 +355,9 @@ impl ClientHandler {
 
                                     let formatted = response.format();
                                     if !formatted.is_empty() {
+                                        #[cfg(debug_assertions)]
+                                        println!("[CLIENT] Writing response: {}", formatted.replace("\r\n", "\\r\\n"));
+                                        
                                         let mut client = handler.client.lock().unwrap();
                                         client.write_all(formatted.as_bytes()).unwrap();
                                         client.flush().unwrap();

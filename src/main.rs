@@ -98,7 +98,12 @@ fn main() {
         }
     }
 
-    let redis = Arc::new(Mutex::new(Redis::new(config.clone())));
+    let instance_id = if config.replicaof_host.is_some() {
+        format!("replica-{}", config.port)
+    } else {
+        format!("master-{}", config.port)
+    };
+    let redis = Arc::new(Mutex::new(Redis::new_with_id(config.clone(), instance_id)));
 
     // Parse RDB file - handle errors gracefully
     if let Err(e) = redis.lock().unwrap().parse_rdb_file() {

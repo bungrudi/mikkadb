@@ -12,7 +12,7 @@ mod utils;
 #[test]
 fn given_replication_manager_when_command_enqueued_then_sent_to_replica() {
     // Arrange
-    let mut manager = ReplicationManager::new();
+    let mut manager = ReplicationManager::new("test-instance".to_string());
     
     // Create separate streams for replica connection
     let (repl_stream, mut repl_server) = MockTcpStream::new_pair();
@@ -34,7 +34,7 @@ fn given_replication_manager_when_command_enqueued_then_sent_to_replica() {
 #[test]
 fn given_replication_manager_when_multiple_commands_enqueued_then_all_sent_to_replica() {
     // Arrange
-    let mut manager = ReplicationManager::new();
+    let mut manager = ReplicationManager::new("test-instance".to_string());
     
     // Create separate streams for replica connection
     let (repl_stream, mut repl_server) = MockTcpStream::new_pair();
@@ -63,7 +63,7 @@ fn given_replication_manager_when_multiple_commands_enqueued_then_all_sent_to_re
 
 #[test]
 fn test_wait_command_with_ack() {
-    let mut manager = ReplicationManager::new();
+    let mut manager = ReplicationManager::new("test-instance".to_string());
     
     // Create separate streams for master and replica
     let (mut master_stream, master_server) = MockTcpStream::new_pair();
@@ -71,7 +71,7 @@ fn test_wait_command_with_ack() {
     manager.add_replica("127.0.0.1".to_string(), "8080".to_string(), Box::new(repl_stream));
 
     // Create a Redis instance with this ReplicationManager
-    let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager)));
+    let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager, None)));
 
     // Start replication sync
     ReplicationManager::start_replication_sync(redis.clone());
@@ -119,7 +119,7 @@ fn test_wait_command_with_ack() {
 
 #[test]
 fn test_wait_command_timeout() {
-    let mut manager = ReplicationManager::new();
+    let mut manager = ReplicationManager::new("test-instance".to_string());
     
     // Create separate streams for master and replica
     let (mut master_stream, master_server) = MockTcpStream::new_pair();
@@ -127,7 +127,7 @@ fn test_wait_command_timeout() {
     manager.add_replica("127.0.0.1".to_string(), "8080".to_string(), Box::new(repl_stream));
 
     // Create a Redis instance with this ReplicationManager
-    let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager)));
+    let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager, None)));
 
     // Start replication sync
     ReplicationManager::start_replication_sync(redis.clone());
@@ -161,11 +161,11 @@ fn test_wait_command_timeout() {
 
 #[test]
 fn test_wait_command_no_replicas() {
-    let mut manager = ReplicationManager::new();
+    let mut manager = ReplicationManager::new("test-instance".to_string());
     let (mut master_stream, master_server) = MockTcpStream::new_pair();
     
     // Create a Redis instance with this ReplicationManager (no replicas added)
-    let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager)));
+    let redis = Arc::new(Mutex::new(Redis::new_with_replication(manager, Some("test-instance".to_string()))));
 
     // Create client handler
     let mut client_handler = ClientHandler::new(master_server, redis.clone());
