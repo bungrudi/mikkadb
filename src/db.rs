@@ -101,6 +101,27 @@ impl Db {
             None
         }
     }
+
+    pub fn range_stream(&self, key: &str, start: (u64, u64), end: (u64, u64)) -> Option<Vec<StreamEntry>> {
+        if let Some(DataType::Stream(entries)) = self.data.get(key) {
+            let result: Vec<StreamEntry> = entries.iter()
+                .filter(|e| {
+                    let id = e.id;
+                    // Check start (inclusive)
+                    let after_start = id.0 > start.0 || (id.0 == start.0 && id.1 >= start.1);
+                    // Check end (inclusive)
+                    let before_end = id.0 < end.0 || (id.0 == end.0 && id.1 <= end.1);
+                    
+                    after_start && before_end
+                })
+                .cloned()
+                .collect();
+            
+            Some(result)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]

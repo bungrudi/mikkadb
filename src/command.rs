@@ -12,7 +12,19 @@ pub enum RedisCommand {
     PSync { replication_id: String, offset: i64 },
     Wait { num_replicas: usize, timeout: u64 },
     XAdd { key: String, id: String, fields: Vec<(String, String)> },
-    XRead { block: Option<u64>, streams: Vec<(String, String)> },
+    XRead {
+        block: Option<u64>,
+        streams: Vec<(String, String)>,
+    },
+    XRange {
+        key: String,
+        start: String,
+        end: String,
+    },
+    Incr { key: String },
+    Multi,
+    Exec,
+    Discard,
     Error { message: String },
     None,
 }
@@ -26,7 +38,10 @@ impl RedisCommand {
                 }
 
                 let command_name = match &items[0] {
-                    Value::BulkString(s) => s.to_uppercase(),
+                    Value::BulkString(s) => {
+                        println!("Received command: {}", s);
+                        s.to_uppercase()
+                    },
                     _ => return Err(Error::msg("Invalid command format")),
                 };
 
@@ -240,6 +255,38 @@ impl RedisCommand {
                         
                         Ok(RedisCommand::XRead { block, streams })
                     }
+                    "XRANGE" => {
+                        if items.len() < 4 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'xrange' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key")),
+                        };
+                        let start = match &items[2] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid start")),
+                        };
+                        let end = match &items[3] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid end")),
+                        };
+                        
+                        Ok(RedisCommand::XRange { key, start, end })
+                    }
+                    "INCR" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'incr' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for INCR")),
+                        };
+                        Ok(RedisCommand::Incr { key })
+                    }
+                    "MULTI" => Ok(RedisCommand::Multi),
+                    "EXEC" => Ok(RedisCommand::Exec),
+                    "DISCARD" => Ok(RedisCommand::Discard),
                     _ => Ok(RedisCommand::Error { message: format!("Unknown command: {}", command_name) }),
                 }
             }

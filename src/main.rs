@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
 
     loop {
         let (stream, _) = listener.accept().await?;
-        let config = config.clone();
+
         let tx = tx.clone();
         client_id_counter += 1;
         let client_id = client_id_counter;

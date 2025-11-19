@@ -1,11 +1,12 @@
 use crate::command::RedisCommand;
 use crate::db::Db;
 use crate::resp::Value;
-use crate::config::{Config, ServerRole};
+use crate::config::Config;
 use tokio::sync::{mpsc, oneshot};
-use anyhow::{Result, Error};
+use anyhow::Result;
 use std::sync::Arc;
-use bytes::Bytes;
+
+use std::collections::HashMap;
 
 pub struct CommandRequest {
     pub client_id: u64,
@@ -43,6 +44,7 @@ pub struct Engine {
     read_timeout_rx: mpsc::Receiver<usize>,
     read_timeout_tx: mpsc::Sender<usize>,
     replication_offset: i64,
+    transaction_state: HashMap<u64, Vec<RedisCommand>>,
 }
 
 impl Engine {
@@ -61,6 +63,7 @@ impl Engine {
             read_timeout_rx,
             read_timeout_tx,
             replication_offset: 0,
+            transaction_state: HashMap::new(),
         }
     }
 
@@ -82,7 +85,7 @@ impl Engine {
     }
     
     fn complete_read(&mut self, idx: usize) {
-        if let Some(Some(read)) = self.pending_reads.get_mut(idx) {
+        if let Some(Some(_)) = self.pending_reads.get(idx) {
             // Timeout occurred, check one last time? 
             // Or just return Null as per Redis spec for timeout.
             // "If the timeout is reached, the command returns a Null reply."
@@ -131,17 +134,79 @@ impl Engine {
 
     async fn handle_command(&mut self, req: CommandRequest) {
         let CommandRequest { client_id, command, response_tx, replica_tx } = req;
+        
+        // Check for transaction commands
+        match command {
+            RedisCommand::Multi => {
+                if self.transaction_state.contains_key(&client_id) {
+                    let _ = response_tx.send(Ok(Value::Error("ERR MULTI calls can not be nested".to_string())));
+                } else {
+                    self.transaction_state.insert(client_id, Vec::new());
+                    let _ = response_tx.send(Ok(Value::SimpleString("OK".to_string())));
+                }
+                return;
+            }
+            RedisCommand::Discard => {
+                if self.transaction_state.remove(&client_id).is_some() {
+                    let _ = response_tx.send(Ok(Value::SimpleString("OK".to_string())));
+                } else {
+                    let _ = response_tx.send(Ok(Value::Error("ERR DISCARD without MULTI".to_string())));
+                }
+                return;
+            }
+            RedisCommand::Exec => {
+                if let Some(commands) = self.transaction_state.remove(&client_id) {
+                    if commands.is_empty() {
+                         let _ = response_tx.send(Ok(Value::Array(vec![])));
+                         return;
+                    }
+                    
+                    let mut results = Vec::new();
+                    for cmd in commands {
+                        // For now, we don't support blocking commands in transaction properly
+                        // We just execute them. If they block, we might get BLOCKED error or handle it.
+                        // But execute_command_immediate returns Result<Value>.
+                        
+                        // We need to handle replica_tx for each command?
+                        // Yes, if we propagate.
+                        // But we should probably propagate EXEC/MULTI to replicas?
+                        // Or propagate individual commands?
+                        // Redis propagates MULTI/EXEC block.
+                        // But here our replicas are simple.
+                        // Let's just execute and propagate individual commands if they do propagate.
+                        // Wait, execute_command_immediate calls propagate_command.
+                        // So if we call it, it will propagate.
+                        // But it will propagate as individual commands.
+                        // That's fine for now.
+                        
+                        match self.execute_command_immediate(client_id, cmd, replica_tx.clone()).await {
+                            Ok(val) => results.push(val),
+                            Err(e) => results.push(Value::Error(e.to_string())),
+                        }
+                    }
+                    let _ = response_tx.send(Ok(Value::Array(results)));
+                } else {
+                    let _ = response_tx.send(Ok(Value::Error("ERR EXEC without MULTI".to_string())));
+                }
+                return;
+            }
+            _ => {}
+        }
+        
+        // If in transaction, queue command
+        if let Some(queue) = self.transaction_state.get_mut(&client_id) {
+            queue.push(command);
+            let _ = response_tx.send(Ok(Value::SimpleString("QUEUED".to_string())));
+            return;
+        }
+
         match command {
             RedisCommand::Wait { num_replicas, timeout } => {
                 self.handle_wait(num_replicas, timeout, response_tx).await;
             }
             other => {
                 // Check if it's XREAD with BLOCK
-                let is_xread_block = if let RedisCommand::XRead { block: Some(_), .. } = &other {
-                    true
-                } else {
-                    false
-                };
+
                 
                 let result = self.execute_command_immediate(client_id, other.clone(), replica_tx).await;
                 
@@ -425,7 +490,7 @@ impl Engine {
                     return Ok(Value::Array(result_streams));
                 }
                 
-                if let Some(block_ms) = block {
+                if let Some(_) = block {
                     // Block client
                     // We need to send the response later, so we can't return Ok(Value) here.
                     // But execute_command_immediate returns Result<Value>.
@@ -462,11 +527,95 @@ impl Engine {
                 
                 Ok(Value::Null)
             }
+            RedisCommand::XRange { key, start, end } => {
+                // Parse start and end IDs
+                let parse_id = |s: &str| -> Result<(u64, u64)> {
+                    if s == "-" {
+                        Ok((0, 0))
+                    } else if s == "+" {
+                        Ok((u64::MAX, u64::MAX))
+                    } else {
+                        let parts: Vec<&str> = s.split('-').collect();
+                        let ms = parts[0].parse::<u64>().unwrap_or(0);
+                        let seq = if parts.len() > 1 {
+                            parts[1].parse::<u64>().unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        Ok((ms, seq))
+                    }
+                };
+                
+                let start_id = match parse_id(&start) {
+                    Ok(id) => id,
+                    Err(_) => return Ok(Value::Error("ERR Invalid stream ID specified as stream command argument".to_string())),
+                };
+                
+                let end_id = match parse_id(&end) {
+                    Ok(id) => id,
+                    Err(_) => return Ok(Value::Error("ERR Invalid stream ID specified as stream command argument".to_string())),
+                };
+                
+                if let Some(entries) = self.db.range_stream(&key, start_id, end_id) {
+                    let mut stream_entries = Vec::new();
+                    for entry in entries {
+                        let id_str = format!("{}-{}", entry.id.0, entry.id.1);
+                        let mut fields_val = Vec::new();
+                        for (k, v) in entry.fields {
+                            fields_val.push(Value::BulkString(k));
+                            fields_val.push(Value::BulkString(v));
+                        }
+                        
+                        stream_entries.push(Value::Array(vec![
+                            Value::BulkString(id_str),
+                            Value::Array(fields_val)
+                        ]));
+                    }
+                    Ok(Value::Array(stream_entries))
+                } else {
+                    Ok(Value::Array(vec![])) // Empty array if key doesn't exist or no entries
+                }
+            }
             RedisCommand::Get { key } => {
                 match self.db.get(&key) {
                     Some(value) => Ok(Value::BulkString(String::from_utf8_lossy(&value).to_string())),
                     None => Ok(Value::Null),
                 }
+            }
+            RedisCommand::Incr { key } => {
+                let current_val = match self.db.get(&key) {
+                    Some(bytes) => {
+                        let s = String::from_utf8_lossy(&bytes);
+                        match s.parse::<i64>() {
+                            Ok(n) => n,
+                            Err(_) => return Ok(Value::Error("ERR value is not an integer or out of range".to_string())),
+                        }
+                    }
+                    None => 0,
+                };
+                
+                let new_val = current_val + 1;
+                let new_val_str = new_val.to_string();
+                self.db.set(key.clone(), bytes::Bytes::from(new_val_str.clone()), None);
+                
+                // Propagate as SET for simplicity, or we could propagate INCR if we wanted.
+                // But replicas are dumb, they just apply commands. 
+                // If we propagate INCR, replicas need to handle INCR.
+                // Let's propagate SET to be safe and stateless on replica side?
+                // Actually, standard Redis propagates INCR as INCR (or SELECT + INCR).
+                // But here, let's propagate SET to ensure consistency if we had complex logic.
+                // However, for INCR, propagating INCR is fine too.
+                // Let's stick to SET for now to avoid implementing INCR on replica if it differs (it shouldn't).
+                // Actually, let's propagate INCR to save bandwidth? No, SET is safer for now.
+                
+                let args = vec![
+                    Value::BulkString("SET".to_string()),
+                    Value::BulkString(key),
+                    Value::BulkString(new_val_str),
+                ];
+                self.propagate_command(Value::Array(args)).await;
+                
+                Ok(Value::Integer(new_val))
             }
             RedisCommand::Info { section: _ } => {
                 let role = match self.config.role {
@@ -540,6 +689,10 @@ impl Engine {
             RedisCommand::Wait { .. } => {
                 // Should never reach here since Wait is handled separately
                 Err(anyhow::Error::msg("WAIT should be handled in handle_command"))
+            }
+            RedisCommand::Multi | RedisCommand::Exec | RedisCommand::Discard => {
+                // Should never reach here as they are handled in handle_command
+                Err(anyhow::Error::msg("Transaction commands should be handled in handle_command"))
             }
             RedisCommand::None => {
                 Ok(Value::Null)
