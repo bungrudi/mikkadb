@@ -10,6 +10,7 @@ pub enum RedisCommand {
     Info { section: String },
     ReplConf { subcommand: String, args: Vec<String> },
     PSync { replication_id: String, offset: i64 },
+    ConfigGet { parameter: String },
     Wait { num_replicas: usize, timeout: u64 },
     XAdd { key: String, id: String, fields: Vec<(String, String)> },
     XRead {
@@ -150,6 +151,25 @@ impl RedisCommand {
                             _ => -1,
                         };
                         Ok(RedisCommand::PSync { replication_id, offset })
+                    }
+                    "CONFIG" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'config' command"));
+                        }
+                        let subcommand = match &items[1] {
+                            Value::BulkString(s) => s.to_uppercase(),
+                            _ => return Err(Error::msg("Invalid subcommand for CONFIG")),
+                        };
+                        match subcommand.as_str() {
+                            "GET" => {
+                                let parameter = match &items[2] {
+                                    Value::BulkString(s) => s.clone(),
+                                    _ => return Err(Error::msg("Invalid parameter for CONFIG GET")),
+                                };
+                                Ok(RedisCommand::ConfigGet { parameter })
+                            }
+                            _ => Err(Error::msg("ERR Unsupported CONFIG subcommand")),
+                        }
                     }
                     "WAIT" => {
                         if items.len() < 3 {

@@ -324,6 +324,22 @@ impl Engine {
                 }
             }
             RedisCommand::Echo { message } => Ok(Value::BulkString(message)),
+            RedisCommand::ConfigGet { parameter } => {
+                let value = match parameter.to_lowercase().as_str() {
+                    "dir" => Some(self.config.data_dir.clone()),
+                    "dbfilename" => Some(self.config.db_filename.clone()),
+                    _ => None,
+                };
+
+                if let Some(val) = value {
+                    Ok(Value::Array(vec![
+                        Value::BulkString(parameter),
+                        Value::BulkString(val),
+                    ]))
+                } else {
+                    Ok(Value::Array(vec![]))
+                }
+            }
             RedisCommand::Set { key, value, px } => {
                 self.db.set(key.clone(), bytes::Bytes::from(value.clone()), px);
                 

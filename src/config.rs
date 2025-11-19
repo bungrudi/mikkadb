@@ -14,6 +14,8 @@ pub struct Config {
     pub master_repl_offset: i64,
     pub master_host: Option<String>,
     pub master_port: Option<u16>,
+    pub data_dir: String,
+    pub db_filename: String,
 }
 
 impl Config {
@@ -23,6 +25,8 @@ impl Config {
         let mut role = ServerRole::Master;
         let mut master_host = None;
         let mut master_port = None;
+        let mut data_dir = ".".to_string();
+        let mut db_filename = "dump.rdb".to_string();
 
         let mut i = 0;
         while i < args.len() {
@@ -56,6 +60,16 @@ impl Config {
                     }
                     // Re-implementing robust parsing below
                 }
+                "--dir" => {
+                    if i + 1 < args.len() {
+                        data_dir = args[i + 1].clone();
+                    }
+                }
+                "--dbfilename" => {
+                    if i + 1 < args.len() {
+                        db_filename = args[i + 1].clone();
+                    }
+                }
                 _ => {}
             }
             i += 1;
@@ -82,6 +96,16 @@ impl Config {
                          }
                     }
                 }
+                "--dir" => {
+                    if i + 1 < args.len() {
+                        data_dir = args[i + 1].clone();
+                    }
+                }
+                "--dbfilename" => {
+                    if i + 1 < args.len() {
+                        db_filename = args[i + 1].clone();
+                    }
+                }
                 _ => {}
             }
             i += 1;
@@ -94,6 +118,8 @@ impl Config {
             master_repl_offset: 0,
             master_host,
             master_port,
+            data_dir,
+            db_filename,
         }
     }
 }
