@@ -1,36 +1,33 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use bytes::Bytes;
+use std::time::{Instant, Duration};
 
 #[derive(Clone)]
 pub struct Db {
-    storage: Arc<Mutex<HashMap<String, (Bytes, Option<Instant>)>>>,
+    data: HashMap<String, (Bytes, Option<Instant>)>,
 }
 
 impl Db {
     pub fn new() -> Self {
         Db {
-            storage: Arc::new(Mutex::new(HashMap::new())),
+            data: HashMap::new(),
         }
     }
 
-    pub fn set(&self, key: String, value: Bytes, px: Option<u64>) {
-        let mut storage = self.storage.lock().unwrap();
+    pub fn set(&mut self, key: String, value: Bytes, px: Option<u64>) {
         let expiry = px.map(|ms| Instant::now() + Duration::from_millis(ms));
-        storage.insert(key, (value, expiry));
+        self.data.insert(key, (value, expiry));
     }
 
-    pub fn get(&self, key: &str) -> Option<Bytes> {
-        let mut storage = self.storage.lock().unwrap();
-        if let Some((value, expiry)) = storage.get(key).cloned() {
+    pub fn get(&mut self, key: &str) -> Option<Bytes> {
+        if let Some((value, expiry)) = self.data.get(key) {
             if let Some(expiry_time) = expiry {
-                if Instant::now() > expiry_time {
-                    storage.remove(key);
+                if Instant::now() > *expiry_time {
+                    self.data.remove(key);
                     return None;
                 }
             }
-            return Some(value);
+            return Some(value.clone());
         }
         None
     }

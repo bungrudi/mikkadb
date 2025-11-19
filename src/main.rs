@@ -1,111 +1,80 @@
 use tokio::net::TcpListener;
 use anyhow::Result;
-use bytes::Bytes;
 use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot};
+use crate::config::Config;
+use crate::engine::{Engine, CommandRequest};
+use crate::command::RedisCommand;
 
 mod resp;
 mod db;
 mod config;
+mod command;
+mod engine;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Arc::new(config::Config::parse());
-    let addr = format!("127.0.0.1:{}", config.port);
-    let listener = TcpListener::bind(&addr).await?;
-    println!("Listening on {}", addr);
+    let config = Arc::new(Config::parse());
+    println!("Listening on 127.0.0.1:{}", config.port);
 
-    let db = db::Db::new();
+    // Create the Engine actor
+    let (tx, rx) = mpsc::channel(32);
+    let mut engine = Engine::new(config.clone(), rx);
+    tokio::spawn(async move {
+        engine.run().await;
+    });
 
-    if let config::ServerRole::Slave = config.role {
-        let config = config.clone();
-        tokio::spawn(async move {
-            if let Err(e) = perform_handshake(config).await {
-                eprintln!("Handshake error: {}", e);
-            }
-        });
+    if let crate::config::ServerRole::Slave = config.role {
+        if let (Some(host), Some(port)) = (&config.master_host, &config.master_port) {
+            let host = host.clone();
+            let port = port.clone();
+            let listening_port = config.port.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = perform_handshake(host, port.to_string(), listening_port).await {
+                    eprintln!("Handshake error: {}", e);
+                }
+            });
+        }
     }
+
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", config.port)).await?;
 
     loop {
         let (stream, _) = listener.accept().await?;
-        let db = db.clone();
-        let config = config.clone();
+        let tx = tx.clone();
         tokio::spawn(async move {
             let mut handler = resp::RespHandler::new(stream);
             loop {
                 let value = handler.read_value().await;
                 match value {
                     Ok(Some(v)) => {
-                        match v {
-                            resp::Value::Array(a) => {
-                                if let Some(resp::Value::BulkString(cmd)) = a.get(0) {
-                                    match cmd.to_uppercase().as_str() {
-                                        "PING" => {
-                                            let _ = handler.write_value(resp::Value::SimpleString("PONG".to_string())).await;
-                                        }
-                                        "ECHO" => {
-                                            if let Some(arg) = a.get(1) {
-                                                let _ = handler.write_value(arg.clone()).await;
-                                            }
-                                        }
-                                        "SET" => {
-                                            if let (Some(resp::Value::BulkString(key)), Some(resp::Value::BulkString(value))) = (a.get(1), a.get(2)) {
-                                                let mut px = None;
-                                                if a.len() > 3 {
-                                                    for i in 3..a.len() {
-                                                        if let Some(resp::Value::BulkString(arg)) = a.get(i) {
-                                                            if arg.to_uppercase() == "PX" {
-                                                                if let Some(resp::Value::BulkString(ms_str)) = a.get(i + 1) {
-                                                                    if let Ok(ms) = ms_str.parse::<u64>() {
-                                                                        px = Some(ms);
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                db.set(key.clone(), Bytes::from(value.clone()), px);
-                                                let _ = handler.write_value(resp::Value::SimpleString("OK".to_string())).await;
-                                            }
-                                        }
-                                        "GET" => {
-                                            if let Some(resp::Value::BulkString(key)) = a.get(1) {
-                                                match db.get(key) {
-                                                    Some(value) => {
-                                                        if let Ok(s) = String::from_utf8(value.to_vec()) {
-                                                            let _ = handler.write_value(resp::Value::BulkString(s)).await;
-                                                        }
-                                                    }
-                                                    None => {
-                                                        let _ = handler.write_value(resp::Value::Null).await;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        "INFO" => {
-                                            let role = match config.role {
-                                                config::ServerRole::Master => "master",
-                                                config::ServerRole::Slave => "slave",
-                                            };
-                                            let info = format!(
-                                                "role:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
-                                                role, config.master_replid, config.master_repl_offset
-                                            );
-                                            let _ = handler.write_value(resp::Value::BulkString(info)).await;
-                                        }
-                                        "REPLCONF" => {
-                                            let _ = handler.write_value(resp::Value::SimpleString("OK".to_string())).await;
-                                        }
-                                        "PSYNC" => {
-                                             let id = &config.master_replid;
-                                             let offset = config.master_repl_offset;
-                                             let response = format!("FULLRESYNC {} {}", id, offset);
-                                             let _ = handler.write_value(resp::Value::SimpleString(response)).await;
-                                        }
-                                        _ => {}
+                        match RedisCommand::from_resp(v) {
+                            Ok(command) => {
+                                let (resp_tx, resp_rx) = oneshot::channel();
+                                let req = CommandRequest {
+                                    command,
+                                    response_tx: resp_tx,
+                                };
+                                if let Err(_) = tx.send(req).await {
+                                    println!("Engine receiver dropped");
+                                    break;
+                                }
+                                match resp_rx.await {
+                                    Ok(Ok(response)) => {
+                                        let _ = handler.write_value(response).await;
+                                    }
+                                    Ok(Err(e)) => {
+                                        let _ = handler.write_value(resp::Value::SimpleString(format!("ERR {}", e))).await;
+                                    }
+                                    Err(_) => {
+                                        println!("Engine response sender dropped");
+                                        break;
                                     }
                                 }
                             }
-                            _ => {}
+                            Err(e) => {
+                                let _ = handler.write_value(resp::Value::SimpleString(format!("ERR {}", e))).await;
+                            }
                         }
                     }
                     Ok(None) => break,
@@ -119,46 +88,35 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn perform_handshake(config: Arc<config::Config>) -> Result<()> {
-    if let (Some(host), Some(port)) = (&config.master_host, config.master_port) {
-        let addr = format!("{}:{}", host, port);
-        let stream = tokio::net::TcpStream::connect(addr).await?;
-        let mut handler = resp::RespHandler::new(stream);
+async fn perform_handshake(master_host: String, master_port: String, listening_port: String) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
-        // 1. PING
-        handler.write_value(resp::Value::Array(vec![resp::Value::BulkString("PING".to_string())])).await?;
-        let _ = handler.read_value().await?;
+    let mut stream = TcpStream::connect(format!("{}:{}", master_host, master_port)).await?;
+    
+    // 1. PING
+    stream.write_all(b"*1\r\n$4\r\nPING\r\n").await?;
+    let mut buf = [0; 1024];
+    let _ = stream.read(&mut buf).await?; // Expect +PONG
 
-        // 2. REPLCONF listening-port
-        handler.write_value(resp::Value::Array(vec![
-            resp::Value::BulkString("REPLCONF".to_string()),
-            resp::Value::BulkString("listening-port".to_string()),
-            resp::Value::BulkString(config.port.to_string()),
-        ])).await?;
-        let _ = handler.read_value().await?;
+    // 2. REPLCONF listening-port
+    let cmd = format!("*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n", listening_port.len(), listening_port);
+    stream.write_all(cmd.as_bytes()).await?;
+    let _ = stream.read(&mut buf).await?; // Expect +OK
 
-        // 3. REPLCONF capa psync2
-        handler.write_value(resp::Value::Array(vec![
-            resp::Value::BulkString("REPLCONF".to_string()),
-            resp::Value::BulkString("capa".to_string()),
-            resp::Value::BulkString("psync2".to_string()),
-        ])).await?;
-        let _ = handler.read_value().await?;
+    // 3. REPLCONF capa psync2
+    stream.write_all(b"*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n").await?;
+    let _ = stream.read(&mut buf).await?; // Expect +OK
 
-        // 4. PSYNC ? -1
-        handler.write_value(resp::Value::Array(vec![
-            resp::Value::BulkString("PSYNC".to_string()),
-            resp::Value::BulkString("?".to_string()),
-            resp::Value::BulkString("-1".to_string()),
-        ])).await?;
-        let _ = handler.read_value().await?;
-        
-        // Keep connection alive for future commands (not implemented yet)
-        // For now we just drop the connection which might be enough for the handshake tests
-        // but for full replication we need to keep reading.
-        // Let's loop and read to keep it open.
-         loop {
-            let _ = handler.read_value().await?;
+    // 4. PSYNC ? -1
+    stream.write_all(b"*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n").await?;
+    let _ = stream.read(&mut buf).await?; // Expect +FULLRESYNC...
+
+    // Keep connection alive
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            break;
         }
     }
     Ok(())
