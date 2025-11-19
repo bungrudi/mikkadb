@@ -25,6 +25,8 @@ pub enum RedisCommand {
     Multi,
     Exec,
     Discard,
+    RPush { key: String, values: Vec<String> },
+    LRange { key: String, start: i64, end: i64 },
     Error { message: String },
     None,
 }
@@ -287,6 +289,41 @@ impl RedisCommand {
                     "MULTI" => Ok(RedisCommand::Multi),
                     "EXEC" => Ok(RedisCommand::Exec),
                     "DISCARD" => Ok(RedisCommand::Discard),
+                    "RPUSH" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'rpush' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for RPUSH")),
+                        };
+                        let mut values = Vec::new();
+                        for i in 2..items.len() {
+                            match &items[i] {
+                                Value::BulkString(s) => values.push(s.clone()),
+                                _ => return Err(Error::msg("Invalid value for RPUSH")),
+                            }
+                        }
+                        Ok(RedisCommand::RPush { key, values })
+                    }
+                    "LRANGE" => {
+                        if items.len() < 4 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'lrange' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for LRANGE")),
+                        };
+                        let start = match &items[2] {
+                            Value::BulkString(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid start for LRANGE")),
+                        };
+                        let end = match &items[3] {
+                            Value::BulkString(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid end for LRANGE")),
+                        };
+                        Ok(RedisCommand::LRange { key, start, end })
+                    }
                     _ => Ok(RedisCommand::Error { message: format!("Unknown command: {}", command_name) }),
                 }
             }

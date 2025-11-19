@@ -12,6 +12,7 @@ pub struct StreamEntry {
 enum DataType {
     String(Bytes, Option<Instant>),
     Stream(Vec<StreamEntry>),
+    List(Vec<Bytes>),
 }
 
 #[derive(Clone)]
@@ -120,6 +121,46 @@ impl Db {
             Some(result)
         } else {
             None
+        }
+    }
+
+    pub fn rpush(&mut self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
+        let list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
+        
+        match list {
+            DataType::List(v) => {
+                v.extend(values);
+                Ok(v.len())
+            }
+            _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+        }
+    }
+    
+    pub fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<Bytes>, String> {
+        match self.data.get(key) {
+            Some(DataType::List(v)) => {
+                let len = v.len() as i64;
+                if len == 0 {
+                    return Ok(Vec::new());
+                }
+                
+                // Normalize indices
+                let start_idx = if start < 0 { len + start } else { start };
+                let end_idx = if end < 0 { len + end } else { end };
+                
+                let start_idx = if start_idx < 0 { 0 } else { start_idx };
+                // end_idx is inclusive in Redis
+                let end_idx = if end_idx >= len { len - 1 } else { end_idx };
+                
+                if start_idx > end_idx {
+                    return Ok(Vec::new());
+                }
+                
+                let result = v[start_idx as usize..=end_idx as usize].to_vec();
+                Ok(result)
+            }
+            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            None => Ok(Vec::new()),
         }
     }
 }

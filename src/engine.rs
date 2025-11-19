@@ -576,6 +576,39 @@ impl Engine {
                     Ok(Value::Array(vec![])) // Empty array if key doesn't exist or no entries
                 }
             }
+            RedisCommand::RPush { key, values } => {
+                let bytes_values: Vec<bytes::Bytes> = values.iter()
+                    .map(|v| bytes::Bytes::from(v.clone()))
+                    .collect();
+                    
+                match self.db.rpush(key.clone(), bytes_values) {
+                    Ok(len) => {
+                        // Propagate RPUSH
+                        let mut args = vec![
+                            Value::BulkString("RPUSH".to_string()),
+                            Value::BulkString(key),
+                        ];
+                        for v in values {
+                            args.push(Value::BulkString(v));
+                        }
+                        self.propagate_command(Value::Array(args)).await;
+                        
+                        Ok(Value::Integer(len as i64))
+                    }
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::LRange { key, start, end } => {
+                match self.db.lrange(&key, start, end) {
+                    Ok(values) => {
+                        let resp_values = values.iter()
+                            .map(|v| Value::BulkString(String::from_utf8_lossy(v).to_string()))
+                            .collect();
+                        Ok(Value::Array(resp_values))
+                    }
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
             RedisCommand::Get { key } => {
                 match self.db.get(&key) {
                     Some(value) => Ok(Value::BulkString(String::from_utf8_lossy(&value).to_string())),
