@@ -1,0 +1,2 @@
+language: rust
+app_name: redis-rust
