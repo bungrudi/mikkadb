@@ -51,8 +51,12 @@ impl Engine {
     pub fn new(config: Arc<Config>, rx: mpsc::Receiver<CommandRequest>) -> Self {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
         let (read_timeout_tx, read_timeout_rx) = mpsc::channel(32);
+        let mut db = Db::new();
+        if let Err(e) = db.load_rdb(config.rdb_path()) {
+            eprintln!("Failed to load RDB file: {}", e);
+        }
         Engine {
-            db: Db::new(),
+            db,
             config,
             rx,
             replicas: Vec::new(),
@@ -339,6 +343,15 @@ impl Engine {
                 } else {
                     Ok(Value::Array(vec![]))
                 }
+            }
+            RedisCommand::Keys { pattern } => {
+                println!("Engine: Executing KEYS with pattern '{}'", pattern);
+                let keys = self.db.keys(&pattern);
+                println!("Engine: Found {} keys matching pattern '{}'", keys.len(), pattern);
+                let resp_values = keys.into_iter()
+                    .map(Value::BulkString)
+                    .collect();
+                Ok(Value::Array(resp_values))
             }
             RedisCommand::Set { key, value, px } => {
                 self.db.set(key.clone(), bytes::Bytes::from(value.clone()), px);

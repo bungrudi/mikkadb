@@ -83,10 +83,16 @@ async fn main() -> Result<()> {
                                         }
                                         match resp_rx.await {
                                             Ok(Ok(response)) => {
+                                                if let crate::resp::Value::Array(_) = &response {
+                                                    println!("Sending Array response");
+                                                } else if let crate::resp::Value::SimpleString(s) = &response {
+                                                    println!("Sending SimpleString response: {}", s);
+                                                }
                                                 let _ = handler.write_value(response).await;
                                             }
                                             Ok(Err(e)) => {
-                                                let _ = handler.write_value(resp::Value::SimpleString(format!("ERR {}", e))).await;
+                                                println!("Sending Error response from Engine: {}", e);
+                                                let _ = handler.write_value(resp::Value::Error(format!("ERR {}", e))).await;
                                             }
                                             Err(_) => {
                                                 println!("Engine response sender dropped");
@@ -95,7 +101,8 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                     Err(e) => {
-                                        let _ = handler.write_value(resp::Value::SimpleString(format!("ERR {}", e))).await;
+                                        println!("Sending Error response from Parser: {}", e);
+                                        let _ = handler.write_value(resp::Value::Error(format!("ERR {}", e))).await;
                                     }
                                 }
                             }

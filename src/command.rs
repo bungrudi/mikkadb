@@ -11,6 +11,7 @@ pub enum RedisCommand {
     ReplConf { subcommand: String, args: Vec<String> },
     PSync { replication_id: String, offset: i64 },
     ConfigGet { parameter: String },
+    Keys { pattern: String },
     Wait { num_replicas: usize, timeout: u64 },
     XAdd { key: String, id: String, fields: Vec<(String, String)> },
     XRead {
@@ -36,6 +37,7 @@ impl RedisCommand {
     pub fn from_resp(value: Value) -> Result<RedisCommand> {
         match value {
             Value::Array(items) => {
+                println!("Parsing command with {} items", items.len());
                 if items.is_empty() {
                     return Ok(RedisCommand::None);
                 }
@@ -170,6 +172,21 @@ impl RedisCommand {
                             }
                             _ => Err(Error::msg("ERR Unsupported CONFIG subcommand")),
                         }
+                    }
+                    "KEYS" => {
+                        if items.len() < 2 {
+                            println!("KEYS: wrong number of arguments");
+                            return Err(Error::msg("ERR wrong number of arguments for 'keys' command"));
+                        }
+                        let pattern = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => {
+                                println!("KEYS: invalid pattern type: {:?}", items[1]);
+                                return Err(Error::msg("Invalid pattern for KEYS"));
+                            }
+                        };
+                        println!("KEYS: parsed pattern '{}'", pattern);
+                        Ok(RedisCommand::Keys { pattern })
                     }
                     "WAIT" => {
                         if items.len() < 3 {

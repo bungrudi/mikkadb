@@ -1,6 +1,10 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use bytes::Bytes;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant, SystemTime};
+use std::time::UNIX_EPOCH;
+use anyhow::{anyhow, bail, Context, Result as AnyResult};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamEntry {
@@ -25,6 +29,63 @@ impl Db {
         Db {
             data: HashMap::new(),
         }
+    }
+
+    pub fn load_rdb<P: AsRef<Path>>(&mut self, path: P) -> AnyResult<()> {
+        let path = path.as_ref();
+        if path.to_string_lossy().is_empty() {
+            return Ok(());
+        }
+
+        let data = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(anyhow!(e)).with_context(|| format!("Failed to read RDB file {}", path.display())),
+        };
+
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let mut parser = RdbParser::new(&data);
+        parser.validate_header()?;
+
+        let mut expiry: Option<u64> = None;
+
+        loop {
+            let opcode = parser.read_u8().context("Unexpected end of RDB stream")?;
+            match opcode {
+                0xFF => break,
+                0xFA => {
+                    parser.read_string()?; // AUX key
+                    parser.read_string()?; // AUX value
+                }
+                0xFB => {
+                    parser.read_length()?; // hash table size
+                    parser.read_length()?; // expires hash table size
+                }
+                0xFD => {
+                    expiry = Some(parser.read_u64()?);
+                }
+                0xFC => {
+                    let seconds = parser.read_u32()? as u64;
+                    expiry = Some(seconds * 1000);
+                }
+                0xFE => {
+                    parser.read_length()?; // DB selector, ignore single DB
+                }
+                0x00 => {
+                    let key = parser.read_string()?;
+                    let value = parser.read_string()?;
+                    self.store_loaded_string(&key, value, expiry.take());
+                }
+                other => {
+                    bail!("Unsupported RDB opcode: {:#x}", other);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn set(&mut self, key: String, value: Bytes, px: Option<u64>) {
@@ -163,6 +224,277 @@ impl Db {
             None => Ok(Vec::new()),
         }
     }
+
+    pub fn keys(&mut self, pattern: &str) -> Vec<String> {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        let mut matches = Vec::new();
+
+        for (key, value) in self.data.iter() {
+            if Self::is_expired(value, now) {
+                expired.push(key.clone());
+                continue;
+            }
+
+            if pattern == "*" || Self::pattern_matches(pattern, key) {
+                matches.push(key.clone());
+            }
+        }
+
+        for key in expired {
+            self.data.remove(&key);
+        }
+
+        matches.sort();
+        matches
+    }
+
+    fn is_expired(value: &DataType, now: Instant) -> bool {
+        match value {
+            DataType::String(_, Some(expiry)) => now > *expiry,
+            _ => false,
+        }
+    }
+
+    fn pattern_matches(pattern: &str, text: &str) -> bool {
+        if pattern == "*" || pattern == text {
+            return true;
+        }
+
+        let mut chars = pattern.split('*');
+        let mut current_index = 0usize;
+        let first = chars.next().unwrap_or("");
+
+        if !pattern.starts_with('*') {
+            if !text.starts_with(first) {
+                return false;
+            }
+            current_index = first.len();
+        }
+
+        for part in chars {
+            if part.is_empty() {
+                continue;
+            }
+            if let Some(found) = text[current_index..].find(part) {
+                current_index += found + part.len();
+            } else {
+                return false;
+            }
+        }
+
+        pattern.ends_with('*') || current_index == text.len()
+    }
+
+    fn store_loaded_string(&mut self, key: &[u8], value: Vec<u8>, expiry_ms: Option<u64>) {
+        let key_str = match String::from_utf8(key.to_vec()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let px = expiry_ms.and_then(|abs_ms| {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if abs_ms <= now_ms {
+                None
+            } else {
+                Some(abs_ms - now_ms)
+            }
+        });
+
+        self.set(key_str, Bytes::from(value), px);
+    }
+}
+
+struct RdbParser<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+enum LengthEncoding {
+    Plain(u64),
+    Encoded(EncodedType),
+}
+
+enum EncodedType {
+    Int8,
+    Int16,
+    Int32,
+    Lzf,
+}
+
+impl<'a> RdbParser<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn validate_header(&mut self) -> AnyResult<()> {
+        if self.data.len() < 9 {
+            bail!("RDB file too short");
+        }
+        if &self.data[..5] != b"REDIS" {
+            bail!("Invalid RDB header");
+        }
+        self.pos = 9; // skip magic + version
+        Ok(())
+    }
+
+    fn read_u8(&mut self) -> AnyResult<u8> {
+        if self.pos >= self.data.len() {
+            bail!("Unexpected EOF in RDB");
+        }
+        let byte = self.data[self.pos];
+        self.pos += 1;
+        Ok(byte)
+    }
+
+    fn read_u32(&mut self) -> AnyResult<u32> {
+        if self.pos + 4 > self.data.len() {
+            bail!("Unexpected EOF in RDB");
+        }
+        let bytes = &self.data[self.pos..self.pos + 4];
+        self.pos += 4;
+        Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn read_u64(&mut self) -> AnyResult<u64> {
+        if self.pos + 8 > self.data.len() {
+            bail!("Unexpected EOF in RDB");
+        }
+        let bytes = &self.data[self.pos..self.pos + 8];
+        self.pos += 8;
+        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn read_bytes(&mut self, len: usize) -> AnyResult<Vec<u8>> {
+        if self.pos + len > self.data.len() {
+            bail!("Unexpected EOF while reading bytes");
+        }
+        let slice = self.data[self.pos..self.pos + len].to_vec();
+        self.pos += len;
+        Ok(slice)
+    }
+
+    fn read_length(&mut self) -> AnyResult<LengthEncoding> {
+        let byte = self.read_u8()?;
+        match byte >> 6 {
+            0 => Ok(LengthEncoding::Plain((byte & 0x3F) as u64)),
+            1 => {
+                let next = self.read_u8()?;
+                let len = (((byte & 0x3F) as u64) << 8) | next as u64;
+                Ok(LengthEncoding::Plain(len))
+            }
+            2 => {
+                let len = self.read_u32()? as u64;
+                Ok(LengthEncoding::Plain(len))
+            }
+            3 => {
+                let enc = match byte & 0x3F {
+                    0 => EncodedType::Int8,
+                    1 => EncodedType::Int16,
+                    2 => EncodedType::Int32,
+                    3 => EncodedType::Lzf,
+                    other => bail!("Unsupported special encoding: {}", other),
+                };
+                Ok(LengthEncoding::Encoded(enc))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn read_string(&mut self) -> AnyResult<Vec<u8>> {
+        match self.read_length()? {
+            LengthEncoding::Plain(len) => self.read_bytes(len as usize),
+            LengthEncoding::Encoded(EncodedType::Int8) => {
+                let value = self.read_u8()? as i8;
+                Ok(value.to_string().into_bytes())
+            }
+            LengthEncoding::Encoded(EncodedType::Int16) => {
+                let value = self.read_u16()? as i16;
+                Ok(value.to_string().into_bytes())
+            }
+            LengthEncoding::Encoded(EncodedType::Int32) => {
+                let value = self.read_u32()? as i32;
+                Ok(value.to_string().into_bytes())
+            }
+            LengthEncoding::Encoded(EncodedType::Lzf) => {
+                let compressed_len = self.read_length_plain()?;
+                let original_len = self.read_length_plain()?;
+                let compressed = self.read_bytes(compressed_len as usize)?;
+                let decompressed = lzf_decompress(&compressed, original_len as usize)?;
+                Ok(decompressed)
+            }
+        }
+    }
+
+    fn read_length_plain(&mut self) -> AnyResult<u64> {
+        match self.read_length()? {
+            LengthEncoding::Plain(len) => Ok(len),
+            _ => bail!("Expected plain length encoding"),
+        }
+    }
+
+    fn read_u16(&mut self) -> AnyResult<u16> {
+        if self.pos + 2 > self.data.len() {
+            bail!("Unexpected EOF in RDB");
+        }
+        let bytes = &self.data[self.pos..self.pos + 2];
+        self.pos += 2;
+        Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
+    }
+}
+
+fn lzf_decompress(input: &[u8], expected_len: usize) -> AnyResult<Vec<u8>> {
+    let mut output = Vec::with_capacity(expected_len);
+    let mut i = 0;
+
+    while i < input.len() {
+        let ctrl = input[i];
+        i += 1;
+        if ctrl < 32 {
+            let literal_len = (ctrl as usize) + 1;
+            if i + literal_len > input.len() {
+                bail!("Invalid LZF literal length");
+            }
+            output.extend_from_slice(&input[i..i + literal_len]);
+            i += literal_len;
+        } else {
+            let mut length = (ctrl >> 5) as usize + 2;
+            if i >= input.len() {
+                bail!("Invalid LZF reference");
+            }
+            let mut offset = ((ctrl & 0x1F) as usize) << 8;
+            offset |= input[i] as usize;
+            i += 1;
+            offset += 1;
+
+            if length == 9 {
+                if i >= input.len() {
+                    bail!("Invalid extended LZF length");
+                }
+                length += input[i] as usize;
+                i += 1;
+            }
+
+            if offset > output.len() {
+                bail!("LZF offset out of bounds");
+            }
+
+            let start = output.len() - offset;
+            for j in 0..length {
+                let byte = output.get(start + j).copied().ok_or_else(|| anyhow!("LZF reference beyond output"))?;
+                output.push(byte);
+            }
+        }
+    }
+
+    if output.len() != expected_len {
+        bail!("Unexpected LZF output length: expected {}, got {}", expected_len, output.len());
+    }
+
+    Ok(output)
 }
 
 #[cfg(test)]

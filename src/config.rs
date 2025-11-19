@@ -1,4 +1,5 @@
 use std::env;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub enum ServerRole {
@@ -121,5 +122,9 @@ impl Config {
             data_dir,
             db_filename,
         }
+    }
+
+    pub fn rdb_path(&self) -> PathBuf {
+        Path::new(&self.data_dir).join(&self.db_filename)
     }
 }
