@@ -13,49 +13,114 @@ pub struct CommandRequest {
     pub replica_tx: Option<mpsc::Sender<Value>>,
 }
 
+struct PendingWait {
+    num_replicas: usize,
+    response_tx: oneshot::Sender<Result<Value>>,
+    deadline: tokio::time::Instant,
+}
+
 pub struct Engine {
     db: Db,
     config: Arc<Config>,
     rx: mpsc::Receiver<CommandRequest>,
     replicas: Vec<mpsc::Sender<Value>>,
+    pending_waits: Vec<Option<PendingWait>>,
+    timeout_rx: mpsc::Receiver<usize>,
+    timeout_tx: mpsc::Sender<usize>,
 }
 
 impl Engine {
     pub fn new(config: Arc<Config>, rx: mpsc::Receiver<CommandRequest>) -> Self {
+        let (timeout_tx, timeout_rx) = mpsc::channel(32);
         Engine {
             db: Db::new(),
             config,
             rx,
             replicas: Vec::new(),
+            pending_waits: Vec::new(),
+            timeout_rx,
+            timeout_tx,
         }
     }
 
     pub async fn run(&mut self) {
-        while let Some(req) = self.rx.recv().await {
-            let response = self.execute_command(&req).await;
-            let _ = req.response_tx.send(response);
+        loop {
+            tokio::select! {
+                Some(req) = self.rx.recv() => {
+                    self.handle_command(req).await;
+                }
+                Some(wait_idx) = self.timeout_rx.recv() => {
+                    self.complete_wait(wait_idx);
+                }
+                else => break,
+            }
         }
     }
 
-    async fn execute_command(&mut self, req: &CommandRequest) -> Result<Value> {
-        match &req.command {
+    async fn handle_command(&mut self, req: CommandRequest) {
+        let CommandRequest { command, response_tx, replica_tx } = req;
+        match command {
+            RedisCommand::Wait { num_replicas, timeout } => {
+                self.handle_wait(num_replicas, timeout, response_tx).await;
+            }
+            other => {
+                let result = self.execute_command_immediate(other, replica_tx).await;
+                let _ = response_tx.send(result);
+            }
+        }
+    }
+
+    async fn handle_wait(&mut self, num_replicas: usize, timeout: u64, response_tx: oneshot::Sender<Result<Value>>) {
+        let synced_replicas = self.replicas.len();
+        
+        if synced_replicas >= num_replicas {
+            let _ = response_tx.send(Ok(Value::Integer(synced_replicas as i64)));
+            return;
+        }
+        
+        // Store pending wait
+        let wait_index = self.pending_waits.len();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout);
+        
+        self.pending_waits.push(Some(PendingWait {
+            num_replicas,
+            response_tx,
+            deadline,
+        }));
+        
+        // Spawn timeout task
+        let timeout_tx = self.timeout_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            let _ = timeout_tx.send(wait_index).await;
+        });
+    }
+
+    fn complete_wait(&mut self, idx: usize) {
+        if let Some(Some(_wait)) = self.pending_waits.get_mut(idx) {
+            let synced = self.replicas.len();
+            if let Some(pending) = self.pending_waits[idx].take() {
+                let _ = pending.response_tx.send(Ok(Value::Integer(synced as i64)));
+            }
+        }
+    }
+
+    async fn execute_command_immediate(&mut self, command: RedisCommand, replica_tx: Option<mpsc::Sender<Value>>) -> Result<Value> {
+        match command {
             RedisCommand::Ping { message } => {
                 match message {
-                    Some(msg) => Ok(Value::BulkString(msg.clone())),
+                    Some(msg) => Ok(Value::BulkString(msg)),
                     None => Ok(Value::SimpleString("PONG".to_string())),
                 }
             }
-            RedisCommand::Echo { message } => Ok(Value::BulkString(message.clone())),
+            RedisCommand::Echo { message } => Ok(Value::BulkString(message)),
             RedisCommand::Set { key, value, px } => {
-                self.db.set(key.clone(), bytes::Bytes::from(value.clone()), *px);
+                self.db.set(key.clone(), bytes::Bytes::from(value.clone()), px);
                 
-                // Propagate SET command to replicas
-                // We need to reconstruct the command as Value
-                // SET key value [PX px]
                 let mut args = vec![
                     Value::BulkString("SET".to_string()),
-                    Value::BulkString(key.clone()),
-                    Value::BulkString(value.clone()),
+                    Value::BulkString(key),
+                    Value::BulkString(value),
                 ];
                 
                 if let Some(ms) = px {
@@ -69,7 +134,7 @@ impl Engine {
                 Ok(Value::SimpleString("OK".to_string()))
             }
             RedisCommand::Get { key } => {
-                match self.db.get(key) {
+                match self.db.get(&key) {
                     Some(value) => Ok(Value::BulkString(String::from_utf8_lossy(&value).to_string())),
                     None => Ok(Value::Null),
                 }
@@ -86,13 +151,12 @@ impl Engine {
                 Ok(Value::BulkString(info))
             }
             RedisCommand::ReplConf { .. } => {
-                // TODO: Handle capabilities
                 Ok(Value::SimpleString("OK".to_string()))
             }
             RedisCommand::PSync { replication_id: _, offset: _ } => {
                 // Register replica if channel provided
-                if let Some(tx) = &req.replica_tx {
-                    self.replicas.push(tx.clone());
+                if let Some(tx) = replica_tx {
+                    self.replicas.push(tx);
                 }
                 
                 let response = format!("FULLRESYNC {} {}", self.config.master_replid, self.config.master_repl_offset);
@@ -109,24 +173,12 @@ impl Engine {
                     Value::RdbFile(empty_rdb)
                 ]))
             }
-            RedisCommand::Wait { num_replicas, timeout } => {
-                // For Stage 21 (No Replicas), we just need to return the number of synced replicas.
-                // If we have no replicas, we return 0.
-                // But we need to respect the timeout.
-                // If timeout is > 0, we should wait.
-                // But if we have enough replicas already, we return immediately.
-                
-                let synced_replicas = self.replicas.len();
-                
-                if synced_replicas >= *num_replicas {
-                    return Ok(Value::Integer(synced_replicas as i64));
-                }
-                
-                tokio::time::sleep(tokio::time::Duration::from_millis(*timeout)).await;
-                Ok(Value::Integer(self.replicas.len() as i64))
-            }
             RedisCommand::Error { message } => {
-                Ok(Value::SimpleString(format!("ERR {}", message))) // Or Error type
+                Ok(Value::SimpleString(format!("ERR {}", message)))
+            }
+            RedisCommand::Wait { .. } => {
+                // Should never reach here since Wait is handled separately
+                Err(anyhow::Error::msg("WAIT should be handled in handle_command"))
             }
             RedisCommand::None => {
                 Ok(Value::Null)
