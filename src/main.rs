@@ -16,6 +16,15 @@ async fn main() -> Result<()> {
 
     let db = db::Db::new();
 
+    if let config::ServerRole::Slave = config.role {
+        let config = config.clone();
+        tokio::spawn(async move {
+            if let Err(e) = perform_handshake(config).await {
+                eprintln!("Handshake error: {}", e);
+            }
+        });
+    }
+
     loop {
         let (stream, _) = listener.accept().await?;
         let db = db.clone();
@@ -83,6 +92,15 @@ async fn main() -> Result<()> {
                                             );
                                             let _ = handler.write_value(resp::Value::BulkString(info)).await;
                                         }
+                                        "REPLCONF" => {
+                                            let _ = handler.write_value(resp::Value::SimpleString("OK".to_string())).await;
+                                        }
+                                        "PSYNC" => {
+                                             let id = &config.master_replid;
+                                             let offset = config.master_repl_offset;
+                                             let response = format!("FULLRESYNC {} {}", id, offset);
+                                             let _ = handler.write_value(resp::Value::SimpleString(response)).await;
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -99,4 +117,49 @@ async fn main() -> Result<()> {
             }
         });
     }
+}
+
+async fn perform_handshake(config: Arc<config::Config>) -> Result<()> {
+    if let (Some(host), Some(port)) = (&config.master_host, config.master_port) {
+        let addr = format!("{}:{}", host, port);
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        let mut handler = resp::RespHandler::new(stream);
+
+        // 1. PING
+        handler.write_value(resp::Value::Array(vec![resp::Value::BulkString("PING".to_string())])).await?;
+        let _ = handler.read_value().await?;
+
+        // 2. REPLCONF listening-port
+        handler.write_value(resp::Value::Array(vec![
+            resp::Value::BulkString("REPLCONF".to_string()),
+            resp::Value::BulkString("listening-port".to_string()),
+            resp::Value::BulkString(config.port.to_string()),
+        ])).await?;
+        let _ = handler.read_value().await?;
+
+        // 3. REPLCONF capa psync2
+        handler.write_value(resp::Value::Array(vec![
+            resp::Value::BulkString("REPLCONF".to_string()),
+            resp::Value::BulkString("capa".to_string()),
+            resp::Value::BulkString("psync2".to_string()),
+        ])).await?;
+        let _ = handler.read_value().await?;
+
+        // 4. PSYNC ? -1
+        handler.write_value(resp::Value::Array(vec![
+            resp::Value::BulkString("PSYNC".to_string()),
+            resp::Value::BulkString("?".to_string()),
+            resp::Value::BulkString("-1".to_string()),
+        ])).await?;
+        let _ = handler.read_value().await?;
+        
+        // Keep connection alive for future commands (not implemented yet)
+        // For now we just drop the connection which might be enough for the handshake tests
+        // but for full replication we need to keep reading.
+        // Let's loop and read to keep it open.
+         loop {
+            let _ = handler.read_value().await?;
+        }
+    }
+    Ok(())
 }

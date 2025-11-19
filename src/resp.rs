@@ -16,8 +16,14 @@ impl Value {
         match self {
             Value::SimpleString(s) => format!("+{}\r\n", s),
             Value::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s),
+            Value::Array(items) => {
+                let mut s = format!("*{}\r\n", items.len());
+                for item in items {
+                    s.push_str(&item.serialize());
+                }
+                s
+            }
             Value::Null => "$-1\r\n".to_string(),
-            _ => panic!("Unsupported value for serialization"),
         }
     }
 }
@@ -167,5 +173,14 @@ mod tests {
     fn test_serialize_null() {
         let val = Value::Null;
         assert_eq!(val.serialize(), "$-1\r\n");
+    }
+
+    #[test]
+    fn test_serialize_array() {
+        let val = Value::Array(vec![
+            Value::SimpleString("OK".to_string()),
+            Value::BulkString("hello".to_string()),
+        ]);
+        assert_eq!(val.serialize(), "*2\r\n+OK\r\n$5\r\nhello\r\n");
     }
 }
