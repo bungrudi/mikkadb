@@ -29,8 +29,9 @@ async fn main() -> Result<()> {
             let host = host.clone();
             let port = port.clone();
             let listening_port = config.port.to_string();
+            let tx = tx.clone();
             tokio::spawn(async move {
-                if let Err(e) = perform_handshake(host, port.to_string(), listening_port).await {
+                if let Err(e) = perform_handshake(host, port.to_string(), listening_port, tx).await {
                     eprintln!("Handshake error: {}", e);
                 }
             });
@@ -44,43 +45,67 @@ async fn main() -> Result<()> {
         let tx = tx.clone();
         tokio::spawn(async move {
             let mut handler = resp::RespHandler::new(stream);
+            let mut repl_rx: Option<mpsc::Receiver<crate::resp::Value>> = None;
+            
             loop {
-                let value = handler.read_value().await;
-                match value {
-                    Ok(Some(v)) => {
-                        match RedisCommand::from_resp(v) {
-                            Ok(command) => {
-                                let (resp_tx, resp_rx) = oneshot::channel();
-                                let req = CommandRequest {
-                                    command,
-                                    response_tx: resp_tx,
-                                };
-                                if let Err(_) = tx.send(req).await {
-                                    println!("Engine receiver dropped");
-                                    break;
-                                }
-                                match resp_rx.await {
-                                    Ok(Ok(response)) => {
-                                        let _ = handler.write_value(response).await;
+                tokio::select! {
+                    value = handler.read_value() => {
+                        match value {
+                            Ok(Some(v)) => {
+                                match RedisCommand::from_resp(v) {
+                                    Ok(command) => {
+                                        let (resp_tx, resp_rx) = oneshot::channel();
+                                        
+                                        let mut replica_tx = None;
+                                        if let RedisCommand::PSync { .. } = &command {
+                                            let (tx, rx) = mpsc::channel(32);
+                                            replica_tx = Some(tx);
+                                            repl_rx = Some(rx);
+                                        }
+                                        
+                                        let req = CommandRequest {
+                                            command,
+                                            response_tx: resp_tx,
+                                            replica_tx,
+                                        };
+                                        
+                                        if let Err(_) = tx.send(req).await {
+                                            println!("Engine receiver dropped");
+                                            break;
+                                        }
+                                        match resp_rx.await {
+                                            Ok(Ok(response)) => {
+                                                let _ = handler.write_value(response).await;
+                                            }
+                                            Ok(Err(e)) => {
+                                                let _ = handler.write_value(resp::Value::SimpleString(format!("ERR {}", e))).await;
+                                            }
+                                            Err(_) => {
+                                                println!("Engine response sender dropped");
+                                                break;
+                                            }
+                                        }
                                     }
-                                    Ok(Err(e)) => {
+                                    Err(e) => {
                                         let _ = handler.write_value(resp::Value::SimpleString(format!("ERR {}", e))).await;
-                                    }
-                                    Err(_) => {
-                                        println!("Engine response sender dropped");
-                                        break;
                                     }
                                 }
                             }
+                            Ok(None) => break,
                             Err(e) => {
-                                let _ = handler.write_value(resp::Value::SimpleString(format!("ERR {}", e))).await;
+                                println!("Error: {}", e);
+                                break;
                             }
                         }
                     }
-                    Ok(None) => break,
-                    Err(e) => {
-                        println!("Error: {}", e);
-                        break;
+                    Some(cmd) = async {
+                        if let Some(rx) = &mut repl_rx {
+                            rx.recv().await
+                        } else {
+                            std::future::pending().await
+                        }
+                    } => {
+                        let _ = handler.write_value(cmd).await;
                     }
                 }
             }
@@ -88,34 +113,69 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn perform_handshake(master_host: String, master_port: String, listening_port: String) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
 
-    let mut stream = TcpStream::connect(format!("{}:{}", master_host, master_port)).await?;
+
+async fn perform_handshake(master_host: String, master_port: String, listening_port: String, tx: mpsc::Sender<CommandRequest>) -> Result<()> {
+    use tokio::net::TcpStream;
+    use crate::resp::{RespHandler, Value};
+
+    let stream = TcpStream::connect(format!("{}:{}", master_host, master_port)).await?;
+    let mut handler = RespHandler::new(stream);
     
     // 1. PING
-    stream.write_all(b"*1\r\n$4\r\nPING\r\n").await?;
-    let mut buf = [0; 1024];
-    let _ = stream.read(&mut buf).await?; // Expect +PONG
+    handler.write_value(Value::Array(vec![Value::BulkString("PING".to_string())])).await?;
+    let _ = handler.read_value().await?; // PONG
 
     // 2. REPLCONF listening-port
-    let cmd = format!("*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{}\r\n", listening_port.len(), listening_port);
-    stream.write_all(cmd.as_bytes()).await?;
-    let _ = stream.read(&mut buf).await?; // Expect +OK
+    handler.write_value(Value::Array(vec![
+        Value::BulkString("REPLCONF".to_string()),
+        Value::BulkString("listening-port".to_string()),
+        Value::BulkString(listening_port),
+    ])).await?;
+    let _ = handler.read_value().await?; // OK
 
     // 3. REPLCONF capa psync2
-    stream.write_all(b"*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n").await?;
-    let _ = stream.read(&mut buf).await?; // Expect +OK
+    handler.write_value(Value::Array(vec![
+        Value::BulkString("REPLCONF".to_string()),
+        Value::BulkString("capa".to_string()),
+        Value::BulkString("psync2".to_string()),
+    ])).await?;
+    let _ = handler.read_value().await?; // OK
 
     // 4. PSYNC ? -1
-    stream.write_all(b"*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n").await?;
-    let _ = stream.read(&mut buf).await?; // Expect +FULLRESYNC...
+    handler.write_value(Value::Array(vec![
+        Value::BulkString("PSYNC".to_string()),
+        Value::BulkString("?".to_string()),
+        Value::BulkString("-1".to_string()),
+    ])).await?;
+    
+    // Expect FULLRESYNC
+    let _ = handler.read_value().await?; 
+    
+    // Expect RDB file
+    let _ = handler.read_rdb_file().await?;
 
-    // Keep connection alive
+    // Process commands from master
     loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
+        let value = handler.read_value().await?;
+        if let Some(v) = value {
+            if let Ok(command) = RedisCommand::from_resp(v) {
+                // Execute command against Engine
+                let (resp_tx, resp_rx) = oneshot::channel();
+                let req = CommandRequest {
+                    command,
+                    response_tx: resp_tx,
+                    replica_tx: None, // We are the replica, we don't propagate further
+                };
+                
+                if let Err(_) = tx.send(req).await {
+                    break;
+                }
+                
+                // Wait for execution to finish
+                let _ = resp_rx.await;
+            }
+        } else {
             break;
         }
     }

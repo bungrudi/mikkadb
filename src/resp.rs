@@ -8,6 +8,8 @@ pub enum Value {
     SimpleString(String),
     BulkString(String),
     Array(Vec<Value>),
+    RdbFile(Vec<u8>),
+    Multiple(Vec<Value>),
     Null,
 }
 
@@ -23,9 +25,39 @@ impl Value {
                 }
                 s
             }
+            Value::RdbFile(_) => panic!("Cannot serialize RdbFile to String"),
+            Value::Multiple(_) => panic!("Cannot serialize Multiple to String"),
             Value::Null => "$-1\r\n".to_string(),
         }
     }
+    
+    pub fn serialize_bytes(self) -> Vec<u8> {
+        match self {
+            Value::SimpleString(s) => format!("+{}\r\n", s).into_bytes(),
+            Value::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s).into_bytes(),
+            Value::Array(items) => {
+                let mut bytes = format!("*{}\r\n", items.len()).into_bytes();
+                for item in items {
+                    bytes.extend(item.serialize_bytes());
+                }
+                bytes
+            }
+            Value::RdbFile(data) => {
+                let mut bytes = format!("${}\r\n", data.len()).into_bytes();
+                bytes.extend(data);
+                bytes
+            }
+            Value::Multiple(items) => {
+                let mut bytes = Vec::new();
+                for item in items {
+                    bytes.extend(item.serialize_bytes());
+                }
+                bytes
+            }
+            Value::Null => "$-1\r\n".to_string().into_bytes(),
+        }
+    }
+
 }
 
 pub struct RespHandler {
@@ -62,9 +94,47 @@ impl RespHandler {
     }
 
     pub async fn write_value(&mut self, value: Value) -> Result<()> {
-        self.stream.write_all(value.serialize().as_bytes()).await?;
+        self.stream.write_all(&value.serialize_bytes()).await?;
         Ok(())
     }
+
+    pub async fn read_rdb_file(&mut self) -> Result<Vec<u8>> {
+        loop {
+            if let Ok((data, consumed)) = parse_rdb_file(&self.buffer) {
+                let _ = self.buffer.split_to(consumed);
+                return Ok(data);
+            }
+
+            let bytes_read = self.stream.read_buf(&mut self.buffer).await?;
+            if bytes_read == 0 {
+                if self.buffer.is_empty() {
+                    return Err(Error::msg("Connection closed abruptly"));
+                } else {
+                    return Err(Error::msg("Connection closed abruptly"));
+                }
+            }
+        }
+    }
+}
+
+fn parse_rdb_file(buffer: &[u8]) -> Result<(Vec<u8>, usize)> {
+    if buffer.is_empty() {
+        return Err(Error::msg("Empty buffer"));
+    }
+    if buffer[0] != b'$' {
+        return Err(Error::msg("Expected $ for RDB file"));
+    }
+    
+    let (len, header_len) = parse_integer(buffer)?;
+    let len = len as usize;
+    let total_len = header_len + len;
+    
+    if buffer.len() >= total_len {
+        let data = buffer[header_len..total_len].to_vec();
+        return Ok((data, total_len));
+    }
+    
+    Err(Error::msg("Incomplete RDB file"))
 }
 
 fn parse_message(buffer: &[u8]) -> Result<(Value, usize)> {
