@@ -10,6 +10,7 @@ pub enum RedisCommand {
     Info { section: String },
     ReplConf { subcommand: String, args: Vec<String> },
     PSync { replication_id: String, offset: i64 },
+    Wait { num_replicas: usize, timeout: u64 },
     Error { message: String },
     None,
 }
@@ -130,6 +131,20 @@ impl RedisCommand {
                             _ => -1,
                         };
                         Ok(RedisCommand::PSync { replication_id, offset })
+                    }
+                    "WAIT" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'wait' command"));
+                        }
+                        let num_replicas = match &items[1] {
+                            Value::BulkString(s) => s.parse::<usize>()?,
+                            _ => return Err(Error::msg("Invalid num_replicas for WAIT")),
+                        };
+                        let timeout = match &items[2] {
+                            Value::BulkString(s) => s.parse::<u64>()?,
+                            _ => return Err(Error::msg("Invalid timeout for WAIT")),
+                        };
+                        Ok(RedisCommand::Wait { num_replicas, timeout })
                     }
                     _ => Ok(RedisCommand::Error { message: format!("Unknown command: {}", command_name) }),
                 }

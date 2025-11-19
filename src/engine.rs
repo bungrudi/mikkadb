@@ -109,6 +109,22 @@ impl Engine {
                     Value::RdbFile(empty_rdb)
                 ]))
             }
+            RedisCommand::Wait { num_replicas, timeout } => {
+                // For Stage 21 (No Replicas), we just need to return the number of synced replicas.
+                // If we have no replicas, we return 0.
+                // But we need to respect the timeout.
+                // If timeout is > 0, we should wait.
+                // But if we have enough replicas already, we return immediately.
+                
+                let synced_replicas = self.replicas.len();
+                
+                if synced_replicas >= *num_replicas {
+                    return Ok(Value::Integer(synced_replicas as i64));
+                }
+                
+                tokio::time::sleep(tokio::time::Duration::from_millis(*timeout)).await;
+                Ok(Value::Integer(self.replicas.len() as i64))
+            }
             RedisCommand::Error { message } => {
                 Ok(Value::SimpleString(format!("ERR {}", message))) // Or Error type
             }

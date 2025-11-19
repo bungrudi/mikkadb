@@ -8,6 +8,7 @@ pub enum Value {
     SimpleString(String),
     BulkString(String),
     Array(Vec<Value>),
+    Integer(i64),
     RdbFile(Vec<u8>),
     Multiple(Vec<Value>),
     Null,
@@ -18,6 +19,7 @@ impl Value {
         match self {
             Value::SimpleString(s) => format!("+{}\r\n", s),
             Value::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s),
+            Value::Integer(i) => format!(":{}\r\n", i),
             Value::Array(items) => {
                 let mut s = format!("*{}\r\n", items.len());
                 for item in items {
@@ -35,6 +37,7 @@ impl Value {
         match self {
             Value::SimpleString(s) => format!("+{}\r\n", s).into_bytes(),
             Value::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s).into_bytes(),
+            Value::Integer(i) => format!(":{}\r\n", i).into_bytes(),
             Value::Array(items) => {
                 let mut bytes = format!("*{}\r\n", items.len()).into_bytes();
                 for item in items {
