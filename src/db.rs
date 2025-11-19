@@ -53,7 +53,9 @@ impl Db {
         let mut expiry: Option<u64> = None;
 
         loop {
+            let opcode_pos = parser.pos;
             let opcode = parser.read_u8().context("Unexpected end of RDB stream")?;
+            eprintln!("[rdb] opcode {:#x} at pos {}", opcode, opcode_pos);
             match opcode {
                 0xFF => break,
                 0xFA => {
@@ -64,12 +66,13 @@ impl Db {
                     parser.read_length()?; // hash table size
                     parser.read_length()?; // expires hash table size
                 }
-                0xFD => {
-                    expiry = Some(parser.read_u64()?);
-                }
-                0xFC => {
-                    let seconds = parser.read_u32()? as u64;
-                    expiry = Some(seconds * 1000);
+                // According to the Go encoder used in redis-tester (github.com/hdt3213/rdb),
+                // TTL is written as an absolute Unix timestamp in *milliseconds* using an
+                // 8-byte little-endian integer. We therefore treat both 0xFD and 0xFC as
+                // 8-byte millisecond timestamps to stay in sync with that encoder.
+                0xFD | 0xFC => {
+                    let ts_ms = parser.read_u64()?;
+                    expiry = Some(ts_ms);
                 }
                 0xFE => {
                     parser.read_length()?; // DB selector, ignore single DB
@@ -80,7 +83,7 @@ impl Db {
                     self.store_loaded_string(&key, value, expiry.take());
                 }
                 other => {
-                    bail!("Unsupported RDB opcode: {:#x}", other);
+                    bail!("Unsupported RDB opcode: {:#x} at position {}", other, opcode_pos);
                 }
             }
         }
@@ -292,19 +295,21 @@ impl Db {
             Err(_) => return,
         };
 
-        let px = expiry_ms.and_then(|abs_ms| {
-            let now_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            if abs_ms <= now_ms {
-                None
-            } else {
-                Some(abs_ms - now_ms)
-            }
-        });
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
 
-        self.set(key_str, Bytes::from(value), px);
+        // If the key is already expired at load time, skip it entirely.
+        if let Some(abs_ms) = expiry_ms {
+            if abs_ms <= now_ms {
+                return;
+            }
+            let px = Some(abs_ms - now_ms);
+            self.set(key_str, Bytes::from(value), px);
+        } else {
+            self.set(key_str, Bytes::from(value), None);
+        }
     }
 }
 
