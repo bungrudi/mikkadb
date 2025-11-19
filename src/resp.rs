@@ -116,3 +116,56 @@ fn parse_integer(buffer: &[u8]) -> Result<(i64, usize)> {
     }
     Err(Error::msg("Incomplete integer"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_simple_string() {
+        let buffer = b"+OK\r\n";
+        let (value, consumed) = parse_message(buffer).unwrap();
+        assert_eq!(value, Value::SimpleString("OK".to_string()));
+        assert_eq!(consumed, 5);
+    }
+
+    #[test]
+    fn test_parse_bulk_string() {
+        let buffer = b"$5\r\nhello\r\n";
+        let (value, consumed) = parse_message(buffer).unwrap();
+        assert_eq!(value, Value::BulkString("hello".to_string()));
+        assert_eq!(consumed, 11);
+    }
+
+    #[test]
+    fn test_parse_array() {
+        let buffer = b"*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n";
+        let (value, consumed) = parse_message(buffer).unwrap();
+        if let Value::Array(items) = value {
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0], Value::BulkString("ECHO".to_string()));
+            assert_eq!(items[1], Value::BulkString("hello".to_string()));
+        } else {
+            panic!("Expected Array");
+        }
+        assert_eq!(consumed, 25);
+    }
+
+    #[test]
+    fn test_serialize_simple_string() {
+        let val = Value::SimpleString("OK".to_string());
+        assert_eq!(val.serialize(), "+OK\r\n");
+    }
+
+    #[test]
+    fn test_serialize_bulk_string() {
+        let val = Value::BulkString("hello".to_string());
+        assert_eq!(val.serialize(), "$5\r\nhello\r\n");
+    }
+    
+    #[test]
+    fn test_serialize_null() {
+        let val = Value::Null;
+        assert_eq!(val.serialize(), "$-1\r\n");
+    }
+}

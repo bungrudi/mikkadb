@@ -1,20 +1,25 @@
 use tokio::net::TcpListener;
 use anyhow::Result;
 use bytes::Bytes;
+use std::sync::Arc;
 
 mod resp;
 mod db;
+mod config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:6379").await?;
-    println!("Listening on 127.0.0.1:6379");
+    let config = Arc::new(config::Config::parse());
+    let addr = format!("127.0.0.1:{}", config.port);
+    let listener = TcpListener::bind(&addr).await?;
+    println!("Listening on {}", addr);
 
     let db = db::Db::new();
 
     loop {
         let (stream, _) = listener.accept().await?;
         let db = db.clone();
+        let config = config.clone();
         tokio::spawn(async move {
             let mut handler = resp::RespHandler::new(stream);
             loop {
@@ -35,7 +40,21 @@ async fn main() -> Result<()> {
                                         }
                                         "SET" => {
                                             if let (Some(resp::Value::BulkString(key)), Some(resp::Value::BulkString(value))) = (a.get(1), a.get(2)) {
-                                                db.set(key.clone(), Bytes::from(value.clone()));
+                                                let mut px = None;
+                                                if a.len() > 3 {
+                                                    for i in 3..a.len() {
+                                                        if let Some(resp::Value::BulkString(arg)) = a.get(i) {
+                                                            if arg.to_uppercase() == "PX" {
+                                                                if let Some(resp::Value::BulkString(ms_str)) = a.get(i + 1) {
+                                                                    if let Ok(ms) = ms_str.parse::<u64>() {
+                                                                        px = Some(ms);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                db.set(key.clone(), Bytes::from(value.clone()), px);
                                                 let _ = handler.write_value(resp::Value::SimpleString("OK".to_string())).await;
                                             }
                                         }
@@ -43,13 +62,8 @@ async fn main() -> Result<()> {
                                             if let Some(resp::Value::BulkString(key)) = a.get(1) {
                                                 match db.get(key) {
                                                     Some(value) => {
-                                                        // Convert Bytes to String for BulkString
-                                                        // Assuming valid UTF-8 for now as Value::BulkString expects String
-                                                        // TODO: Value::BulkString should probably hold Bytes
                                                         if let Ok(s) = String::from_utf8(value.to_vec()) {
                                                             let _ = handler.write_value(resp::Value::BulkString(s)).await;
-                                                        } else {
-                                                            // Handle non-utf8?
                                                         }
                                                     }
                                                     None => {
@@ -57,6 +71,17 @@ async fn main() -> Result<()> {
                                                     }
                                                 }
                                             }
+                                        }
+                                        "INFO" => {
+                                            let role = match config.role {
+                                                config::ServerRole::Master => "master",
+                                                config::ServerRole::Slave => "slave",
+                                            };
+                                            let info = format!(
+                                                "role:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
+                                                role, config.master_replid, config.master_repl_offset
+                                            );
+                                            let _ = handler.write_value(resp::Value::BulkString(info)).await;
                                         }
                                         _ => {}
                                     }
