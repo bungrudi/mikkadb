@@ -11,6 +11,7 @@ pub enum Value {
     Integer(i64),
     RdbFile(Vec<u8>),
     Multiple(Vec<Value>),
+    Error(String),
     Null,
 }
 
@@ -29,6 +30,7 @@ impl Value {
             }
             Value::RdbFile(_) => panic!("Cannot serialize RdbFile to String"),
             Value::Multiple(_) => panic!("Cannot serialize Multiple to String"),
+            Value::Error(s) => format!("-{}\r\n", s),
             Value::Null => "$-1\r\n".to_string(),
         }
     }
@@ -57,6 +59,7 @@ impl Value {
                 }
                 bytes
             }
+            Value::Error(s) => format!("-{}\r\n", s).into_bytes(),
             Value::Null => "$-1\r\n".to_string().into_bytes(),
         }
     }

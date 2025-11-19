@@ -8,30 +8,47 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 pub struct CommandRequest {
+    pub client_id: u64,
     pub command: RedisCommand,
     pub response_tx: oneshot::Sender<Result<Value>>,
     pub replica_tx: Option<mpsc::Sender<Value>>,
 }
 
+struct Replica {
+    id: u64,
+    tx: mpsc::Sender<Value>,
+    offset: i64,
+}
+
 struct PendingWait {
     num_replicas: usize,
     response_tx: oneshot::Sender<Result<Value>>,
-    deadline: tokio::time::Instant,
+    target_offset: i64,
+}
+
+struct PendingRead {
+    response_tx: oneshot::Sender<Result<Value>>,
+    streams: Vec<(String, (u64, u64))>, // key, last_id
 }
 
 pub struct Engine {
     db: Db,
     config: Arc<Config>,
     rx: mpsc::Receiver<CommandRequest>,
-    replicas: Vec<mpsc::Sender<Value>>,
+    replicas: Vec<Replica>,
     pending_waits: Vec<Option<PendingWait>>,
     timeout_rx: mpsc::Receiver<usize>,
     timeout_tx: mpsc::Sender<usize>,
+    pending_reads: Vec<Option<PendingRead>>,
+    read_timeout_rx: mpsc::Receiver<usize>,
+    read_timeout_tx: mpsc::Sender<usize>,
+    replication_offset: i64,
 }
 
 impl Engine {
     pub fn new(config: Arc<Config>, rx: mpsc::Receiver<CommandRequest>) -> Self {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
+        let (read_timeout_tx, read_timeout_rx) = mpsc::channel(32);
         Engine {
             db: Db::new(),
             config,
@@ -40,6 +57,10 @@ impl Engine {
             pending_waits: Vec::new(),
             timeout_rx,
             timeout_tx,
+            pending_reads: Vec::new(),
+            read_timeout_rx,
+            read_timeout_tx,
+            replication_offset: 0,
         }
     }
 
@@ -52,40 +73,161 @@ impl Engine {
                 Some(wait_idx) = self.timeout_rx.recv() => {
                     self.complete_wait(wait_idx);
                 }
+                Some(read_idx) = self.read_timeout_rx.recv() => {
+                    self.complete_read(read_idx);
+                }
                 else => break,
+            }
+        }
+    }
+    
+    fn complete_read(&mut self, idx: usize) {
+        if let Some(Some(read)) = self.pending_reads.get_mut(idx) {
+            // Timeout occurred, check one last time? 
+            // Or just return Null as per Redis spec for timeout.
+            // "If the timeout is reached, the command returns a Null reply."
+            if let Some(pending) = self.pending_reads[idx].take() {
+                let _ = pending.response_tx.send(Ok(Value::Null));
+            }
+        }
+    }
+    
+    fn complete_read_with_data(&mut self, idx: usize) {
+        if let Some(Some(read)) = self.pending_reads.get_mut(idx) {
+            // Fetch data for all streams requested
+            let mut result_streams = Vec::new();
+            
+            for (key, start_id) in &read.streams {
+                if let Some(entries) = self.db.read_stream(key, *start_id) {
+                    let mut stream_entries = Vec::new();
+                    for entry in entries {
+                        let id_str = format!("{}-{}", entry.id.0, entry.id.1);
+                        let mut fields_val = Vec::new();
+                        for (k, v) in entry.fields {
+                            fields_val.push(Value::BulkString(k));
+                            fields_val.push(Value::BulkString(v));
+                        }
+                        
+                        stream_entries.push(Value::Array(vec![
+                            Value::BulkString(id_str),
+                            Value::Array(fields_val)
+                        ]));
+                    }
+                    
+                    result_streams.push(Value::Array(vec![
+                        Value::BulkString(key.clone()),
+                        Value::Array(stream_entries)
+                    ]));
+                }
+            }
+            
+            if !result_streams.is_empty() {
+                if let Some(pending) = self.pending_reads[idx].take() {
+                    let _ = pending.response_tx.send(Ok(Value::Array(result_streams)));
+                }
             }
         }
     }
 
     async fn handle_command(&mut self, req: CommandRequest) {
-        let CommandRequest { command, response_tx, replica_tx } = req;
+        let CommandRequest { client_id, command, response_tx, replica_tx } = req;
         match command {
             RedisCommand::Wait { num_replicas, timeout } => {
                 self.handle_wait(num_replicas, timeout, response_tx).await;
             }
             other => {
-                let result = self.execute_command_immediate(other, replica_tx).await;
-                let _ = response_tx.send(result);
+                // Check if it's XREAD with BLOCK
+                let is_xread_block = if let RedisCommand::XRead { block: Some(_), .. } = &other {
+                    true
+                } else {
+                    false
+                };
+                
+                let result = self.execute_command_immediate(client_id, other.clone(), replica_tx).await;
+                
+                match result {
+                    Ok(Value::Error(msg)) if msg == "BLOCKED" => {
+                        // Handle blocking XREAD
+                        if let RedisCommand::XRead { block: Some(block_ms), streams } = other {
+                            // Resolve streams again? No, we need to pass resolved streams.
+                            // But execute_command_immediate already did resolution.
+                            // We should probably just move XREAD logic here or split it.
+                            // Re-resolving is fine for now as it's cheap (just getting last ID).
+                            
+                            let mut resolved_streams = Vec::new();
+                            for (key, id_str) in streams {
+                                let start_id = if id_str == "$" {
+                                    self.db.get_last_stream_id(&key).unwrap_or((0, 0))
+                                } else {
+                                    let parts: Vec<&str> = id_str.split('-').collect();
+                                    let ms = parts[0].parse::<u64>().unwrap_or(0);
+                                    let seq = parts[1].parse::<u64>().unwrap_or(0);
+                                    (ms, seq)
+                                };
+                                resolved_streams.push((key, start_id));
+                            }
+                            
+                            self.handle_read_block(block_ms, resolved_streams, response_tx).await;
+                        }
+                    }
+                    _ => {
+                        let _ = response_tx.send(result);
+                    }
+                }
             }
         }
     }
+    
+    async fn handle_read_block(&mut self, block_ms: u64, streams: Vec<(String, (u64, u64))>, response_tx: oneshot::Sender<Result<Value>>) {
+        let read_index = self.pending_reads.len();
+        
+        // If block_ms is 0, it means block indefinitely.
+        // We don't spawn a timeout task in that case.
+        if block_ms > 0 {
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(block_ms);
+            let timeout_tx = self.read_timeout_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep_until(deadline).await;
+                let _ = timeout_tx.send(read_index).await;
+            });
+        }
+        
+        self.pending_reads.push(Some(PendingRead {
+            response_tx,
+            streams,
+        }));
+    }
 
     async fn handle_wait(&mut self, num_replicas: usize, timeout: u64, response_tx: oneshot::Sender<Result<Value>>) {
-        let synced_replicas = self.replicas.len();
+        // 1. Count replicas that are already synced up to current offset
+        let synced_count = self.replicas.iter()
+            .filter(|r| r.offset >= self.replication_offset)
+            .count();
         
-        if synced_replicas >= num_replicas {
-            let _ = response_tx.send(Ok(Value::Integer(synced_replicas as i64)));
+        if synced_count >= num_replicas {
+            let _ = response_tx.send(Ok(Value::Integer(synced_count as i64)));
             return;
         }
         
-        // Store pending wait
+        // 2. Send REPLCONF GETACK * to all replicas
+        let getack_cmd = Value::Array(vec![
+            Value::BulkString("REPLCONF".to_string()),
+            Value::BulkString("GETACK".to_string()),
+            Value::BulkString("*".to_string()),
+        ]);
+        
+        for replica in &self.replicas {
+            let _ = replica.tx.send(getack_cmd.clone()).await;
+        }
+        
+        // 3. Store pending wait
         let wait_index = self.pending_waits.len();
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout);
         
         self.pending_waits.push(Some(PendingWait {
             num_replicas,
             response_tx,
-            deadline,
+            target_offset: self.replication_offset,
         }));
         
         // Spawn timeout task
@@ -97,15 +239,18 @@ impl Engine {
     }
 
     fn complete_wait(&mut self, idx: usize) {
-        if let Some(Some(_wait)) = self.pending_waits.get_mut(idx) {
-            let synced = self.replicas.len();
+        if let Some(Some(wait)) = self.pending_waits.get_mut(idx) {
+            let synced_count = self.replicas.iter()
+                .filter(|r| r.offset >= wait.target_offset)
+                .count();
+                
             if let Some(pending) = self.pending_waits[idx].take() {
-                let _ = pending.response_tx.send(Ok(Value::Integer(synced as i64)));
+                let _ = pending.response_tx.send(Ok(Value::Integer(synced_count as i64)));
             }
         }
     }
 
-    async fn execute_command_immediate(&mut self, command: RedisCommand, replica_tx: Option<mpsc::Sender<Value>>) -> Result<Value> {
+    async fn execute_command_immediate(&mut self, client_id: u64, command: RedisCommand, replica_tx: Option<mpsc::Sender<Value>>) -> Result<Value> {
         match command {
             RedisCommand::Ping { message } => {
                 match message {
@@ -133,6 +278,190 @@ impl Engine {
                 
                 Ok(Value::SimpleString("OK".to_string()))
             }
+            RedisCommand::XAdd { key, id, fields } => {
+                // Parse ID
+                let (ms, seq) = if id == "*" {
+                    // Auto-generate
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    
+                    let last_id = self.db.get_last_stream_id(&key);
+                    let (last_ms, last_seq) = last_id.unwrap_or((0, 0));
+                    
+                    if now > last_ms {
+                        (now, 0)
+                    } else {
+                        // If now <= last_ms, we must increment sequence.
+                        // Even if now < last_ms (clock skew), we must ensure monotonicity.
+                        // Wait, if now < last_ms, we should probably use last_ms?
+                        // Redis spec says: "If the ID specified is *, the ID is generated automatically... 
+                        // The milliseconds part is the current time... if the current time is smaller or equal to the previous entry time, the sequence number is incremented... if the milliseconds part is smaller than the previous entry time, the previous entry time is used instead."
+                        // Actually, let's just use max(now, last_ms).
+                        
+                        let ms = if now < last_ms { last_ms } else { now };
+                        let seq = if ms == last_ms { last_seq + 1 } else { 0 };
+                        (ms, seq)
+                    }
+                } else {
+                    // Parse explicit ID
+                    let parts: Vec<&str> = id.split('-').collect();
+                    if parts.len() != 2 {
+                        return Ok(Value::Error("ERR The ID specified in XADD must be greater than 0-0".to_string())); // Invalid format, but let's return error
+                        // Actually, invalid format should be handled.
+                        // Let's assume format is valid-ish or return error.
+                    }
+                    
+                    let ms = parts[0].parse::<u64>().map_err(|_| anyhow::Error::msg("Invalid ID"))?;
+                    let seq = if parts[1] == "*" {
+                        // Partial auto-generation: <ms>-*
+                        let last_id = self.db.get_last_stream_id(&key);
+                        let (last_ms, last_seq) = last_id.unwrap_or((0, 0));
+                        
+                        if ms > last_ms {
+                            0
+                        } else if ms == last_ms {
+                            last_seq + 1
+                        } else {
+                            // ms < last_ms. This is allowed if explicit ID, but we need to validate later.
+                            // But for partial auto-generation, we just generate.
+                            // Wait, if ms < last_ms, and we generate seq, it will fail validation in db.add_stream_entry.
+                            // So just generate 0 or something?
+                            // Let's just generate based on logic:
+                            // If ms == last_ms, seq = last_seq + 1.
+                            // If ms != last_ms, seq = 0.
+                            // Validation will happen in db.add_stream_entry.
+                            if ms == last_ms { last_seq + 1 } else { 0 }
+                        }
+                    } else {
+                        parts[1].parse::<u64>().map_err(|_| anyhow::Error::msg("Invalid ID"))?
+                    };
+                    
+                    (ms, seq)
+                };
+                
+                match self.db.add_stream_entry(key.clone(), (ms, seq), fields) {
+                    Ok((ms, seq)) => {
+                        let id_str = format!("{}-{}", ms, seq);
+                        
+                        // Check pending reads
+                        let mut completed_indices = Vec::new();
+                        for (i, read_opt) in self.pending_reads.iter().enumerate() {
+                            if let Some(read) = read_opt {
+                                for (stream_key, start_id) in &read.streams {
+                                    if *stream_key == key {
+                                        if ms > start_id.0 || (ms == start_id.0 && seq > start_id.1) {
+                                            completed_indices.push(i);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        for i in completed_indices {
+                            self.complete_read_with_data(i);
+                        }
+                        
+                        Ok(Value::BulkString(id_str))
+                    },
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::XRead { block, streams } => {
+                let mut result_streams = Vec::new();
+                let mut has_results = false;
+                
+                // Resolve $ to current last ID if needed
+                let mut resolved_streams = Vec::new();
+                for (key, id_str) in &streams {
+                    let start_id = if id_str == "$" {
+                        self.db.get_last_stream_id(key).unwrap_or((0, 0))
+                    } else {
+                        let parts: Vec<&str> = id_str.split('-').collect();
+                        if parts.len() != 2 {
+                            if id_str == "0" {
+                                (0, 0)
+                            } else {
+                                return Ok(Value::Error("ERR Invalid stream ID specified as stream command argument".to_string()));
+                            }
+                        } else {
+                            let ms = parts[0].parse::<u64>().unwrap_or(0);
+                            let seq = parts[1].parse::<u64>().unwrap_or(0);
+                            (ms, seq)
+                        }
+                    };
+                    resolved_streams.push((key.clone(), start_id));
+                }
+                
+                // Check for results immediately
+                for (key, start_id) in &resolved_streams {
+                    if let Some(entries) = self.db.read_stream(key, *start_id) {
+                        has_results = true;
+                        let mut stream_entries = Vec::new();
+                        for entry in entries {
+                            let id_str = format!("{}-{}", entry.id.0, entry.id.1);
+                            let mut fields_val = Vec::new();
+                            for (k, v) in entry.fields {
+                                fields_val.push(Value::BulkString(k));
+                                fields_val.push(Value::BulkString(v));
+                            }
+                            
+                            stream_entries.push(Value::Array(vec![
+                                Value::BulkString(id_str),
+                                Value::Array(fields_val)
+                            ]));
+                        }
+                        
+                        result_streams.push(Value::Array(vec![
+                            Value::BulkString(key.clone()),
+                            Value::Array(stream_entries)
+                        ]));
+                    }
+                }
+                
+                if has_results {
+                    return Ok(Value::Array(result_streams));
+                }
+                
+                if let Some(block_ms) = block {
+                    // Block client
+                    // We need to send the response later, so we can't return Ok(Value) here.
+                    // But execute_command_immediate returns Result<Value>.
+                    // We need to change how handle_command works for XRead with block.
+                    // Or, we can return a special value indicating "Blocked"?
+                    // But handle_command sends the result to response_tx immediately.
+                    // We need to take ownership of response_tx in handle_command for XRead.
+                    // But execute_command_immediate is called by handle_command which holds response_tx.
+                    // Refactor needed: handle_xread should be separate like handle_wait.
+                    
+                    // For now, let's return a special error or value that handle_command recognizes?
+                    // No, cleaner to refactor handle_command.
+                    
+                    // Let's return a specific error that handle_command can catch?
+                    // Or better, move XRead handling out of execute_command_immediate.
+                    
+                    // Since I can't easily change the signature of execute_command_immediate in this tool call without changing handle_command too...
+                    // I will return a special error "BLOCKED" and handle it in handle_command?
+                    // No, that's hacky.
+                    
+                    // I will return Ok(Value::Null) here, but I need to signal that I've taken over response_tx.
+                    // But I haven't taken over response_tx because it's not passed to execute_command_immediate.
+                    
+                    // I MUST refactor handle_command to handle XRead separately.
+                    // So I will return an error here saying "HandledSeparately" and catch it?
+                    // Or just move XRead to handle_command.
+                    
+                    // Let's move XRead to handle_command in the next step.
+                    // For this step, I'll just implement the non-blocking logic properly with resolved_streams.
+                    // And if block is set and no results, I'll return a special Value::Error("BLOCKED").
+                    
+                    return Ok(Value::Error("BLOCKED".to_string()));
+                }
+                
+                Ok(Value::Null)
+            }
             RedisCommand::Get { key } => {
                 match self.db.get(&key) {
                     Some(value) => Ok(Value::BulkString(String::from_utf8_lossy(&value).to_string())),
@@ -150,13 +479,45 @@ impl Engine {
                 );
                 Ok(Value::BulkString(info))
             }
-            RedisCommand::ReplConf { .. } => {
+            RedisCommand::ReplConf { subcommand, args } => {
+                if subcommand.to_uppercase() == "ACK" {
+                    if let Some(offset_str) = args.get(0) {
+                        if let Ok(offset) = offset_str.parse::<i64>() {
+                            // Update replica offset
+                            if let Some(replica) = self.replicas.iter_mut().find(|r| r.id == client_id) {
+                                replica.offset = offset;
+                                
+                                // Check pending waits
+                                let mut completed_indices = Vec::new();
+                                for (i, wait_opt) in self.pending_waits.iter().enumerate() {
+                                    if let Some(wait) = wait_opt {
+                                        let synced_count = self.replicas.iter()
+                                            .filter(|r| r.offset >= wait.target_offset)
+                                            .count();
+                                        
+                                        if synced_count >= wait.num_replicas {
+                                            completed_indices.push(i);
+                                        }
+                                    }
+                                }
+                                
+                                for i in completed_indices {
+                                    self.complete_wait(i);
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(Value::SimpleString("OK".to_string()))
             }
             RedisCommand::PSync { replication_id: _, offset: _ } => {
                 // Register replica if channel provided
                 if let Some(tx) = replica_tx {
-                    self.replicas.push(tx);
+                    self.replicas.push(Replica {
+                        id: client_id,
+                        tx,
+                        offset: 0,
+                    });
                 }
                 
                 let response = format!("FULLRESYNC {} {}", self.config.master_replid, self.config.master_repl_offset);
@@ -187,14 +548,12 @@ impl Engine {
     }
     
     async fn propagate_command(&mut self, cmd: Value) {
-        // We need to remove dead replicas
-        // But retain is synchronous and send is async.
-        // We can iterate and collect dead indices?
-        // Or just ignore errors for now (lazy cleanup).
-        // For Stage 111, we just need to send.
+        // Update master offset
+        let bytes = cmd.clone().serialize_bytes();
+        self.replication_offset += bytes.len() as i64;
         
         for replica in &self.replicas {
-            let _ = replica.send(cmd.clone()).await;
+            let _ = replica.tx.send(cmd.clone()).await;
         }
     }
 }

@@ -11,6 +11,8 @@ pub enum RedisCommand {
     ReplConf { subcommand: String, args: Vec<String> },
     PSync { replication_id: String, offset: i64 },
     Wait { num_replicas: usize, timeout: u64 },
+    XAdd { key: String, id: String, fields: Vec<(String, String)> },
+    XRead { block: Option<u64>, streams: Vec<(String, String)> },
     Error { message: String },
     None,
 }
@@ -145,6 +147,98 @@ impl RedisCommand {
                             _ => return Err(Error::msg("Invalid timeout for WAIT")),
                         };
                         Ok(RedisCommand::Wait { num_replicas, timeout })
+                    }
+                    "XADD" => {
+                        if items.len() < 4 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'xadd' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for XADD")),
+                        };
+                        let id = match &items[2] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid ID for XADD")),
+                        };
+                        
+                        let mut fields = Vec::new();
+                        let mut i = 3;
+                        while i < items.len() {
+                            if i + 1 >= items.len() {
+                                return Err(Error::msg("ERR wrong number of arguments for 'xadd' command"));
+                            }
+                            let field = match &items[i] {
+                                Value::BulkString(s) => s.clone(),
+                                _ => return Err(Error::msg("Invalid field for XADD")),
+                            };
+                            let value = match &items[i+1] {
+                                Value::BulkString(s) => s.clone(),
+                                _ => return Err(Error::msg("Invalid value for XADD")),
+                            };
+                            fields.push((field, value));
+                            i += 2;
+                        }
+                        
+                        Ok(RedisCommand::XAdd { key, id, fields })
+                    }
+                    "XREAD" => {
+                        let mut block = None;
+                        let mut streams_start_idx = 1;
+                        
+                        if items.len() > 1 {
+                            if let Value::BulkString(s) = &items[1] {
+                                if s.to_uppercase() == "BLOCK" {
+                                    if items.len() < 3 {
+                                        return Err(Error::msg("ERR syntax error"));
+                                    }
+                                    if let Value::BulkString(ms) = &items[2] {
+                                        block = Some(ms.parse::<u64>()?);
+                                    } else {
+                                        return Err(Error::msg("ERR value is not an integer or out of range"));
+                                    }
+                                    streams_start_idx = 3;
+                                }
+                            }
+                        }
+                        
+                        if items.len() <= streams_start_idx {
+                             return Err(Error::msg("ERR wrong number of arguments for 'xread' command"));
+                        }
+                        
+                        if let Value::BulkString(s) = &items[streams_start_idx] {
+                            if s.to_uppercase() != "STREAMS" {
+                                return Err(Error::msg("ERR syntax error")); 
+                            }
+                        } else {
+                            return Err(Error::msg("ERR syntax error"));
+                        }
+                        
+                        let args_count = items.len() - (streams_start_idx + 1);
+                        if args_count % 2 != 0 {
+                            return Err(Error::msg("ERR Unbalanced XREAD list of streams: for each stream key an ID or '$' must be specified."));
+                        }
+                        
+                        let num_streams = args_count / 2;
+                        let mut streams = Vec::new();
+                        
+                        for i in 0..num_streams {
+                            let key_idx = streams_start_idx + 1 + i;
+                            let id_idx = streams_start_idx + 1 + num_streams + i;
+                            
+                            let key = match &items[key_idx] {
+                                Value::BulkString(s) => s.clone(),
+                                _ => return Err(Error::msg("Invalid key")),
+                            };
+                            
+                            let id = match &items[id_idx] {
+                                Value::BulkString(s) => s.clone(),
+                                _ => return Err(Error::msg("Invalid ID")),
+                            };
+                            
+                            streams.push((key, id));
+                        }
+                        
+                        Ok(RedisCommand::XRead { block, streams })
                     }
                     _ => Ok(RedisCommand::Error { message: format!("Unknown command: {}", command_name) }),
                 }

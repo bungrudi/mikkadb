@@ -39,10 +39,17 @@ async fn main() -> Result<()> {
     }
 
     let listener = TcpListener::bind(format!("127.0.0.1:{}", config.port)).await?;
+    println!("Listening on 127.0.0.1:{}", config.port);
+    
+    let mut client_id_counter = 0;
 
     loop {
         let (stream, _) = listener.accept().await?;
+        let config = config.clone();
         let tx = tx.clone();
+        client_id_counter += 1;
+        let client_id = client_id_counter;
+        
         tokio::spawn(async move {
             let mut handler = resp::RespHandler::new(stream);
             let mut repl_rx: Option<mpsc::Receiver<crate::resp::Value>> = None;
@@ -64,6 +71,7 @@ async fn main() -> Result<()> {
                                         }
                                         
                                         let req = CommandRequest {
+                                            client_id,
                                             command,
                                             response_tx: resp_tx,
                                             replica_tx,
@@ -163,6 +171,7 @@ async fn perform_handshake(master_host: String, master_port: String, listening_p
                 // Execute command against Engine
                 let (resp_tx, resp_rx) = oneshot::channel();
                 let req = CommandRequest {
+                    client_id: 0, // Internal/Replica ID
                     command,
                     response_tx: resp_tx,
                     replica_tx: None, // We are the replica, we don't propagate further
