@@ -81,19 +81,28 @@ impl RespHandler {
 
     pub async fn read_value(&mut self) -> Result<Option<Value>> {
         loop {
+            if !self.buffer.is_empty() {
+                eprintln!("[resp] buffer len before parse: {}", self.buffer.len());
+            }
+
+            if let Ok((v, consumed)) = parse_message(&self.buffer) {
+                eprintln!("[resp] parsed message, consumed {}", consumed);
+                // Drop only the bytes that were actually consumed for this value,
+                // leaving any remaining bytes in the buffer for the next parse.
+                let _ = self.buffer.split_to(consumed);
+                return Ok(Some(v));
+            }
+
+            // If we couldn't parse a full message yet, read more data from the stream.
+            eprintln!("[resp] reading more data from stream...");
             let bytes_read = self.stream.read_buf(&mut self.buffer).await?;
+            eprintln!("[resp] read {} bytes from stream", bytes_read);
             if bytes_read == 0 {
                 if self.buffer.is_empty() {
                     return Ok(None);
                 } else {
                     return Err(Error::msg("Connection closed abruptly"));
                 }
-            }
-
-            if let Ok((v, _)) = parse_message(&self.buffer) {
-                self.buffer.clear(); // For now, assume one command per read or clear after read. 
-                // TODO: Advance buffer properly instead of clearing
-                return Ok(Some(v));
             }
             // If parse failed (incomplete), continue reading
         }

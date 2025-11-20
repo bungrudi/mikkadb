@@ -173,26 +173,53 @@ async fn perform_handshake(master_host: String, master_port: String, listening_p
     // Process commands from master
     loop {
         let value = handler.read_value().await?;
-        if let Some(v) = value {
-            if let Ok(command) = RedisCommand::from_resp(v) {
-                // Execute command against Engine
-                let (resp_tx, resp_rx) = oneshot::channel();
-                let req = CommandRequest {
-                    client_id: 0, // Internal/Replica ID
-                    command,
-                    response_tx: resp_tx,
-                    replica_tx: None, // We are the replica, we don't propagate further
-                };
-                
-                if let Err(_) = tx.send(req).await {
-                    break;
+        match value {
+            Some(v) => {
+                eprintln!("[repl] received from master: {:?}", v);
+                match RedisCommand::from_resp(v) {
+                    Ok(command) => {
+                        eprintln!("[repl] parsed replication command: {:?}", command);
+                        if let RedisCommand::ReplConf { subcommand, .. } = &command {
+                            if subcommand.to_uppercase() == "GETACK" {
+                                let ack = Value::Array(vec![
+                                    Value::BulkString("REPLCONF".to_string()),
+                                    Value::BulkString("ACK".to_string()),
+                                    Value::BulkString("0".to_string()),
+                                ]);
+                                eprintln!("[repl] sending ACK 0 to master");
+                                handler.write_value(ack).await?;
+                                continue;
+                            }
+                        }
+                        // Execute command against Engine
+                        let (resp_tx, resp_rx) = oneshot::channel();
+                        let req = CommandRequest {
+                            client_id: 0, // Internal/Replica ID
+                            command,
+                            response_tx: resp_tx,
+                            replica_tx: None, // We are the replica, we don't propagate further
+                        };
+
+                        if let Err(_) = tx.send(req).await {
+                            eprintln!("[repl] failed to send command to engine");
+                            break;
+                        }
+
+                        // Wait for execution to finish
+                        if let Err(_) = resp_rx.await {
+                            eprintln!("[repl] engine dropped response channel");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[repl] failed to parse replication command: {}", e);
+                    }
                 }
-                
-                // Wait for execution to finish
-                let _ = resp_rx.await;
             }
-        } else {
-            break;
+            None => {
+                eprintln!("[repl] master closed replication connection");
+                break;
+            }
         }
     }
     Ok(())
