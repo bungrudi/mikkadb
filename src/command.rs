@@ -29,6 +29,10 @@ pub enum RedisCommand {
     Discard,
     RPush { key: String, values: Vec<String> },
     LRange { key: String, start: i64, end: i64 },
+    LPush { key: String, values: Vec<String> },
+    LLen { key: String },
+    LPop { key: String, count: Option<i64> },
+    BLPop { keys: Vec<String>, timeout: f64 },
     Error { message: String },
     None,
 }
@@ -360,6 +364,69 @@ impl RedisCommand {
                             _ => return Err(Error::msg("Invalid end for LRANGE")),
                         };
                         Ok(RedisCommand::LRange { key, start, end })
+                    }
+                    "LPUSH" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'lpush' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for LPUSH")),
+                        };
+                        let mut values = Vec::new();
+                        for i in 2..items.len() {
+                            match &items[i] {
+                                Value::BulkString(s) => values.push(s.clone()),
+                                _ => return Err(Error::msg("Invalid value for LPUSH")),
+                            }
+                        }
+                        Ok(RedisCommand::LPush { key, values })
+                    }
+                    "LLEN" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'llen' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for LLEN")),
+                        };
+                        Ok(RedisCommand::LLen { key })
+                    }
+                    "LPOP" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'lpop' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for LPOP")),
+                        };
+                        let count = if items.len() > 2 {
+                            match &items[2] {
+                                Value::BulkString(s) => Some(s.parse::<i64>()?),
+                                _ => return Err(Error::msg("Invalid count for LPOP")),
+                            }
+                        } else {
+                            None
+                        };
+                        Ok(RedisCommand::LPop { key, count })
+                    }
+                    "BLPOP" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'blpop' command"));
+                        }
+                        let mut keys = Vec::new();
+                        // The last argument is the timeout
+                        for i in 1..items.len() - 1 {
+                            match &items[i] {
+                                Value::BulkString(s) => keys.push(s.clone()),
+                                _ => return Err(Error::msg("Invalid key for BLPOP")),
+                            }
+                        }
+                        let timeout = match &items[items.len() - 1] {
+                            Value::BulkString(s) => s.parse::<f64>()?,
+                            _ => return Err(Error::msg("Invalid timeout for BLPOP")),
+                        };
+                        Ok(RedisCommand::BLPop { keys, timeout })
                     }
                     _ => Ok(RedisCommand::Error { message: format!("Unknown command: {}", command_name) }),
                 }

@@ -228,6 +228,75 @@ impl Db {
         }
     }
 
+    pub fn lpush(&mut self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
+        let list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
+        
+        match list {
+            DataType::List(v) => {
+                // Prepend values. Redis LPUSH inserts values one by one at the head.
+                // So LPUSH key a b c results in [c, b, a, ...]
+                // We need to reverse the values to prepend them in the correct order if we use splice or insert
+                // Or we can just iterate and insert at 0.
+                // Efficient way: create a new vector with capacity, add new values (reversed), then extend with old values.
+                // Or just insert at 0 one by one (slow for large lists).
+                // For Vec, inserting at 0 is O(N).
+                // Let's optimize slightly by splicing.
+                
+                // values: [a, b, c] -> we want list to be [c, b, a, old...]
+                // So we reverse values: [c, b, a] and prepend.
+                let mut values = values;
+                values.reverse();
+                
+                // Prepend
+                v.splice(0..0, values);
+                Ok(v.len())
+            }
+            _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+        }
+    }
+
+    pub fn llen(&self, key: &str) -> Result<usize, String> {
+        match self.data.get(key) {
+            Some(DataType::List(v)) => Ok(v.len()),
+            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            None => Ok(0),
+        }
+    }
+
+    pub fn lpop(&mut self, key: &str, count: Option<i64>) -> Result<Option<Vec<Bytes>>, String> {
+        match self.data.get_mut(key) {
+            Some(DataType::List(v)) => {
+                if v.is_empty() {
+                    return Ok(None);
+                }
+                
+                let count = count.unwrap_or(1);
+                if count < 0 {
+                     // Redis LPOP with negative count is invalid? No, count must be positive.
+                     // Actually, standard LPOP takes count argument in Redis 6.2+.
+                     // If count is not provided, it pops 1.
+                     return Err("ERR value is out of range, must be positive".to_string());
+                }
+                
+                let count = count as usize;
+                let drain_count = std::cmp::min(count, v.len());
+                
+                let result: Vec<Bytes> = v.drain(0..drain_count).collect();
+                
+                // If list is empty, should we remove the key? Redis usually does.
+                // But for now let's keep it simple, or check if we can remove it.
+                // We can't remove easily here because we only have mutable reference to the value.
+                // The caller might handle cleanup if needed, or we just leave empty list.
+                // Redis actually removes the key if empty.
+                // We'll leave it as empty list for now, consistent with rpush creating it.
+                
+                Ok(Some(result))
+            }
+            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            None => Ok(None),
+        }
+    }
+
     pub fn keys(&mut self, pattern: &str) -> Vec<String> {
         let now = Instant::now();
         let mut expired = Vec::new();

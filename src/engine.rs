@@ -44,6 +44,8 @@ pub struct Engine {
     read_timeout_rx: mpsc::Receiver<usize>,
     read_timeout_tx: mpsc::Sender<usize>,
     replication_offset: i64,
+    // (keys, timeout_at, tx)
+    waiting_list_clients: Vec<(Vec<String>, Instant, mpsc::Sender<Value>)>,
     transaction_state: HashMap<u64, Vec<RedisCommand>>,
 }
 
@@ -67,6 +69,7 @@ impl Engine {
             read_timeout_rx,
             read_timeout_tx,
             replication_offset: 0,
+            waiting_list_clients: Vec::new(),
             transaction_state: HashMap::new(),
         }
     }
@@ -183,9 +186,35 @@ impl Engine {
                         // But it will propagate as individual commands.
                         // That's fine for now.
                         
-                        match self.execute_command_immediate(client_id, cmd, replica_tx.clone()).await {
+                        match self.execute_command_immediate(client_id, cmd, None).await {
                             Ok(val) => results.push(val),
-                            Err(e) => results.push(Value::Error(e.to_string())),
+                            Err(e) => {
+                                if e.to_string() == "BLPOP_BLOCK" {
+                                    // Client is blocked, do not send response yet.
+                                    // The response will be sent via the oneshot channel stored in waiting_list_clients.
+                                    // However, we need to keep the connection open.
+                                    // The `run` loop continues.
+                                    // But we need to handle the oneshot receiver here?
+                                    // No, `execute_command_immediate` created the channel and stored the sender.
+                                    // But where is the receiver?
+                                    // Ah, `execute_command_immediate` dropped the receiver!
+                                    // We need to change how we handle this.
+                                    // We can pass `resp_tx` to `execute_command_immediate`?
+                                    // `resp_tx` is `mpsc::Sender<Value>`.
+                                    // `waiting_list_clients` stores `oneshot::Sender<Value>`.
+                                    
+                                    // If we store `resp_tx` in `waiting_list_clients`, we don't need a oneshot.
+                                    // We can just use the `resp_tx` to send the response later!
+                                    // `resp_tx` is cloneable? Yes, it's `mpsc::Sender`.
+                                    
+                                    // So let's change `waiting_list_clients` to store `mpsc::Sender<Value>`.
+                                    // For now, in the context of EXEC, BLPOP is not allowed.
+                                    // Redis returns an error: "ERR BLPOP/BRPOP/BRPOPLPUSH/XREADBLOCK/XAUTOCLAIMBLOCK can't be used in MULTI/EXEC"
+                                    results.push(Value::Error("ERR BLPOP/BRPOP/BRPOPLPUSH/XREADBLOCK/XAUTOCLAIMBLOCK can't be used in MULTI/EXEC".to_string()));
+                                } else {
+                                    results.push(Value::Error(e.to_string()));
+                                }
+                            }
                         }
                     }
                     let _ = response_tx.send(Ok(Value::Array(results)));
@@ -314,12 +343,12 @@ impl Engine {
                 .count();
                 
             if let Some(pending) = self.pending_waits[idx].take() {
-                let _ = pending.response_tx.send(Ok(Value::Integer(synced_count as i64)));
+                    let _ = pending.response_tx.send(Ok(Value::Integer(synced_count as i64)));
             }
         }
     }
 
-    async fn execute_command_immediate(&mut self, client_id: u64, command: RedisCommand, replica_tx: Option<mpsc::Sender<Value>>) -> Result<Value> {
+    async fn execute_command_immediate(&mut self, client_id: u64, command: RedisCommand, resp_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
         match command {
             RedisCommand::Ping { message } => {
                 match message {
@@ -638,6 +667,105 @@ impl Engine {
                     Err(e) => Ok(Value::Error(e)),
                 }
             }
+            RedisCommand::LPush { key, values } => {
+                let bytes_values: Vec<bytes::Bytes> = values.iter()
+                    .map(|v| bytes::Bytes::from(v.clone()))
+                    .collect();
+                    
+                match self.db.lpush(key.clone(), bytes_values) {
+                    Ok(len) => {
+                        // Propagate LPUSH
+                        let mut args = vec![
+                            Value::BulkString("LPUSH".to_string()),
+                            Value::BulkString(key.clone()),
+                        ];
+                        for v in values {
+                            args.push(Value::BulkString(v));
+                        }
+                        self.propagate_command(Value::Array(args)).await;
+                        
+                        // Check if any blocked clients are waiting for this key
+                        self.check_blocked_list_clients(&key).await;
+                        
+                        Ok(Value::Integer(len as i64))
+                    }
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::LLen { key } => {
+                match self.db.llen(&key) {
+                    Ok(len) => Ok(Value::Integer(len as i64)),
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::LPop { key, count } => {
+                match self.db.lpop(&key, count) {
+                    Ok(Some(values)) => {
+                        // Propagate LPOP
+                        let mut args = vec![
+                            Value::BulkString("LPOP".to_string()),
+                            Value::BulkString(key),
+                        ];
+                        if let Some(c) = count {
+                            args.push(Value::BulkString(c.to_string()));
+                        }
+                        self.propagate_command(Value::Array(args)).await;
+                        
+                        if count.is_none() {
+                            // Single value
+                            Ok(Value::BulkString(String::from_utf8_lossy(&values[0]).to_string()))
+                        } else {
+                            // Array
+                            let resp_values = values.iter()
+                                .map(|v| Value::BulkString(String::from_utf8_lossy(v).to_string()))
+                                .collect();
+                            Ok(Value::Array(resp_values))
+                        }
+                    }
+                    Ok(None) => Ok(Value::Null),
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::BLPop { keys, timeout } => {
+                // Check if any key has data
+                for key in &keys {
+                    match self.db.lpop(key, None) {
+                        Ok(Some(values)) => {
+                            // Found data, return immediately
+                            // Propagate LPOP (BLPOP acts as LPOP when data is present)
+                            let args = vec![
+                                Value::BulkString("LPOP".to_string()),
+                                Value::BulkString(key.clone()),
+                            ];
+                            self.propagate_command(Value::Array(args)).await;
+                            
+                            return Ok(Value::Array(vec![
+                                Value::BulkString(key.clone()),
+                                Value::BulkString(String::from_utf8_lossy(&values[0]).to_string())
+                            ]));
+                        }
+                        Ok(None) => continue,
+                        Err(e) => return Ok(Value::Error(e)),
+                    }
+                }
+                
+                // No data found, block
+                if let Some(tx) = resp_tx {
+                    let timeout_at = if timeout == 0.0 {
+                        // 0 means block indefinitely. We use a very distant future.
+                        Instant::now() + std::time::Duration::from_secs(365 * 24 * 60 * 60)
+                    } else {
+                        Instant::now() + std::time::Duration::from_secs_f64(timeout)
+                    };
+                    
+                    self.waiting_list_clients.push((keys, timeout_at, tx));
+                    
+                    // Return a special error to indicate blocking, handled by caller
+                    Err(anyhow::Error::msg("BLPOP_BLOCK"))
+                } else {
+                    Err(anyhow::Error::msg("BLPOP cannot be used in this context"))
+                }
+            }
             RedisCommand::Get { key } => {
                 match self.db.get(&key) {
                     Some(value) => Ok(Value::BulkString(String::from_utf8_lossy(&value).to_string())),
@@ -770,5 +898,33 @@ impl Engine {
         for replica in &self.replicas {
             let _ = replica.tx.send(cmd.clone()).await;
         }
+        async fn check_blocked_list_clients(&mut self, key: &str) {
+        let mut i = 0;
+        while i < self.waiting_list_clients.len() {
+            let (keys, _, _) = &self.waiting_list_clients[i];
+            if keys.contains(&key.to_string()) {
+                // Found a client waiting for this key
+                let (keys, _, tx) = self.waiting_list_clients.remove(i);
+                
+                // Try to pop from the key that triggered the wakeup
+                match self.db.lpop(key, None) {
+                    Ok(Some(values)) => {
+                        let response = Value::Array(vec![
+                            Value::BulkString(key.to_string()),
+                            Value::BulkString(String::from_utf8_lossy(&values[0]).to_string())
+                        ]);
+                        let _ = tx.send(response);
+                        // We successfully unblocked one client with this element.
+                        return; 
+                    }
+                    _ => {
+                        // Should not happen if we just pushed.
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
+}
 }
