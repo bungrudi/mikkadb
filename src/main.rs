@@ -135,6 +135,17 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            
+            // Client disconnected
+            let (resp_tx, _) = oneshot::channel();
+            let req = CommandRequest {
+                client_id,
+                command: RedisCommand::InternalDisconnect,
+                response_tx: resp_tx,
+                replica_tx: None,
+                pub_sub_tx: None,
+            };
+            let _ = tx.send(req).await;
         });
     }
 }

@@ -37,6 +37,7 @@ pub enum RedisCommand {
     LLen { key: String },
     LPop { key: String, count: Option<i64> },
     BLPop { keys: Vec<String>, timeout: f64 },
+    InternalDisconnect,
     Error { message: String },
     None,
 }
@@ -467,7 +468,7 @@ impl RedisCommand {
                         let mut keys = Vec::new();
                         // The last argument is the timeout
                         for i in 1..items.len() - 1 {
-                            match &items[i] {
+                             match &items[i] {
                                 Value::BulkString(s) => keys.push(s.clone()),
                                 _ => return Err(Error::msg("Invalid key for BLPOP")),
                             }
@@ -514,6 +515,7 @@ impl RedisCommand {
             RedisCommand::LLen { .. } => "llen",
             RedisCommand::LPop { .. } => "lpop",
             RedisCommand::BLPop { .. } => "blpop",
+            RedisCommand::InternalDisconnect => "internal_disconnect",
             RedisCommand::Error { .. } => "error",
             RedisCommand::None => "none",
         }

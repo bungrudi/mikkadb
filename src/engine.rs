@@ -209,6 +209,15 @@ impl Engine {
     async fn handle_command(&mut self, req: CommandRequest) {
         let CommandRequest { client_id, command, response_tx, replica_tx, pub_sub_tx } = req;
         
+        if let RedisCommand::InternalDisconnect = &command {
+             self.transaction_state.remove(&client_id);
+             for subs in self.pub_sub_subs.values_mut() {
+                 subs.remove(&client_id);
+             }
+             let _ = response_tx.send(Ok(Value::SimpleString("OK".to_string())));
+             return;
+        }
+        
         // Check subscription state
         let is_subscribed = self.pub_sub_subs.values().any(|subs| subs.contains_key(&client_id));
         if is_subscribed {
@@ -283,31 +292,7 @@ impl Engine {
                         match self.execute_command_immediate(client_id, cmd, None, None).await {
                             Ok(val) => results.push(val),
                             Err(e) => {
-                                if e.to_string() == "BLPOP_BLOCK" {
-                                    // Client is blocked, do not send response yet.
-                                    // The response will be sent via the oneshot channel stored in waiting_list_clients.
-                                    // However, we need to keep the connection open.
-                                    // The `run` loop continues.
-                                    // But we need to handle the oneshot receiver here?
-                                    // No, `execute_command_immediate` created the channel and stored the sender.
-                                    // But where is the receiver?
-                                    // Ah, `execute_command_immediate` dropped the receiver!
-                                    // We need to change how we handle this.
-                                    // We can pass `resp_tx` to `execute_command_immediate`?
-                                    // `resp_tx` is `mpsc::Sender<Value>`.
-                                    // `waiting_list_clients` stores `oneshot::Sender<Value>`.
-                                    
-                                    // If we store `resp_tx` in `waiting_list_clients`, we don't need a oneshot.
-                                    // We can just use the `resp_tx` to send the response later!
-                                    // `resp_tx` is cloneable? Yes, it's `mpsc::Sender`.
-                                    
-                                    // So let's change `waiting_list_clients` to store `mpsc::Sender<Value>`.
-                                    // For now, in the context of EXEC, BLPOP is not allowed.
-                                    // Redis returns an error: "ERR BLPOP/BRPOP/BRPOPLPUSH/XREADBLOCK/XAUTOCLAIMBLOCK can't be used in MULTI/EXEC"
-                                    results.push(Value::Error("ERR BLPOP/BRPOP/BRPOPLPUSH/XREADBLOCK/XAUTOCLAIMBLOCK can't be used in MULTI/EXEC".to_string()));
-                                } else {
-                                    results.push(Value::Error(e.to_string()));
-                                }
+                                results.push(Value::Error(e.to_string()));
                             }
                         }
                     }
@@ -322,6 +307,13 @@ impl Engine {
         
         // If in transaction, queue command
         if let Some(queue) = self.transaction_state.get_mut(&client_id) {
+             match &command {
+                 RedisCommand::Subscribe { .. } | RedisCommand::Unsubscribe { .. } => {
+                     let _ = response_tx.send(Ok(Value::Error("ERR subscribe inside MULTI is not allowed".to_string())));
+                     return;
+                 }
+                 _ => {}
+             }
             queue.push(command);
             let _ = response_tx.send(Ok(Value::SimpleString("QUEUED".to_string())));
             return;
@@ -923,10 +915,7 @@ impl Engine {
                 }
             }
             RedisCommand::BLPop { keys, timeout: _timeout } => {
-                // BLPOP inside MULTI/EXEC is not allowed to block.
-                // We keep immediate pop support here, but if no data is
-                // available we return a special error so the caller can
-                // turn it into the appropriate Redis error.
+                // BLPOP inside MULTI/EXEC behaves like LPOP (non-blocking)
                 for key in &keys {
                     match self.db.lpop(key, None) {
                         Ok(Some(values)) => {
@@ -946,8 +935,9 @@ impl Engine {
                     }
                 }
 
-                Err(anyhow::Error::msg("BLPOP_BLOCK"))
+                Ok(Value::Null)
             }
+            RedisCommand::InternalDisconnect => Ok(Value::SimpleString("OK".to_string())),
             RedisCommand::Get { key } => {
                 match self.db.get(&key) {
                     Some(value) => Ok(Value::BulkString(String::from_utf8_lossy(&value).to_string())),
