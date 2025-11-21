@@ -17,6 +17,7 @@ enum DataType {
     String(Bytes, Option<Instant>),
     Stream(Vec<StreamEntry>),
     List(Vec<Bytes>),
+    SortedSet(HashMap<String, f64>),
 }
 
 #[derive(Clone)]
@@ -305,9 +306,10 @@ impl Db {
 				"none".to_string()
 			}
 			Some(DataType::String(_, _)) => "string".to_string(),
-			Some(DataType::Stream(_)) => "stream".to_string(),
-			Some(DataType::List(_)) => "list".to_string(),
-			None => "none".to_string(),
+            Some(DataType::Stream(_)) => "stream".to_string(),
+            Some(DataType::List(_)) => "list".to_string(),
+            Some(DataType::SortedSet(_)) => "zset".to_string(),
+            None => "none".to_string(),
 		}
 	}
 
@@ -333,6 +335,112 @@ impl Db {
 
         matches.sort();
         matches
+    }
+
+    pub fn zadd(&mut self, key: String, entries: Vec<(f64, String)>) -> Result<usize, String> {
+        let entry = self.data.entry(key).or_insert(DataType::SortedSet(HashMap::new()));
+        match entry {
+            DataType::SortedSet(map) => {
+                let mut added = 0;
+                for (score, member) in entries {
+                    if map.insert(member, score).is_none() {
+                        added += 1;
+                    }
+                }
+                Ok(added)
+            }
+            _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+        }
+    }
+
+    pub fn zrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<(String, Option<f64>)>, String> {
+        match self.data.get(key) {
+            Some(DataType::SortedSet(map)) => {
+                let mut elements: Vec<(&String, &f64)> = map.iter().collect();
+                // Sort by score, then member lexicographically
+                elements.sort_by(|a, b| {
+                    a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(b.0))
+                });
+
+                let len = elements.len() as i64;
+                let start = if start < 0 { len + start } else { start };
+                let end = if end < 0 { len + end } else { end };
+
+                let start = start.max(0);
+                let end = end.min(len - 1);
+
+                if start > end || start >= len {
+                    return Ok(Vec::new());
+                }
+
+                let result = elements[start as usize..=end as usize].iter()
+                    .map(|(m, s)| (m.to_string(), Some(**s)))
+                    .collect();
+                Ok(result)
+            }
+            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn zcard(&self, key: &str) -> Result<usize, String> {
+        match self.data.get(key) {
+            Some(DataType::SortedSet(map)) => Ok(map.len()),
+            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            None => Ok(0),
+        }
+    }
+
+    pub fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>, String> {
+        match self.data.get(key) {
+            Some(DataType::SortedSet(map)) => Ok(map.get(member).cloned()),
+            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            None => Ok(None),
+        }
+    }
+
+    pub fn zrem(&mut self, key: &str, members: &[String]) -> Result<usize, String> {
+        if let Some(entry) = self.data.get_mut(key) {
+            match entry {
+                DataType::SortedSet(map) => {
+                    let mut removed = 0;
+                    for member in members {
+                        if map.remove(member).is_some() {
+                            removed += 1;
+                        }
+                    }
+                    Ok(removed)
+                }
+                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            }
+        } else {
+             Ok(0)
+        }
+    }
+
+    pub fn zrank(&self, key: &str, member: &str) -> Result<Option<usize>, String> {
+        match self.data.get(key) {
+            Some(DataType::SortedSet(map)) => {
+                if !map.contains_key(member) {
+                    return Ok(None);
+                }
+                let mut elements: Vec<(&String, &f64)> = map.iter().collect();
+                elements.sort_by(|a, b| {
+                    a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(b.0))
+                });
+                
+                for (i, (m, _)) in elements.iter().enumerate() {
+                     if m.as_str() == member {
+                         return Ok(Some(i));
+                     }
+                }
+                Ok(None)
+            }
+            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            None => Ok(None),
+        }
     }
 
     fn is_expired(value: &DataType, now: Instant) -> bool {

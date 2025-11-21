@@ -938,6 +938,57 @@ impl Engine {
                 Ok(Value::Null)
             }
             RedisCommand::InternalDisconnect => Ok(Value::SimpleString("OK".to_string())),
+            RedisCommand::ZAdd { key, entries } => {
+                match self.db.zadd(key, entries) {
+                    Ok(added) => Ok(Value::Integer(added as i64)),
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::ZRange { key, start, end, with_scores } => {
+                match self.db.zrange(&key, start, end) {
+                    Ok(items) => {
+                         let mut resp = Vec::new();
+                         for (member, score) in items {
+                             resp.push(Value::BulkString(member));
+                             if with_scores {
+                                 if let Some(s) = score {
+                                     resp.push(Value::BulkString(s.to_string()));
+                                 } else {
+                                     resp.push(Value::Null);
+                                 }
+                             }
+                         }
+                         Ok(Value::Array(resp))
+                    }
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::ZCard { key } => {
+                match self.db.zcard(&key) {
+                    Ok(count) => Ok(Value::Integer(count as i64)),
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::ZScore { key, member } => {
+                match self.db.zscore(&key, &member) {
+                    Ok(Some(score)) => Ok(Value::BulkString(score.to_string())),
+                    Ok(None) => Ok(Value::Null),
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::ZRank { key, member } => {
+                match self.db.zrank(&key, &member) {
+                    Ok(Some(rank)) => Ok(Value::Integer(rank as i64)),
+                    Ok(None) => Ok(Value::Null),
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
+            RedisCommand::ZRem { key, members } => {
+                match self.db.zrem(&key, &members) {
+                    Ok(removed) => Ok(Value::Integer(removed as i64)),
+                    Err(e) => Ok(Value::Error(e)),
+                }
+            }
             RedisCommand::Get { key } => {
                 match self.db.get(&key) {
                     Some(value) => Ok(Value::BulkString(String::from_utf8_lossy(&value).to_string())),

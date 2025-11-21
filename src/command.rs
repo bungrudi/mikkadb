@@ -38,6 +38,12 @@ pub enum RedisCommand {
     LPop { key: String, count: Option<i64> },
     BLPop { keys: Vec<String>, timeout: f64 },
     InternalDisconnect,
+    ZAdd { key: String, entries: Vec<(f64, String)> },
+    ZRange { key: String, start: i64, end: i64, with_scores: bool },
+    ZCard { key: String },
+    ZScore { key: String, member: String },
+    ZRank { key: String, member: String },
+    ZRem { key: String, members: Vec<String> },
     Error { message: String },
     None,
 }
@@ -479,6 +485,125 @@ impl RedisCommand {
                         };
                         Ok(RedisCommand::BLPop { keys, timeout })
                     }
+                    "ZADD" => {
+                        if items.len() < 4 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'zadd' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for ZADD")),
+                        };
+                        
+                        let mut entries = Vec::new();
+                        let mut i = 2;
+                        while i < items.len() {
+                            let score_str = match &items[i] {
+                                Value::BulkString(s) => s,
+                                _ => return Err(Error::msg("Invalid score for ZADD")),
+                            };
+                            
+                            let score = match score_str.parse::<f64>() {
+                                Ok(f) => f,
+                                Err(_) => return Err(Error::msg("ERR value is not a valid float")),
+                            };
+                            
+                            if i + 1 >= items.len() {
+                                return Err(Error::msg("ERR syntax error"));
+                            }
+                            
+                            let member = match &items[i+1] {
+                                Value::BulkString(s) => s.clone(),
+                                _ => return Err(Error::msg("Invalid member for ZADD")),
+                            };
+                            
+                            entries.push((score, member));
+                            i += 2;
+                        }
+                        Ok(RedisCommand::ZAdd { key, entries })
+                    }
+                    "ZRANGE" => {
+                        if items.len() < 4 {
+                             return Err(Error::msg("ERR wrong number of arguments for 'zrange' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for ZRANGE")),
+                        };
+                        let start = match &items[2] {
+                            Value::BulkString(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid start for ZRANGE")),
+                        };
+                        let end = match &items[3] {
+                            Value::BulkString(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid end for ZRANGE")),
+                        };
+                        
+                        let mut with_scores = false;
+                        if items.len() > 4 {
+                            if let Value::BulkString(s) = &items[4] {
+                                if s.to_uppercase() == "WITHSCORES" {
+                                    with_scores = true;
+                                }
+                            }
+                        }
+                        
+                        Ok(RedisCommand::ZRange { key, start, end, with_scores })
+                    }
+                    "ZCARD" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'zcard' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for ZCARD")),
+                        };
+                        Ok(RedisCommand::ZCard { key })
+                    }
+                    "ZSCORE" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'zscore' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for ZSCORE")),
+                        };
+                        let member = match &items[2] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid member for ZSCORE")),
+                        };
+                        Ok(RedisCommand::ZScore { key, member })
+                    }
+                    "ZRANK" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'zrank' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for ZRANK")),
+                        };
+                        let member = match &items[2] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid member for ZRANK")),
+                        };
+                        Ok(RedisCommand::ZRank { key, member })
+                    }
+                    "ZREM" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'zrem' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for ZREM")),
+                        };
+                        let mut members = Vec::new();
+                        for i in 2..items.len() {
+                             match &items[i] {
+                                Value::BulkString(s) => members.push(s.clone()),
+                                _ => return Err(Error::msg("Invalid member for ZREM")),
+                            }
+                        }
+                        Ok(RedisCommand::ZRem { key, members })
+                    }
                     _ => Ok(RedisCommand::Error { message: format!("Unknown command: {}", command_name) }),
                 }
             }
@@ -516,6 +641,12 @@ impl RedisCommand {
             RedisCommand::LPop { .. } => "lpop",
             RedisCommand::BLPop { .. } => "blpop",
             RedisCommand::InternalDisconnect => "internal_disconnect",
+            RedisCommand::ZAdd { .. } => "zadd",
+            RedisCommand::ZRange { .. } => "zrange",
+            RedisCommand::ZCard { .. } => "zcard",
+            RedisCommand::ZScore { .. } => "zscore",
+            RedisCommand::ZRank { .. } => "zrank",
+            RedisCommand::ZRem { .. } => "zrem",
             RedisCommand::Error { .. } => "error",
             RedisCommand::None => "none",
         }
