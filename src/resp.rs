@@ -17,6 +17,7 @@ pub enum Value {
 }
 
 impl Value {
+    #[cfg(test)]
     pub fn serialize(self) -> String {
         match self {
             Value::SimpleString(s) => format!("+{}\r\n", s),
