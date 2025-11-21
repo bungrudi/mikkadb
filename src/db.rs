@@ -297,6 +297,20 @@ impl Db {
         }
     }
 
+	pub fn key_type(&mut self, key: &str) -> String {
+		let now = Instant::now();
+		match self.data.get(key) {
+			Some(value) if Self::is_expired(value, now) => {
+				self.data.remove(key);
+				"none".to_string()
+			}
+			Some(DataType::String(_, _)) => "string".to_string(),
+			Some(DataType::Stream(_)) => "stream".to_string(),
+			Some(DataType::List(_)) => "list".to_string(),
+			None => "none".to_string(),
+		}
+	}
+
     pub fn keys(&mut self, pattern: &str) -> Vec<String> {
         let now = Instant::now();
         let mut expired = Vec::new();

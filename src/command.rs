@@ -24,6 +24,7 @@ pub enum RedisCommand {
         end: String,
     },
     Incr { key: String },
+    Type { key: String },
     Multi,
     Exec,
     Discard,
@@ -316,6 +317,16 @@ impl RedisCommand {
                         };
                         
                         Ok(RedisCommand::XRange { key, start, end })
+                    }
+                    "TYPE" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'type' command"));
+                        }
+                        let key = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid key for TYPE")),
+                        };
+                        Ok(RedisCommand::Type { key })
                     }
                     "INCR" => {
                         if items.len() < 2 {

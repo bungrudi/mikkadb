@@ -161,7 +161,7 @@ impl Engine {
             // Or just return Null as per Redis spec for timeout.
             // "If the timeout is reached, the command returns a Null reply."
             if let Some(pending) = self.pending_reads[idx].take() {
-                let _ = pending.response_tx.send(Ok(Value::Null));
+                let _ = pending.response_tx.send(Ok(Value::NullArray));
             }
         }
     }
@@ -451,6 +451,10 @@ impl Engine {
                     .map(Value::BulkString)
                     .collect();
                 Ok(Value::Array(resp_values))
+            }
+            RedisCommand::Type { key } => {
+                let t = self.db.key_type(&key);
+                Ok(Value::SimpleString(t))
             }
             RedisCommand::Set { key, value, px } => {
                 self.db.set(key.clone(), bytes::Bytes::from(value.clone()), px);
