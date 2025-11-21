@@ -13,6 +13,7 @@ pub enum Value {
     Multiple(Vec<Value>),
     Error(String),
     Null,
+    NullArray,
 }
 
 impl Value {
@@ -32,6 +33,7 @@ impl Value {
             Value::Multiple(_) => panic!("Cannot serialize Multiple to String"),
             Value::Error(s) => format!("-{}\r\n", s),
             Value::Null => "$-1\r\n".to_string(),
+            Value::NullArray => "*-1\r\n".to_string(),
         }
     }
     
@@ -61,9 +63,9 @@ impl Value {
             }
             Value::Error(s) => format!("-{}\r\n", s).into_bytes(),
             Value::Null => "$-1\r\n".to_string().into_bytes(),
+            Value::NullArray => "*-1\r\n".to_string().into_bytes(),
         }
     }
-
 }
 
 pub struct RespHandler {
@@ -175,6 +177,10 @@ fn parse_simple_string(buffer: &[u8]) -> Result<(Value, usize)> {
 
 fn parse_array(buffer: &[u8]) -> Result<(Value, usize)> {
     let (len, mut offset) = parse_integer(buffer)?;
+    if len < 0 {
+        // RESP null array: *-1\r\n
+        return Ok((Value::NullArray, offset));
+    }
     let mut items = Vec::new();
     
     for _ in 0..len {
@@ -258,6 +264,12 @@ mod tests {
     fn test_serialize_null() {
         let val = Value::Null;
         assert_eq!(val.serialize(), "$-1\r\n");
+    }
+
+    #[test]
+    fn test_serialize_null_array() {
+        let val = Value::NullArray;
+        assert_eq!(val.serialize(), "*-1\r\n");
     }
 
     #[test]

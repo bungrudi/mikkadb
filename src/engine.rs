@@ -44,8 +44,8 @@ pub struct Engine {
     read_timeout_rx: mpsc::Receiver<usize>,
     read_timeout_tx: mpsc::Sender<usize>,
     replication_offset: i64,
-    // (keys, timeout_at, tx)
-    waiting_list_clients: Vec<(Vec<String>, Instant, mpsc::Sender<Value>)>,
+    // (keys, response_tx) for clients blocked on BLPOP
+    waiting_list_clients: Vec<(Vec<String>, oneshot::Sender<Result<Value>>)>,
     transaction_state: HashMap<u64, Vec<RedisCommand>>,
 }
 
@@ -72,6 +72,70 @@ impl Engine {
             waiting_list_clients: Vec::new(),
             transaction_state: HashMap::new(),
         }
+    }
+
+    async fn handle_blpop(&mut self, keys: Vec<String>, timeout: f64, response_tx: oneshot::Sender<Result<Value>>) {
+        // 1. Try to pop immediately from any of the keys
+        for key in &keys {
+            match self.db.lpop(key, None) {
+                Ok(Some(values)) => {
+                    // Propagate LPOP (BLPOP acts as LPOP when data is present)
+                    let args = vec![
+                        Value::BulkString("LPOP".to_string()),
+                        Value::BulkString(key.clone()),
+                    ];
+                    self.propagate_command(Value::Array(args)).await;
+
+                    let reply = Value::Array(vec![
+                        Value::BulkString(key.clone()),
+                        Value::BulkString(String::from_utf8_lossy(&values[0]).to_string()),
+                    ]);
+                    let _ = response_tx.send(Ok(reply));
+                    return;
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    let _ = response_tx.send(Ok(Value::Error(e)));
+                    return;
+                }
+            }
+        }
+
+        // 2. No data in any key.
+        // Use an internal channel so we can support timeouts without
+        // blocking the Engine's event loop.
+        let (notify_tx, notify_rx) = oneshot::channel::<Result<Value>>();
+
+        if timeout > 0.0 {
+            let duration = tokio::time::Duration::from_secs_f64(timeout);
+            tokio::spawn(async move {
+                match tokio::time::timeout(duration, notify_rx).await {
+                    Ok(Ok(val)) => {
+                        let _ = response_tx.send(val);
+                    }
+                    Ok(Err(_)) => {
+                        let _ = response_tx.send(Ok(Value::NullArray));
+                    }
+                    Err(_) => {
+                        let _ = response_tx.send(Ok(Value::NullArray));
+                    }
+                }
+            });
+        } else {
+            tokio::spawn(async move {
+                match notify_rx.await {
+                    Ok(val) => {
+                        let _ = response_tx.send(val);
+                    }
+                    Err(_) => {
+                        let _ = response_tx.send(Ok(Value::NullArray));
+                    }
+                }
+            });
+        }
+
+        // Store the notifier and wake one client when a value is pushed.
+        self.waiting_list_clients.push((keys, notify_tx));
     }
 
     pub async fn run(&mut self) {
@@ -238,6 +302,12 @@ impl Engine {
                 self.handle_wait(num_replicas, timeout, response_tx).await;
             }
             other => {
+                // Handle BLPOP separately to support blocking semantics for normal clients
+                if let RedisCommand::BLPop { keys, timeout } = other.clone() {
+                    self.handle_blpop(keys, timeout, response_tx).await;
+                    return;
+                }
+
                 // Check if it's XREAD with BLOCK
 
                 
@@ -644,12 +714,14 @@ impl Engine {
                         // Propagate RPUSH
                         let mut args = vec![
                             Value::BulkString("RPUSH".to_string()),
-                            Value::BulkString(key),
+                            Value::BulkString(key.clone()),
                         ];
                         for v in values {
                             args.push(Value::BulkString(v));
                         }
                         self.propagate_command(Value::Array(args)).await;
+                        // Wake any clients blocked on BLPOP for this key
+                        self.check_blocked_list_clients(&key).await;
                         
                         Ok(Value::Integer(len as i64))
                     }
@@ -726,19 +798,20 @@ impl Engine {
                     Err(e) => Ok(Value::Error(e)),
                 }
             }
-            RedisCommand::BLPop { keys, timeout } => {
-                // Check if any key has data
+            RedisCommand::BLPop { keys, timeout: _timeout } => {
+                // BLPOP inside MULTI/EXEC is not allowed to block.
+                // We keep immediate pop support here, but if no data is
+                // available we return a special error so the caller can
+                // turn it into the appropriate Redis error.
                 for key in &keys {
                     match self.db.lpop(key, None) {
                         Ok(Some(values)) => {
-                            // Found data, return immediately
-                            // Propagate LPOP (BLPOP acts as LPOP when data is present)
                             let args = vec![
                                 Value::BulkString("LPOP".to_string()),
                                 Value::BulkString(key.clone()),
                             ];
                             self.propagate_command(Value::Array(args)).await;
-                            
+
                             return Ok(Value::Array(vec![
                                 Value::BulkString(key.clone()),
                                 Value::BulkString(String::from_utf8_lossy(&values[0]).to_string())
@@ -748,23 +821,8 @@ impl Engine {
                         Err(e) => return Ok(Value::Error(e)),
                     }
                 }
-                
-                // No data found, block
-                if let Some(tx) = resp_tx {
-                    let timeout_at = if timeout == 0.0 {
-                        // 0 means block indefinitely. We use a very distant future.
-                        Instant::now() + std::time::Duration::from_secs(365 * 24 * 60 * 60)
-                    } else {
-                        Instant::now() + std::time::Duration::from_secs_f64(timeout)
-                    };
-                    
-                    self.waiting_list_clients.push((keys, timeout_at, tx));
-                    
-                    // Return a special error to indicate blocking, handled by caller
-                    Err(anyhow::Error::msg("BLPOP_BLOCK"))
-                } else {
-                    Err(anyhow::Error::msg("BLPOP cannot be used in this context"))
-                }
+
+                Err(anyhow::Error::msg("BLPOP_BLOCK"))
             }
             RedisCommand::Get { key } => {
                 match self.db.get(&key) {
@@ -851,7 +909,7 @@ impl Engine {
             }
             RedisCommand::PSync { replication_id: _, offset: _ } => {
                 // Register replica if channel provided
-                if let Some(tx) = replica_tx {
+                if let Some(tx) = resp_tx {
                     self.replicas.push(Replica {
                         id: client_id,
                         tx,
@@ -898,13 +956,15 @@ impl Engine {
         for replica in &self.replicas {
             let _ = replica.tx.send(cmd.clone()).await;
         }
-        async fn check_blocked_list_clients(&mut self, key: &str) {
+    }
+    
+    async fn check_blocked_list_clients(&mut self, key: &str) {
         let mut i = 0;
         while i < self.waiting_list_clients.len() {
-            let (keys, _, _) = &self.waiting_list_clients[i];
+            let (keys, _) = &self.waiting_list_clients[i];
             if keys.contains(&key.to_string()) {
                 // Found a client waiting for this key
-                let (keys, _, tx) = self.waiting_list_clients.remove(i);
+                let (_, tx) = self.waiting_list_clients.remove(i);
                 
                 // Try to pop from the key that triggered the wakeup
                 match self.db.lpop(key, None) {
@@ -913,7 +973,7 @@ impl Engine {
                             Value::BulkString(key.to_string()),
                             Value::BulkString(String::from_utf8_lossy(&values[0]).to_string())
                         ]);
-                        let _ = tx.send(response);
+                        let _ = tx.send(Ok(response));
                         // We successfully unblocked one client with this element.
                         return; 
                     }
@@ -926,5 +986,4 @@ impl Engine {
             }
         }
     }
-}
 }
