@@ -13,6 +13,7 @@ pub struct CommandRequest {
     pub command: RedisCommand,
     pub response_tx: oneshot::Sender<Result<Value>>,
     pub replica_tx: Option<mpsc::Sender<Value>>,
+    pub pub_sub_tx: Option<mpsc::Sender<Value>>,
 }
 
 struct Replica {
@@ -47,6 +48,7 @@ pub struct Engine {
     // (keys, response_tx) for clients blocked on BLPOP
     waiting_list_clients: Vec<(Vec<String>, oneshot::Sender<Result<Value>>)>,
     transaction_state: HashMap<u64, Vec<RedisCommand>>,
+    pub_sub_subs: HashMap<String, HashMap<u64, mpsc::Sender<Value>>>,
 }
 
 impl Engine {
@@ -71,6 +73,7 @@ impl Engine {
             replication_offset: 0,
             waiting_list_clients: Vec::new(),
             transaction_state: HashMap::new(),
+            pub_sub_subs: HashMap::new(),
         }
     }
 
@@ -204,7 +207,34 @@ impl Engine {
     }
 
     async fn handle_command(&mut self, req: CommandRequest) {
-        let CommandRequest { client_id, command, response_tx, replica_tx } = req;
+        let CommandRequest { client_id, command, response_tx, replica_tx, pub_sub_tx } = req;
+        
+        // Check subscription state
+        let is_subscribed = self.pub_sub_subs.values().any(|subs| subs.contains_key(&client_id));
+        if is_subscribed {
+             match &command {
+                RedisCommand::Subscribe { .. } | 
+                RedisCommand::Unsubscribe { .. } => {},
+                RedisCommand::Ping { message } => {
+                    let resp = match message {
+                        Some(msg) => Value::Array(vec![
+                            Value::BulkString("pong".to_string()),
+                            Value::BulkString(msg.clone()),
+                        ]),
+                        None => Value::Array(vec![
+                            Value::BulkString("pong".to_string()),
+                            Value::BulkString("".to_string()),
+                        ]),
+                    };
+                    let _ = response_tx.send(Ok(resp));
+                    return;
+                },
+                _ => {
+                    let _ = response_tx.send(Ok(Value::Error(format!("ERR Can't execute '{}': only (P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT allowed in this context", command.name()))));
+                    return;
+                }
+             }
+        }
         
         // Check for transaction commands
         match command {
@@ -250,7 +280,7 @@ impl Engine {
                         // But it will propagate as individual commands.
                         // That's fine for now.
                         
-                        match self.execute_command_immediate(client_id, cmd, None).await {
+                        match self.execute_command_immediate(client_id, cmd, None, None).await {
                             Ok(val) => results.push(val),
                             Err(e) => {
                                 if e.to_string() == "BLPOP_BLOCK" {
@@ -311,7 +341,7 @@ impl Engine {
                 // Check if it's XREAD with BLOCK
 
                 
-                let result = self.execute_command_immediate(client_id, other.clone(), replica_tx).await;
+                let result = self.execute_command_immediate(client_id, other.clone(), replica_tx, pub_sub_tx).await;
                 
                 match result {
                     Ok(Value::Error(msg)) if msg == "BLOCKED" => {
@@ -418,7 +448,91 @@ impl Engine {
         }
     }
 
-    async fn execute_command_immediate(&mut self, client_id: u64, command: RedisCommand, resp_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
+    async fn handle_subscribe(&mut self, client_id: u64, channels: Vec<String>, pub_sub_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
+        if let Some(tx) = pub_sub_tx {
+            for channel in &channels {
+                let subs = self.pub_sub_subs.entry(channel.clone()).or_insert(HashMap::new());
+                subs.insert(client_id, tx.clone());
+                
+                let mut client_sub_count = 0;
+                for subs in self.pub_sub_subs.values() {
+                    if subs.contains_key(&client_id) {
+                        client_sub_count += 1;
+                    }
+                }
+                
+                let push_msg = Value::Array(vec![
+                    Value::BulkString("subscribe".to_string()),
+                    Value::BulkString(channel.clone()),
+                    Value::Integer(client_sub_count),
+                ]);
+                
+                let _ = tx.send(push_msg).await;
+            }
+            Ok(Value::Error("NO_REPLY".to_string()))
+        } else {
+            Ok(Value::Error("ERR no pub/sub channel".to_string()))
+        }
+    }
+
+    async fn handle_unsubscribe(&mut self, client_id: u64, channels: Vec<String>, pub_sub_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
+        if let Some(tx) = pub_sub_tx {
+            let channels_to_unsub = if channels.is_empty() {
+                let mut all = Vec::new();
+                for (channel, subs) in &self.pub_sub_subs {
+                    if subs.contains_key(&client_id) {
+                        all.push(channel.clone());
+                    }
+                }
+                all
+            } else {
+                channels
+            };
+            
+            for channel in &channels_to_unsub {
+                if let Some(subs) = self.pub_sub_subs.get_mut(channel) {
+                    subs.remove(&client_id);
+                }
+                
+                let mut client_sub_count = 0;
+                for subs in self.pub_sub_subs.values() {
+                    if subs.contains_key(&client_id) {
+                        client_sub_count += 1;
+                    }
+                }
+                
+                let push_msg = Value::Array(vec![
+                    Value::BulkString("unsubscribe".to_string()),
+                    Value::BulkString(channel.clone()),
+                    Value::Integer(client_sub_count),
+                ]);
+                
+                let _ = tx.send(push_msg).await;
+            }
+            Ok(Value::Error("NO_REPLY".to_string()))
+        } else {
+            Ok(Value::Error("ERR no pub/sub channel".to_string()))
+        }
+    }
+
+    async fn handle_publish(&mut self, channel: String, message: String) -> Result<Value, anyhow::Error> {
+        let mut count = 0;
+        if let Some(subs) = self.pub_sub_subs.get(&channel) {
+            let push_msg = Value::Array(vec![
+                Value::BulkString("message".to_string()),
+                Value::BulkString(channel.clone()),
+                Value::BulkString(message),
+            ]);
+            
+            for tx in subs.values() {
+                let _ = tx.send(push_msg.clone()).await;
+                count += 1;
+            }
+        }
+        Ok(Value::Integer(count))
+    }
+
+    async fn execute_command_immediate(&mut self, client_id: u64, command: RedisCommand, resp_tx: Option<mpsc::Sender<Value>>, pub_sub_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
         match command {
             RedisCommand::Ping { message } => {
                 match message {
@@ -442,6 +556,15 @@ impl Engine {
                 } else {
                     Ok(Value::Array(vec![]))
                 }
+            }
+            RedisCommand::Subscribe { channels } => {
+                self.handle_subscribe(client_id, channels, pub_sub_tx).await
+            }
+            RedisCommand::Unsubscribe { channels } => {
+                self.handle_unsubscribe(client_id, channels, pub_sub_tx).await
+            }
+            RedisCommand::Publish { channel, message } => {
+                self.handle_publish(channel, message).await
             }
             RedisCommand::Keys { pattern } => {
                 println!("Engine: Executing KEYS with pattern '{}'", pattern);
@@ -635,9 +758,6 @@ impl Engine {
                     
                     // For now, let's return a special error or value that handle_command recognizes?
                     // No, cleaner to refactor handle_command.
-                    
-                    // Let's return a specific error that handle_command can catch?
-                    // Or better, move XRead handling out of execute_command_immediate.
                     
                     // Since I can't easily change the signature of execute_command_immediate in this tool call without changing handle_command too...
                     // I will return a special error "BLOCKED" and handle it in handle_command?

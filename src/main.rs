@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut handler = resp::RespHandler::new(stream);
             let mut repl_rx: Option<mpsc::Receiver<crate::resp::Value>> = None;
+            let (msg_tx, mut msg_rx) = mpsc::channel(32);
             
             loop {
                 tokio::select! {
@@ -75,6 +76,7 @@ async fn main() -> Result<()> {
                                             command,
                                             response_tx: resp_tx,
                                             replica_tx,
+                                            pub_sub_tx: Some(msg_tx.clone()),
                                         };
                                         
                                         if let Err(_) = tx.send(req).await {
@@ -83,6 +85,12 @@ async fn main() -> Result<()> {
                                         }
                                         match resp_rx.await {
                                             Ok(Ok(response)) => {
+                                                if let crate::resp::Value::Error(msg) = &response {
+                                                    if msg == "NO_REPLY" {
+                                                        continue;
+                                                    }
+                                                }
+                                                
                                                 if let crate::resp::Value::Array(_) = &response {
                                                     println!("Sending Array response");
                                                 } else if let crate::resp::Value::SimpleString(s) = &response {
@@ -121,6 +129,9 @@ async fn main() -> Result<()> {
                         }
                     } => {
                         let _ = handler.write_value(cmd).await;
+                    }
+                    Some(msg) = msg_rx.recv() => {
+                        let _ = handler.write_value(msg).await;
                     }
                 }
             }
@@ -198,6 +209,7 @@ async fn perform_handshake(master_host: String, master_port: String, listening_p
                             command,
                             response_tx: resp_tx,
                             replica_tx: None, // We are the replica, we don't propagate further
+                            pub_sub_tx: None,
                         };
 
                         if let Err(_) = tx.send(req).await {

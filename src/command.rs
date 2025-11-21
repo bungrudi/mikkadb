@@ -13,6 +13,9 @@ pub enum RedisCommand {
     ConfigGet { parameter: String },
     Keys { pattern: String },
     Wait { num_replicas: usize, timeout: u64 },
+    Subscribe { channels: Vec<String> },
+    Publish { channel: String, message: String },
+    Unsubscribe { channels: Vec<String> },
     XAdd { key: String, id: String, fields: Vec<(String, String)> },
     XRead {
         block: Option<u64>,
@@ -206,6 +209,42 @@ impl RedisCommand {
                             _ => return Err(Error::msg("Invalid timeout for WAIT")),
                         };
                         Ok(RedisCommand::Wait { num_replicas, timeout })
+                    }
+                    "SUBSCRIBE" => {
+                        let mut channels = Vec::new();
+                        for item in &items[1..] {
+                            if let Value::BulkString(s) = item {
+                                channels.push(s.clone());
+                            }
+                        }
+                        if channels.is_empty() {
+                             return Err(Error::msg("ERR wrong number of arguments for 'subscribe' command"));
+                        }
+                        Ok(RedisCommand::Subscribe { channels })
+                    }
+                    "PUBLISH" => {
+                        if items.len() != 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'publish' command"));
+                        }
+                        let channel = match &items[1] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid channel for PUBLISH")),
+                        };
+                        let message = match &items[2] {
+                            Value::BulkString(s) => s.clone(),
+                            _ => return Err(Error::msg("Invalid message for PUBLISH")),
+                        };
+                        Ok(RedisCommand::Publish { channel, message })
+                    }
+                    "UNSUBSCRIBE" => {
+                        let mut channels = Vec::new();
+                        for item in &items[1..] {
+                            if let Value::BulkString(s) = item {
+                                channels.push(s.clone());
+                            }
+                        }
+                        // Empty channels list is allowed (means unsubscribe from all)
+                        Ok(RedisCommand::Unsubscribe { channels })
                     }
                     "XADD" => {
                         if items.len() < 4 {
@@ -443,6 +482,40 @@ impl RedisCommand {
                 }
             }
             _ => Ok(RedisCommand::None),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            RedisCommand::Ping { .. } => "ping",
+            RedisCommand::Echo { .. } => "echo",
+            RedisCommand::Set { .. } => "set",
+            RedisCommand::Get { .. } => "get",
+            RedisCommand::Info { .. } => "info",
+            RedisCommand::ReplConf { .. } => "replconf",
+            RedisCommand::PSync { .. } => "psync",
+            RedisCommand::ConfigGet { .. } => "config",
+            RedisCommand::Keys { .. } => "keys",
+            RedisCommand::Wait { .. } => "wait",
+            RedisCommand::Subscribe { .. } => "subscribe",
+            RedisCommand::Publish { .. } => "publish",
+            RedisCommand::Unsubscribe { .. } => "unsubscribe",
+            RedisCommand::XAdd { .. } => "xadd",
+            RedisCommand::XRead { .. } => "xread",
+            RedisCommand::XRange { .. } => "xrange",
+            RedisCommand::Incr { .. } => "incr",
+            RedisCommand::Type { .. } => "type",
+            RedisCommand::Multi => "multi",
+            RedisCommand::Exec => "exec",
+            RedisCommand::Discard => "discard",
+            RedisCommand::RPush { .. } => "rpush",
+            RedisCommand::LRange { .. } => "lrange",
+            RedisCommand::LPush { .. } => "lpush",
+            RedisCommand::LLen { .. } => "llen",
+            RedisCommand::LPop { .. } => "lpop",
+            RedisCommand::BLPop { .. } => "blpop",
+            RedisCommand::Error { .. } => "error",
+            RedisCommand::None => "none",
         }
     }
 }
