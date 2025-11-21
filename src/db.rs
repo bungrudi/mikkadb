@@ -444,7 +444,11 @@ impl<'a> RdbParser<'a> {
         }
         let bytes = &self.data[self.pos..self.pos + 4];
         self.pos += 4;
-        Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+
+        let array: [u8; 4] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("Invalid RDB u32 field"))?;
+        Ok(u32::from_le_bytes(array))
     }
 
     fn read_u64(&mut self) -> AnyResult<u64> {
@@ -453,7 +457,11 @@ impl<'a> RdbParser<'a> {
         }
         let bytes = &self.data[self.pos..self.pos + 8];
         self.pos += 8;
-        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+
+        let array: [u8; 8] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("Invalid RDB u64 field"))?;
+        Ok(u64::from_le_bytes(array))
     }
 
     fn read_bytes(&mut self, len: usize) -> AnyResult<Vec<u8>> {
@@ -530,7 +538,11 @@ impl<'a> RdbParser<'a> {
         }
         let bytes = &self.data[self.pos..self.pos + 2];
         self.pos += 2;
-        Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
+
+        let array: [u8; 2] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("Invalid RDB u16 field"))?;
+        Ok(u16::from_le_bytes(array))
     }
 }
 

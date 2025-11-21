@@ -479,13 +479,13 @@ impl Engine {
                 // Parse ID
                 let (ms, seq) = if id == "*" {
                     // Auto-generate
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64;
-                    
-                    let last_id = self.db.get_last_stream_id(&key);
-                    let (last_ms, last_seq) = last_id.unwrap_or((0, 0));
+		            let last_id = self.db.get_last_stream_id(&key);
+		            let (last_ms, last_seq) = last_id.unwrap_or((0, 0));
+		            
+		            let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+		                Ok(dur) => dur.as_millis() as u64,
+		                Err(_) => last_ms,
+		            };
                     
                     if now > last_ms {
                         (now, 0)
@@ -928,7 +928,13 @@ impl Engine {
                 // Then send RDB file
                 // Empty RDB file in hex
                 let empty_rdb_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
-                let empty_rdb = hex::decode(empty_rdb_hex).unwrap();
+		        let empty_rdb = match hex::decode(empty_rdb_hex) {
+		            Ok(bytes) => bytes,
+		            Err(e) => {
+		                eprintln!("Failed to decode built-in empty RDB: {}", e);
+		                Vec::new()
+		            }
+		        };
                 
                 Ok(Value::Multiple(vec![
                     Value::SimpleString(response),
