@@ -5,6 +5,7 @@ use crate::config::Config;
 use tokio::sync::{mpsc, oneshot};
 use anyhow::Result;
 use std::sync::Arc;
+use bytes::Bytes;
 
 use std::collections::HashMap;
 
@@ -84,21 +85,21 @@ impl Engine {
                 Ok(Some(values)) => {
                     // Propagate LPOP (BLPOP acts as LPOP when data is present)
                     let args = vec![
-                        Value::BulkString("LPOP".to_string()),
-                        Value::BulkString(key.clone()),
+                        Value::BulkString(Bytes::from("LPOP")),
+                        Value::BulkString(key.clone().into()),
                     ];
                     self.propagate_command(Value::Array(args)).await;
 
                     let reply = Value::Array(vec![
-                        Value::BulkString(key.clone()),
-                        Value::BulkString(String::from_utf8_lossy(&values[0]).to_string()),
+                        Value::BulkString(key.clone().into()),
+                        Value::BulkString(Bytes::from(String::from_utf8_lossy(&values[0]).to_string())),
                     ]);
                     let _ = response_tx.send(Ok(reply));
                     return;
                 }
                 Ok(None) => continue,
                 Err(e) => {
-                    let _ = response_tx.send(Ok(Value::Error(e)));
+                    let _ = response_tx.send(Ok(Value::Error(e.into())));
                     return;
                 }
             }
@@ -181,18 +182,18 @@ impl Engine {
                         let id_str = format!("{}-{}", entry.id.0, entry.id.1);
                         let mut fields_val = Vec::new();
                         for (k, v) in entry.fields {
-                            fields_val.push(Value::BulkString(k));
-                            fields_val.push(Value::BulkString(v));
+                            fields_val.push(Value::BulkString(k.into()));
+                            fields_val.push(Value::BulkString(v.into()));
                         }
                         
                         stream_entries.push(Value::Array(vec![
-                            Value::BulkString(id_str),
+                            Value::BulkString(id_str.into()),
                             Value::Array(fields_val)
                         ]));
                     }
                     
                     result_streams.push(Value::Array(vec![
-                        Value::BulkString(key.clone()),
+                        Value::BulkString(key.clone().into()),
                         Value::Array(stream_entries)
                     ]));
                 }
@@ -214,7 +215,7 @@ impl Engine {
              for subs in self.pub_sub_subs.values_mut() {
                  subs.remove(&client_id);
              }
-             let _ = response_tx.send(Ok(Value::SimpleString("OK".to_string())));
+             let _ = response_tx.send(Ok(Value::SimpleString(Bytes::from("OK"))));
              return;
         }
         
@@ -227,19 +228,19 @@ impl Engine {
                 RedisCommand::Ping { message } => {
                     let resp = match message {
                         Some(msg) => Value::Array(vec![
-                            Value::BulkString("pong".to_string()),
-                            Value::BulkString(msg.clone()),
+                            Value::BulkString(Bytes::from("pong")),
+                            Value::BulkString(msg.clone().into()),
                         ]),
                         None => Value::Array(vec![
-                            Value::BulkString("pong".to_string()),
-                            Value::BulkString("".to_string()),
+                            Value::BulkString(Bytes::from("pong")),
+                            Value::BulkString(Bytes::from("")),
                         ]),
                     };
                     let _ = response_tx.send(Ok(resp));
                     return;
                 },
                 _ => {
-                    let _ = response_tx.send(Ok(Value::Error(format!("ERR Can't execute '{}': only (P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT allowed in this context", command.name()))));
+                    let _ = response_tx.send(Ok(Value::Error(Bytes::from(format!("ERR Can't execute '{}': only (P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT allowed in this context", command.name())))));
                     return;
                 }
              }
@@ -249,18 +250,18 @@ impl Engine {
         match command {
             RedisCommand::Multi => {
                 if self.transaction_state.contains_key(&client_id) {
-                    let _ = response_tx.send(Ok(Value::Error("ERR MULTI calls can not be nested".to_string())));
+                    let _ = response_tx.send(Ok(Value::Error(Bytes::from("ERR MULTI calls can not be nested"))));
                 } else {
                     self.transaction_state.insert(client_id, Vec::new());
-                    let _ = response_tx.send(Ok(Value::SimpleString("OK".to_string())));
+                    let _ = response_tx.send(Ok(Value::SimpleString(Bytes::from("OK"))));
                 }
                 return;
             }
             RedisCommand::Discard => {
                 if self.transaction_state.remove(&client_id).is_some() {
-                    let _ = response_tx.send(Ok(Value::SimpleString("OK".to_string())));
+                    let _ = response_tx.send(Ok(Value::SimpleString(Bytes::from("OK"))));
                 } else {
-                    let _ = response_tx.send(Ok(Value::Error("ERR DISCARD without MULTI".to_string())));
+                    let _ = response_tx.send(Ok(Value::Error(Bytes::from("ERR DISCARD without MULTI"))));
                 }
                 return;
             }
@@ -292,13 +293,13 @@ impl Engine {
                         match self.execute_command_immediate(client_id, cmd, None, None).await {
                             Ok(val) => results.push(val),
                             Err(e) => {
-                                results.push(Value::Error(e.to_string()));
+                                results.push(Value::Error(Bytes::from(e.to_string())));
                             }
                         }
                     }
                     let _ = response_tx.send(Ok(Value::Array(results)));
                 } else {
-                    let _ = response_tx.send(Ok(Value::Error("ERR EXEC without MULTI".to_string())));
+                    let _ = response_tx.send(Ok(Value::Error(Bytes::from("ERR EXEC without MULTI"))));
                 }
                 return;
             }
@@ -309,13 +310,13 @@ impl Engine {
         if let Some(queue) = self.transaction_state.get_mut(&client_id) {
              match &command {
                  RedisCommand::Subscribe { .. } | RedisCommand::Unsubscribe { .. } => {
-                     let _ = response_tx.send(Ok(Value::Error("ERR subscribe inside MULTI is not allowed".to_string())));
+                     let _ = response_tx.send(Ok(Value::Error(Bytes::from("ERR subscribe inside MULTI is not allowed"))));
                      return;
                  }
                  _ => {}
              }
             queue.push(command);
-            let _ = response_tx.send(Ok(Value::SimpleString("QUEUED".to_string())));
+            let _ = response_tx.send(Ok(Value::SimpleString(Bytes::from("QUEUED"))));
             return;
         }
 
@@ -401,9 +402,9 @@ impl Engine {
         
         // 2. Send REPLCONF GETACK * to all replicas
         let getack_cmd = Value::Array(vec![
-            Value::BulkString("REPLCONF".to_string()),
-            Value::BulkString("GETACK".to_string()),
-            Value::BulkString("*".to_string()),
+            Value::BulkString(Bytes::from("REPLCONF")),
+            Value::BulkString(Bytes::from("GETACK")),
+            Value::BulkString(Bytes::from("*")),
         ]);
         
         for replica in &self.replicas {
@@ -454,16 +455,16 @@ impl Engine {
                 }
                 
                 let push_msg = Value::Array(vec![
-                    Value::BulkString("subscribe".to_string()),
-                    Value::BulkString(channel.clone()),
+                    Value::BulkString(Bytes::from("subscribe")),
+                    Value::BulkString(channel.clone().into()),
                     Value::Integer(client_sub_count),
                 ]);
                 
                 let _ = tx.send(push_msg).await;
             }
-            Ok(Value::Error("NO_REPLY".to_string()))
+            Ok(Value::Error(Bytes::from("NO_REPLY")))
         } else {
-            Ok(Value::Error("ERR no pub/sub channel".to_string()))
+            Ok(Value::Error(Bytes::from("ERR no pub/sub channel")))
         }
     }
 
@@ -494,16 +495,16 @@ impl Engine {
                 }
                 
                 let push_msg = Value::Array(vec![
-                    Value::BulkString("unsubscribe".to_string()),
-                    Value::BulkString(channel.clone()),
+                    Value::BulkString(Bytes::from("unsubscribe")),
+                    Value::BulkString(channel.clone().into()),
                     Value::Integer(client_sub_count),
                 ]);
                 
                 let _ = tx.send(push_msg).await;
             }
-            Ok(Value::Error("NO_REPLY".to_string()))
+            Ok(Value::Error(Bytes::from("NO_REPLY")))
         } else {
-            Ok(Value::Error("ERR no pub/sub channel".to_string()))
+            Ok(Value::Error(Bytes::from("ERR no pub/sub channel")))
         }
     }
 
@@ -511,9 +512,9 @@ impl Engine {
         let mut count = 0;
         if let Some(subs) = self.pub_sub_subs.get(&channel) {
             let push_msg = Value::Array(vec![
-                Value::BulkString("message".to_string()),
-                Value::BulkString(channel.clone()),
-                Value::BulkString(message),
+                Value::BulkString(Bytes::from("message")),
+                Value::BulkString(channel.clone().into()),
+                Value::BulkString(message.into()),
             ]);
             
             for tx in subs.values() {
@@ -528,11 +529,11 @@ impl Engine {
         match command {
             RedisCommand::Ping { message } => {
                 match message {
-                    Some(msg) => Ok(Value::BulkString(msg)),
-                    None => Ok(Value::SimpleString("PONG".to_string())),
+                    Some(msg) => Ok(Value::BulkString(msg.into())),
+                    None => Ok(Value::SimpleString(Bytes::from("PONG"))),
                 }
             }
-            RedisCommand::Echo { message } => Ok(Value::BulkString(message)),
+            RedisCommand::Echo { message } => Ok(Value::BulkString(message.into())),
             RedisCommand::ConfigGet { parameter } => {
                 let value = match parameter.to_lowercase().as_str() {
                     "dir" => Some(self.config.data_dir.clone()),
@@ -542,8 +543,8 @@ impl Engine {
 
                 if let Some(val) = value {
                     Ok(Value::Array(vec![
-                        Value::BulkString(parameter),
-                        Value::BulkString(val),
+                        Value::BulkString(parameter.into()),
+                        Value::BulkString(val.into()),
                     ]))
                 } else {
                     Ok(Value::Array(vec![]))
@@ -563,32 +564,32 @@ impl Engine {
                 let keys = self.db.keys(&pattern);
                 println!("Engine: Found {} keys matching pattern '{}'", keys.len(), pattern);
                 let resp_values = keys.into_iter()
-                    .map(Value::BulkString)
+                    .map(|s| Value::BulkString(s.into()))
                     .collect();
                 Ok(Value::Array(resp_values))
             }
             RedisCommand::Type { key } => {
                 let t = self.db.key_type(&key);
-                Ok(Value::SimpleString(t))
+                Ok(Value::SimpleString(Bytes::from(t)))
             }
             RedisCommand::Set { key, value, px } => {
                 self.db.set(key.clone(), bytes::Bytes::from(value.clone()), px);
                 
                 let mut args = vec![
-                    Value::BulkString("SET".to_string()),
-                    Value::BulkString(key),
-                    Value::BulkString(value),
+                    Value::BulkString(Bytes::from("SET")),
+                    Value::BulkString(key.into()),
+                    Value::BulkString(value.into()),
                 ];
                 
                 if let Some(ms) = px {
-                    args.push(Value::BulkString("PX".to_string()));
-                    args.push(Value::BulkString(ms.to_string()));
+                    args.push(Value::BulkString(Bytes::from("PX")));
+                    args.push(Value::BulkString(Bytes::from(ms.to_string())));
                 }
                 
                 let cmd_value = Value::Array(args);
                 self.propagate_command(cmd_value).await;
                 
-                Ok(Value::SimpleString("OK".to_string()))
+                Ok(Value::SimpleString(Bytes::from("OK")))
             }
             RedisCommand::XAdd { key, id, fields } => {
                 // Parse ID
@@ -620,7 +621,7 @@ impl Engine {
                     // Parse explicit ID
                     let parts: Vec<&str> = id.split('-').collect();
                     if parts.len() != 2 {
-                        return Ok(Value::Error("ERR The ID specified in XADD must be greater than 0-0".to_string())); // Invalid format, but let's return error
+                        return Ok(Value::Error(Bytes::from("ERR The ID specified in XADD must be greater than 0-0"))); // Invalid format, but let's return error
                         // Actually, invalid format should be handled.
                         // Let's assume format is valid-ish or return error.
                     }
@@ -676,9 +677,9 @@ impl Engine {
                             self.complete_read_with_data(i);
                         }
                         
-                        Ok(Value::BulkString(id_str))
+                        Ok(Value::BulkString(id_str.into()))
                     },
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::XRead { block, streams } => {
@@ -696,7 +697,7 @@ impl Engine {
                             if id_str == "0" {
                                 (0, 0)
                             } else {
-                                return Ok(Value::Error("ERR Invalid stream ID specified as stream command argument".to_string()));
+                                return Ok(Value::Error(Bytes::from("ERR Invalid stream ID specified as stream command argument")));
                             }
                         } else {
                             let ms = parts[0].parse::<u64>().unwrap_or(0);
@@ -716,18 +717,18 @@ impl Engine {
                             let id_str = format!("{}-{}", entry.id.0, entry.id.1);
                             let mut fields_val = Vec::new();
                             for (k, v) in entry.fields {
-                                fields_val.push(Value::BulkString(k));
-                                fields_val.push(Value::BulkString(v));
+                                fields_val.push(Value::BulkString(k.into()));
+                                fields_val.push(Value::BulkString(v.into()));
                             }
                             
                             stream_entries.push(Value::Array(vec![
-                                Value::BulkString(id_str),
+                                Value::BulkString(id_str.into()),
                                 Value::Array(fields_val)
                             ]));
                         }
                         
                         result_streams.push(Value::Array(vec![
-                            Value::BulkString(key.clone()),
+                            Value::BulkString(key.clone().into()),
                             Value::Array(stream_entries)
                         ]));
                     }
@@ -766,7 +767,7 @@ impl Engine {
                     // For this step, I'll just implement the non-blocking logic properly with resolved_streams.
                     // And if block is set and no results, I'll return a special Value::Error("BLOCKED").
                     
-                    return Ok(Value::Error("BLOCKED".to_string()));
+                    return Ok(Value::Error(Bytes::from("BLOCKED")));
                 }
                 
                 Ok(Value::Null)
@@ -792,12 +793,12 @@ impl Engine {
                 
                 let start_id = match parse_id(&start) {
                     Ok(id) => id,
-                    Err(_) => return Ok(Value::Error("ERR Invalid stream ID specified as stream command argument".to_string())),
+                    Err(_) => return Ok(Value::Error(Bytes::from("ERR Invalid stream ID specified as stream command argument"))),
                 };
                 
                 let end_id = match parse_id(&end) {
                     Ok(id) => id,
-                    Err(_) => return Ok(Value::Error("ERR Invalid stream ID specified as stream command argument".to_string())),
+                    Err(_) => return Ok(Value::Error(Bytes::from("ERR Invalid stream ID specified as stream command argument"))),
                 };
                 
                 if let Some(entries) = self.db.range_stream(&key, start_id, end_id) {
@@ -806,12 +807,12 @@ impl Engine {
                         let id_str = format!("{}-{}", entry.id.0, entry.id.1);
                         let mut fields_val = Vec::new();
                         for (k, v) in entry.fields {
-                            fields_val.push(Value::BulkString(k));
-                            fields_val.push(Value::BulkString(v));
+                            fields_val.push(Value::BulkString(k.into()));
+                            fields_val.push(Value::BulkString(v.into()));
                         }
                         
                         stream_entries.push(Value::Array(vec![
-                            Value::BulkString(id_str),
+                            Value::BulkString(id_str.into()),
                             Value::Array(fields_val)
                         ]));
                     }
@@ -829,11 +830,11 @@ impl Engine {
                     Ok(len) => {
                         // Propagate RPUSH
                         let mut args = vec![
-                            Value::BulkString("RPUSH".to_string()),
-                            Value::BulkString(key.clone()),
+                            Value::BulkString(Bytes::from("RPUSH")),
+                            Value::BulkString(key.clone().into()),
                         ];
                         for v in values {
-                            args.push(Value::BulkString(v));
+                            args.push(Value::BulkString(v.into()));
                         }
                         self.propagate_command(Value::Array(args)).await;
                         // Wake any clients blocked on BLPOP for this key
@@ -841,18 +842,18 @@ impl Engine {
                         
                         Ok(Value::Integer(len as i64))
                     }
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::LRange { key, start, end } => {
                 match self.db.lrange(&key, start, end) {
                     Ok(values) => {
                         let resp_values = values.iter()
-                            .map(|v| Value::BulkString(String::from_utf8_lossy(v).to_string()))
+                            .map(|v| Value::BulkString(Bytes::from(String::from_utf8_lossy(v).to_string())))
                             .collect();
                         Ok(Value::Array(resp_values))
                     }
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::LPush { key, values } => {
@@ -864,11 +865,11 @@ impl Engine {
                     Ok(len) => {
                         // Propagate LPUSH
                         let mut args = vec![
-                            Value::BulkString("LPUSH".to_string()),
-                            Value::BulkString(key.clone()),
+                            Value::BulkString(Bytes::from("LPUSH")),
+                            Value::BulkString(key.clone().into()),
                         ];
                         for v in values {
-                            args.push(Value::BulkString(v));
+                            args.push(Value::BulkString(v.into()));
                         }
                         self.propagate_command(Value::Array(args)).await;
                         
@@ -877,13 +878,13 @@ impl Engine {
                         
                         Ok(Value::Integer(len as i64))
                     }
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::LLen { key } => {
                 match self.db.llen(&key) {
                     Ok(len) => Ok(Value::Integer(len as i64)),
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::LPop { key, count } => {
@@ -891,27 +892,27 @@ impl Engine {
                     Ok(Some(values)) => {
                         // Propagate LPOP
                         let mut args = vec![
-                            Value::BulkString("LPOP".to_string()),
-                            Value::BulkString(key),
+                            Value::BulkString(Bytes::from("LPOP")),
+                            Value::BulkString(key.into()),
                         ];
                         if let Some(c) = count {
-                            args.push(Value::BulkString(c.to_string()));
+                            args.push(Value::BulkString(Bytes::from(c.to_string())));
                         }
                         self.propagate_command(Value::Array(args)).await;
                         
                         if count.is_none() {
                             // Single value
-                            Ok(Value::BulkString(String::from_utf8_lossy(&values[0]).to_string()))
+                            Ok(Value::BulkString(Bytes::from(String::from_utf8_lossy(&values[0]).to_string())))
                         } else {
                             // Array
                             let resp_values = values.iter()
-                                .map(|v| Value::BulkString(String::from_utf8_lossy(v).to_string()))
+                                .map(|v| Value::BulkString(Bytes::from(String::from_utf8_lossy(v).to_string())))
                                 .collect();
                             Ok(Value::Array(resp_values))
                         }
                     }
                     Ok(None) => Ok(Value::Null),
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::BLPop { keys, timeout: _timeout } => {
@@ -920,28 +921,28 @@ impl Engine {
                     match self.db.lpop(key, None) {
                         Ok(Some(values)) => {
                             let args = vec![
-                                Value::BulkString("LPOP".to_string()),
-                                Value::BulkString(key.clone()),
+                                Value::BulkString(Bytes::from("LPOP")),
+                                Value::BulkString(key.clone().into()),
                             ];
                             self.propagate_command(Value::Array(args)).await;
 
                             return Ok(Value::Array(vec![
-                                Value::BulkString(key.clone()),
-                                Value::BulkString(String::from_utf8_lossy(&values[0]).to_string())
+                                Value::BulkString(key.clone().into()),
+                                Value::BulkString(Bytes::from(String::from_utf8_lossy(&values[0]).to_string()))
                             ]));
                         }
                         Ok(None) => continue,
-                        Err(e) => return Ok(Value::Error(e)),
+                        Err(e) => return Ok(Value::Error(e.into())),
                     }
                 }
 
                 Ok(Value::Null)
             }
-            RedisCommand::InternalDisconnect => Ok(Value::SimpleString("OK".to_string())),
+            RedisCommand::InternalDisconnect => Ok(Value::SimpleString(Bytes::from("OK"))),
             RedisCommand::ZAdd { key, entries } => {
                 match self.db.zadd(key, entries) {
                     Ok(added) => Ok(Value::Integer(added as i64)),
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::ZRange { key, start, end, with_scores } => {
@@ -949,10 +950,10 @@ impl Engine {
                     Ok(items) => {
                          let mut resp = Vec::new();
                          for (member, score) in items {
-                             resp.push(Value::BulkString(member));
+                             resp.push(Value::BulkString(member.into()));
                              if with_scores {
                                  if let Some(s) = score {
-                                     resp.push(Value::BulkString(s.to_string()));
+                                     resp.push(Value::BulkString(Bytes::from(s.to_string())));
                                  } else {
                                      resp.push(Value::Null);
                                  }
@@ -960,38 +961,38 @@ impl Engine {
                          }
                          Ok(Value::Array(resp))
                     }
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::ZCard { key } => {
                 match self.db.zcard(&key) {
                     Ok(count) => Ok(Value::Integer(count as i64)),
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::ZScore { key, member } => {
                 match self.db.zscore(&key, &member) {
-                    Ok(Some(score)) => Ok(Value::BulkString(score.to_string())),
+                    Ok(Some(score)) => Ok(Value::BulkString(Bytes::from(score.to_string()))),
                     Ok(None) => Ok(Value::Null),
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::ZRank { key, member } => {
                 match self.db.zrank(&key, &member) {
                     Ok(Some(rank)) => Ok(Value::Integer(rank as i64)),
                     Ok(None) => Ok(Value::Null),
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::ZRem { key, members } => {
                 match self.db.zrem(&key, &members) {
                     Ok(removed) => Ok(Value::Integer(removed as i64)),
-                    Err(e) => Ok(Value::Error(e)),
+                    Err(e) => Ok(Value::Error(e.into())),
                 }
             }
             RedisCommand::Get { key } => {
                 match self.db.get(&key) {
-                    Some(value) => Ok(Value::BulkString(String::from_utf8_lossy(&value).to_string())),
+                    Some(value) => Ok(Value::BulkString(Bytes::from(String::from_utf8_lossy(&value).to_string()))),
                     None => Ok(Value::Null),
                 }
             }
@@ -1001,7 +1002,7 @@ impl Engine {
                         let s = String::from_utf8_lossy(&bytes);
                         match s.parse::<i64>() {
                             Ok(n) => n,
-                            Err(_) => return Ok(Value::Error("ERR value is not an integer or out of range".to_string())),
+                            Err(_) => return Ok(Value::Error(Bytes::from("ERR value is not an integer or out of range"))),
                         }
                     }
                     None => 0,
@@ -1022,9 +1023,9 @@ impl Engine {
                 // Actually, let's propagate INCR to save bandwidth? No, SET is safer for now.
                 
                 let args = vec![
-                    Value::BulkString("SET".to_string()),
-                    Value::BulkString(key),
-                    Value::BulkString(new_val_str),
+                    Value::BulkString(Bytes::from("SET")),
+                    Value::BulkString(key.into()),
+                    Value::BulkString(new_val_str.into()),
                 ];
                 self.propagate_command(Value::Array(args)).await;
                 
@@ -1039,7 +1040,7 @@ impl Engine {
                     "role:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
                     role, self.config.master_replid, self.config.master_repl_offset
                 );
-                Ok(Value::BulkString(info))
+                Ok(Value::BulkString(info.into()))
             }
             RedisCommand::ReplConf { subcommand, args } => {
                 if subcommand.to_uppercase() == "ACK" {
@@ -1070,7 +1071,7 @@ impl Engine {
                         }
                     }
                 }
-                Ok(Value::SimpleString("OK".to_string()))
+                Ok(Value::SimpleString(Bytes::from("OK")))
             }
             RedisCommand::PSync { replication_id: _, offset: _ } => {
                 // Register replica if channel provided
@@ -1084,7 +1085,7 @@ impl Engine {
                 
                 let response = format!("FULLRESYNC {} {}", self.config.master_replid, self.config.master_repl_offset);
                 // Send FULLRESYNC first
-                // let _ = req.response_tx.send(Ok(Value::SimpleString(response)));
+                // let _ = req.response_tx.send(Ok(Value::SimpleString(Bytes::from(response))));
                 
                 // Then send RDB file
                 // Empty RDB file in hex
@@ -1098,12 +1099,12 @@ impl Engine {
 		        };
                 
                 Ok(Value::Multiple(vec![
-                    Value::SimpleString(response),
+                    Value::SimpleString(Bytes::from(response)),
                     Value::RdbFile(empty_rdb)
                 ]))
             }
             RedisCommand::Error { message } => {
-                Ok(Value::SimpleString(format!("ERR {}", message)))
+                Ok(Value::SimpleString(Bytes::from(format!("ERR {}", message))))
             }
             RedisCommand::Wait { .. } => {
                 // Should never reach here since Wait is handled separately
@@ -1141,8 +1142,8 @@ impl Engine {
                 match self.db.lpop(key, None) {
                     Ok(Some(values)) => {
                         let response = Value::Array(vec![
-                            Value::BulkString(key.to_string()),
-                            Value::BulkString(String::from_utf8_lossy(&values[0]).to_string())
+                            Value::BulkString(Bytes::from(key.to_string())),
+                            Value::BulkString(Bytes::from(String::from_utf8_lossy(&values[0]).to_string()))
                         ]);
                         let _ = tx.send(Ok(response));
                         // We successfully unblocked one client with this element.

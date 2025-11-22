@@ -57,19 +57,16 @@ impl RedisCommand {
                     return Ok(RedisCommand::None);
                 }
 
-                let command_name = match &items[0] {
-                    Value::BulkString(s) => {
-                        // println!("Received command: {}", s);
-                        s.to_uppercase()
-                    },
-                    _ => return Err(Error::msg("Invalid command format")),
+                let command_name = match items[0].to_uppercase_string() {
+                    Ok(cmd) => cmd,
+                    Err(_) => return Err(Error::msg("Invalid command format")),
                 };
 
                 match command_name.as_str() {
                     "PING" => {
                         let message = if items.len() > 1 {
                             match &items[1] {
-                                Value::BulkString(s) => Some(s.clone()),
+                                Value::BulkString(_) => items[1].to_string().ok(),
                                 _ => None,
                             }
                         } else {
@@ -81,8 +78,8 @@ impl RedisCommand {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'echo' command"));
                         }
-                        let message = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let message = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid argument for ECHO")),
                         };
                         Ok(RedisCommand::Echo { message })
@@ -91,22 +88,22 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'set' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for SET")),
                         };
-                        let value = match &items[2] {
-                            Value::BulkString(s) => s.clone(),
+                        let value = match items[2].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid value for SET")),
                         };
                         
                         let mut px = None;
                         if items.len() > 3 {
-                            if let Value::BulkString(opt) = &items[3] {
-                                if opt.to_uppercase() == "PX" {
+                            if let Ok(opt) = items[3].to_uppercase_string() {
+                                if opt == "PX" {
                                     if items.len() > 4 {
-                                        if let Value::BulkString(ms) = &items[4] {
-                                            if let Ok(ms_val) = ms.parse::<u64>() {
+                                        if let Ok(ms_str) = items[4].to_string() {
+                                            if let Ok(ms_val) = ms_str.parse::<u64>() {
                                                 px = Some(ms_val);
                                             }
                                         }
@@ -121,16 +118,16 @@ impl RedisCommand {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'get' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for GET")),
                         };
                         Ok(RedisCommand::Get { key })
                     }
                     "INFO" => {
                         let section = if items.len() > 1 {
-                            match &items[1] {
-                                Value::BulkString(s) => s.clone(),
+                            match items[1].to_string() {
+                                Ok(s) => s,
                                 _ => "default".to_string(),
                             }
                         } else {
@@ -142,14 +139,14 @@ impl RedisCommand {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'replconf' command"));
                         }
-                        let subcommand = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let subcommand = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid subcommand for REPLCONF")),
                         };
                         let mut args = Vec::new();
                         for i in 2..items.len() {
-                             match &items[i] {
-                                Value::BulkString(s) => args.push(s.clone()),
+                             match items[i].to_string() {
+                                Ok(s) => args.push(s),
                                 _ => {},
                             }
                         }
@@ -159,12 +156,12 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'psync' command"));
                         }
-                        let replication_id = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let replication_id = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid replication_id for PSYNC")),
                         };
-                        let offset = match &items[2] {
-                            Value::BulkString(s) => s.parse::<i64>().unwrap_or(-1),
+                        let offset = match items[2].to_string() {
+                            Ok(s) => s.parse::<i64>().unwrap_or(-1),
                             _ => -1,
                         };
                         Ok(RedisCommand::PSync { replication_id, offset })
@@ -173,14 +170,14 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'config' command"));
                         }
-                        let subcommand = match &items[1] {
-                            Value::BulkString(s) => s.to_uppercase(),
+                        let subcommand = match items[1].to_uppercase_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid subcommand for CONFIG")),
                         };
                         match subcommand.as_str() {
                             "GET" => {
-                                let parameter = match &items[2] {
-                                    Value::BulkString(s) => s.clone(),
+                                let parameter = match items[2].to_string() {
+                                    Ok(s) => s,
                                     _ => return Err(Error::msg("Invalid parameter for CONFIG GET")),
                                 };
                                 Ok(RedisCommand::ConfigGet { parameter })
@@ -193,8 +190,8 @@ impl RedisCommand {
                             println!("KEYS: wrong number of arguments");
                             return Err(Error::msg("ERR wrong number of arguments for 'keys' command"));
                         }
-                        let pattern = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let pattern = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => {
                                 println!("KEYS: invalid pattern type: {:?}", items[1]);
                                 return Err(Error::msg("Invalid pattern for KEYS"));
@@ -207,12 +204,12 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'wait' command"));
                         }
-                        let num_replicas = match &items[1] {
-                            Value::BulkString(s) => s.parse::<usize>()?,
+                        let num_replicas = match items[1].to_string() {
+                            Ok(s) => s.parse::<usize>()?,
                             _ => return Err(Error::msg("Invalid num_replicas for WAIT")),
                         };
-                        let timeout = match &items[2] {
-                            Value::BulkString(s) => s.parse::<u64>()?,
+                        let timeout = match items[2].to_string() {
+                            Ok(s) => s.parse::<u64>()?,
                             _ => return Err(Error::msg("Invalid timeout for WAIT")),
                         };
                         Ok(RedisCommand::Wait { num_replicas, timeout })
@@ -220,8 +217,8 @@ impl RedisCommand {
                     "SUBSCRIBE" => {
                         let mut channels = Vec::new();
                         for item in &items[1..] {
-                            if let Value::BulkString(s) = item {
-                                channels.push(s.clone());
+                            if let Ok(s) = item.to_string() {
+                                channels.push(s);
                             }
                         }
                         if channels.is_empty() {
@@ -233,12 +230,12 @@ impl RedisCommand {
                         if items.len() != 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'publish' command"));
                         }
-                        let channel = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let channel = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid channel for PUBLISH")),
                         };
-                        let message = match &items[2] {
-                            Value::BulkString(s) => s.clone(),
+                        let message = match items[2].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid message for PUBLISH")),
                         };
                         Ok(RedisCommand::Publish { channel, message })
@@ -246,8 +243,8 @@ impl RedisCommand {
                     "UNSUBSCRIBE" => {
                         let mut channels = Vec::new();
                         for item in &items[1..] {
-                            if let Value::BulkString(s) = item {
-                                channels.push(s.clone());
+                            if let Ok(s) = item.to_string() {
+                                channels.push(s);
                             }
                         }
                         // Empty channels list is allowed (means unsubscribe from all)
@@ -257,33 +254,33 @@ impl RedisCommand {
                         if items.len() < 4 {
                             return Err(Error::msg("ERR wrong number of arguments for 'xadd' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for XADD")),
                         };
-                        let id = match &items[2] {
-                            Value::BulkString(s) => s.clone(),
+                        let id = match items[2].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid ID for XADD")),
                         };
-                        
+
                         let mut fields = Vec::new();
                         let mut i = 3;
                         while i < items.len() {
                             if i + 1 >= items.len() {
                                 return Err(Error::msg("ERR wrong number of arguments for 'xadd' command"));
                             }
-                            let field = match &items[i] {
-                                Value::BulkString(s) => s.clone(),
+                            let field = match items[i].to_string() {
+                                Ok(s) => s,
                                 _ => return Err(Error::msg("Invalid field for XADD")),
                             };
-                            let value = match &items[i+1] {
-                                Value::BulkString(s) => s.clone(),
+                            let value = match items[i+1].to_string() {
+                                Ok(s) => s,
                                 _ => return Err(Error::msg("Invalid value for XADD")),
                             };
                             fields.push((field, value));
                             i += 2;
                         }
-                        
+
                         Ok(RedisCommand::XAdd { key, id, fields })
                     }
                     "XREAD" => {
@@ -291,13 +288,13 @@ impl RedisCommand {
                         let mut streams_start_idx = 1;
                         
                         if items.len() > 1 {
-                            if let Value::BulkString(s) = &items[1] {
-                                if s.to_uppercase() == "BLOCK" {
+                            if let Ok(s) = items[1].to_uppercase_string() {
+                                if s == "BLOCK" {
                                     if items.len() < 3 {
                                         return Err(Error::msg("ERR syntax error"));
                                     }
-                                    if let Value::BulkString(ms) = &items[2] {
-                                        block = Some(ms.parse::<u64>()?);
+                                    if let Ok(ms_str) = items[2].to_string() {
+                                        block = Some(ms_str.parse::<u64>()?);
                                     } else {
                                         return Err(Error::msg("ERR value is not an integer or out of range"));
                                     }
@@ -305,14 +302,14 @@ impl RedisCommand {
                                 }
                             }
                         }
-                        
+
                         if items.len() <= streams_start_idx {
                              return Err(Error::msg("ERR wrong number of arguments for 'xread' command"));
                         }
-                        
-                        if let Value::BulkString(s) = &items[streams_start_idx] {
-                            if s.to_uppercase() != "STREAMS" {
-                                return Err(Error::msg("ERR syntax error")); 
+
+                        if let Ok(s) = items[streams_start_idx].to_uppercase_string() {
+                            if s != "STREAMS" {
+                                return Err(Error::msg("ERR syntax error"));
                             }
                         } else {
                             return Err(Error::msg("ERR syntax error"));
@@ -329,17 +326,17 @@ impl RedisCommand {
                         for i in 0..num_streams {
                             let key_idx = streams_start_idx + 1 + i;
                             let id_idx = streams_start_idx + 1 + num_streams + i;
-                            
-                            let key = match &items[key_idx] {
-                                Value::BulkString(s) => s.clone(),
+
+                            let key = match items[key_idx].to_string() {
+                                Ok(s) => s,
                                 _ => return Err(Error::msg("Invalid key")),
                             };
-                            
-                            let id = match &items[id_idx] {
-                                Value::BulkString(s) => s.clone(),
+
+                            let id = match items[id_idx].to_string() {
+                                Ok(s) => s,
                                 _ => return Err(Error::msg("Invalid ID")),
                             };
-                            
+
                             streams.push((key, id));
                         }
                         
@@ -349,27 +346,27 @@ impl RedisCommand {
                         if items.len() < 4 {
                             return Err(Error::msg("ERR wrong number of arguments for 'xrange' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key")),
                         };
-                        let start = match &items[2] {
-                            Value::BulkString(s) => s.clone(),
+                        let start = match items[2].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid start")),
                         };
-                        let end = match &items[3] {
-                            Value::BulkString(s) => s.clone(),
+                        let end = match items[3].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid end")),
                         };
-                        
+
                         Ok(RedisCommand::XRange { key, start, end })
                     }
                     "TYPE" => {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'type' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for TYPE")),
                         };
                         Ok(RedisCommand::Type { key })
@@ -378,8 +375,8 @@ impl RedisCommand {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'incr' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for INCR")),
                         };
                         Ok(RedisCommand::Incr { key })
@@ -391,14 +388,14 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'rpush' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for RPUSH")),
                         };
                         let mut values = Vec::new();
                         for i in 2..items.len() {
-                            match &items[i] {
-                                Value::BulkString(s) => values.push(s.clone()),
+                            match items[i].to_string() {
+                                Ok(s) => values.push(s),
                                 _ => return Err(Error::msg("Invalid value for RPUSH")),
                             }
                         }
@@ -408,16 +405,16 @@ impl RedisCommand {
                         if items.len() < 4 {
                             return Err(Error::msg("ERR wrong number of arguments for 'lrange' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for LRANGE")),
                         };
-                        let start = match &items[2] {
-                            Value::BulkString(s) => s.parse::<i64>()?,
+                        let start = match items[2].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
                             _ => return Err(Error::msg("Invalid start for LRANGE")),
                         };
-                        let end = match &items[3] {
-                            Value::BulkString(s) => s.parse::<i64>()?,
+                        let end = match items[3].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
                             _ => return Err(Error::msg("Invalid end for LRANGE")),
                         };
                         Ok(RedisCommand::LRange { key, start, end })
@@ -426,14 +423,14 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'lpush' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for LPUSH")),
                         };
                         let mut values = Vec::new();
                         for i in 2..items.len() {
-                            match &items[i] {
-                                Value::BulkString(s) => values.push(s.clone()),
+                            match items[i].to_string() {
+                                Ok(s) => values.push(s),
                                 _ => return Err(Error::msg("Invalid value for LPUSH")),
                             }
                         }
@@ -443,8 +440,8 @@ impl RedisCommand {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'llen' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for LLEN")),
                         };
                         Ok(RedisCommand::LLen { key })
@@ -453,13 +450,13 @@ impl RedisCommand {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'lpop' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for LPOP")),
                         };
                         let count = if items.len() > 2 {
-                            match &items[2] {
-                                Value::BulkString(s) => Some(s.parse::<i64>()?),
+                            match items[2].to_string() {
+                                Ok(s) => Some(s.parse::<i64>()?),
                                 _ => return Err(Error::msg("Invalid count for LPOP")),
                             }
                         } else {
@@ -474,13 +471,13 @@ impl RedisCommand {
                         let mut keys = Vec::new();
                         // The last argument is the timeout
                         for i in 1..items.len() - 1 {
-                             match &items[i] {
-                                Value::BulkString(s) => keys.push(s.clone()),
+                             match items[i].to_string() {
+                                Ok(s) => keys.push(s),
                                 _ => return Err(Error::msg("Invalid key for BLPOP")),
                             }
                         }
-                        let timeout = match &items[items.len() - 1] {
-                            Value::BulkString(s) => s.parse::<f64>()?,
+                        let timeout = match items[items.len() - 1].to_string() {
+                            Ok(s) => s.parse::<f64>()?,
                             _ => return Err(Error::msg("Invalid timeout for BLPOP")),
                         };
                         Ok(RedisCommand::BLPop { keys, timeout })
@@ -489,33 +486,33 @@ impl RedisCommand {
                         if items.len() < 4 {
                             return Err(Error::msg("ERR wrong number of arguments for 'zadd' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for ZADD")),
                         };
-                        
+
                         let mut entries = Vec::new();
                         let mut i = 2;
                         while i < items.len() {
-                            let score_str = match &items[i] {
-                                Value::BulkString(s) => s,
+                            let score_str = match items[i].to_string() {
+                                Ok(s) => s,
                                 _ => return Err(Error::msg("Invalid score for ZADD")),
                             };
-                            
+
                             let score = match score_str.parse::<f64>() {
                                 Ok(f) => f,
                                 Err(_) => return Err(Error::msg("ERR value is not a valid float")),
                             };
-                            
+
                             if i + 1 >= items.len() {
                                 return Err(Error::msg("ERR syntax error"));
                             }
-                            
-                            let member = match &items[i+1] {
-                                Value::BulkString(s) => s.clone(),
+
+                            let member = match items[i+1].to_string() {
+                                Ok(s) => s,
                                 _ => return Err(Error::msg("Invalid member for ZADD")),
                             };
-                            
+
                             entries.push((score, member));
                             i += 2;
                         }
@@ -525,36 +522,36 @@ impl RedisCommand {
                         if items.len() < 4 {
                              return Err(Error::msg("ERR wrong number of arguments for 'zrange' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for ZRANGE")),
                         };
-                        let start = match &items[2] {
-                            Value::BulkString(s) => s.parse::<i64>()?,
+                        let start = match items[2].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
                             _ => return Err(Error::msg("Invalid start for ZRANGE")),
                         };
-                        let end = match &items[3] {
-                            Value::BulkString(s) => s.parse::<i64>()?,
+                        let end = match items[3].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
                             _ => return Err(Error::msg("Invalid end for ZRANGE")),
                         };
-                        
+
                         let mut with_scores = false;
                         if items.len() > 4 {
-                            if let Value::BulkString(s) = &items[4] {
-                                if s.to_uppercase() == "WITHSCORES" {
+                            if let Ok(s) = items[4].to_uppercase_string() {
+                                if s == "WITHSCORES" {
                                     with_scores = true;
                                 }
                             }
                         }
-                        
+
                         Ok(RedisCommand::ZRange { key, start, end, with_scores })
                     }
                     "ZCARD" => {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'zcard' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for ZCARD")),
                         };
                         Ok(RedisCommand::ZCard { key })
@@ -563,12 +560,12 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'zscore' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for ZSCORE")),
                         };
-                        let member = match &items[2] {
-                            Value::BulkString(s) => s.clone(),
+                        let member = match items[2].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid member for ZSCORE")),
                         };
                         Ok(RedisCommand::ZScore { key, member })
@@ -577,12 +574,12 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'zrank' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for ZRANK")),
                         };
-                        let member = match &items[2] {
-                            Value::BulkString(s) => s.clone(),
+                        let member = match items[2].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid member for ZRANK")),
                         };
                         Ok(RedisCommand::ZRank { key, member })
@@ -591,14 +588,14 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'zrem' command"));
                         }
-                        let key = match &items[1] {
-                            Value::BulkString(s) => s.clone(),
+                        let key = match items[1].to_string() {
+                            Ok(s) => s,
                             _ => return Err(Error::msg("Invalid key for ZREM")),
                         };
                         let mut members = Vec::new();
                         for i in 2..items.len() {
-                             match &items[i] {
-                                Value::BulkString(s) => members.push(s.clone()),
+                             match items[i].to_string() {
+                                Ok(s) => members.push(s),
                                 _ => return Err(Error::msg("Invalid member for ZREM")),
                             }
                         }

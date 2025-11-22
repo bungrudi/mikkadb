@@ -82,7 +82,7 @@ impl KeyValueStore for ActorStore {
 
         match result {
             Value::SimpleString(_) => Ok(()),
-            Value::Error(e) => Err(StoreError::Internal(e)),
+            Value::Error(e) => Err(StoreError::Internal(String::from_utf8_lossy(&e).to_string())),
             _ => Err(StoreError::Internal(format!(
                 "Unexpected response for SET: {:?}",
                 result
@@ -99,10 +99,14 @@ impl KeyValueStore for ActorStore {
 
         match value {
             Value::Integer(n) => Ok(n),
-            Value::Error(e) if e.contains("not an integer") => {
-                Err(StoreError::InvalidOperation(e))
+            Value::Error(ref e) => {
+                let err_str = String::from_utf8_lossy(e).to_string();
+                if err_str.contains("not an integer") {
+                    Err(StoreError::InvalidOperation(err_str))
+                } else {
+                    Err(StoreError::Internal(err_str))
+                }
             }
-            Value::Error(e) => Err(StoreError::Internal(e)),
             _ => Err(StoreError::Internal(format!(
                 "Unexpected response for INCR: {:?}",
                 value
@@ -153,13 +157,17 @@ impl KeyValueStore for ActorStore {
 
         match result {
             Value::Integer(n) => Ok(n as usize),
-            Value::Error(e) if e.contains("WRONGTYPE") => {
-                Err(StoreError::WrongType {
-                    expected: "list",
-                    actual: "unknown",
-                })
+            Value::Error(ref e) => {
+                let err_str = String::from_utf8_lossy(e).to_string();
+                if err_str.contains("WRONGTYPE") {
+                    Err(StoreError::WrongType {
+                        expected: "list",
+                        actual: "unknown",
+                    })
+                } else {
+                    Err(StoreError::Internal(err_str))
+                }
             }
-            Value::Error(e) => Err(StoreError::Internal(e)),
             _ => Err(StoreError::Internal(format!(
                 "Unexpected response for LPUSH: {:?}",
                 result
@@ -182,13 +190,17 @@ impl KeyValueStore for ActorStore {
 
         match result {
             Value::Integer(n) => Ok(n as usize),
-            Value::Error(e) if e.contains("WRONGTYPE") => {
-                Err(StoreError::WrongType {
-                    expected: "list",
-                    actual: "unknown",
-                })
+            Value::Error(ref e) => {
+                let err_str = String::from_utf8_lossy(e).to_string();
+                if err_str.contains("WRONGTYPE") {
+                    Err(StoreError::WrongType {
+                        expected: "list",
+                        actual: "unknown",
+                    })
+                } else {
+                    Err(StoreError::Internal(err_str))
+                }
             }
-            Value::Error(e) => Err(StoreError::Internal(e)),
             _ => Err(StoreError::Internal(format!(
                 "Unexpected response for RPUSH: {:?}",
                 result
@@ -221,13 +233,17 @@ impl KeyValueStore for ActorStore {
                     Ok(Some(bytes_vec))
                 }
             }
-            Value::Error(e) if e.contains("WRONGTYPE") => {
-                Err(StoreError::WrongType {
-                    expected: "list",
-                    actual: "unknown",
-                })
+            Value::Error(ref e) => {
+                let err_str = String::from_utf8_lossy(e).to_string();
+                if err_str.contains("WRONGTYPE") {
+                    Err(StoreError::WrongType {
+                        expected: "list",
+                        actual: "unknown",
+                    })
+                } else {
+                    Err(StoreError::Internal(err_str))
+                }
             }
-            Value::Error(e) => Err(StoreError::Internal(e)),
             _ => Err(StoreError::Internal(format!(
                 "Unexpected response for LPOP: {:?}",
                 result
@@ -251,13 +267,17 @@ impl KeyValueStore for ActorStore {
 
         match result {
             Value::Integer(n) => Ok(n),
-            Value::Error(e) if e.contains("WRONGTYPE") => {
-                Err(StoreError::WrongType {
-                    expected: "list",
-                    actual: "unknown",
-                })
+            Value::Error(ref e) => {
+                let err_str = String::from_utf8_lossy(e).to_string();
+                if err_str.contains("WRONGTYPE") {
+                    Err(StoreError::WrongType {
+                        expected: "list",
+                        actual: "unknown",
+                    })
+                } else {
+                    Err(StoreError::Internal(err_str))
+                }
             }
-            Value::Error(e) => Err(StoreError::Internal(e)),
             _ => Err(StoreError::Internal(format!(
                 "Unexpected response for LLEN: {:?}",
                 result
@@ -285,13 +305,17 @@ impl KeyValueStore for ActorStore {
                     .collect();
                 Ok(bytes_vec)
             }
-            Value::Error(e) if e.contains("WRONGTYPE") => {
-                Err(StoreError::WrongType {
-                    expected: "list",
-                    actual: "unknown",
-                })
+            Value::Error(ref e) => {
+                let err_str = String::from_utf8_lossy(e).to_string();
+                if err_str.contains("WRONGTYPE") {
+                    Err(StoreError::WrongType {
+                        expected: "list",
+                        actual: "unknown",
+                    })
+                } else {
+                    Err(StoreError::Internal(err_str))
+                }
             }
-            Value::Error(e) => Err(StoreError::Internal(e)),
             _ => Err(StoreError::Internal(format!(
                 "Unexpected response for LRANGE: {:?}",
                 result
@@ -360,13 +384,13 @@ impl KeyValueStore for ActorStore {
                 let keys: Vec<String> = items
                     .into_iter()
                     .filter_map(|v| match v {
-                        Value::BulkString(s) => Some(s),
+                        Value::BulkString(s) => Some(String::from_utf8_lossy(&s).to_string()),
                         _ => None,
                     })
                     .collect();
                 Ok(keys)
             }
-            Value::Error(e) => Err(StoreError::Internal(e)),
+            Value::Error(e) => Err(StoreError::Internal(String::from_utf8_lossy(&e).to_string())),
             _ => Err(StoreError::Internal(format!(
                 "Unexpected response for KEYS: {:?}",
                 result
@@ -383,13 +407,14 @@ impl KeyValueStore for ActorStore {
 
         match result {
             Value::SimpleString(s) => {
-                if s == "none" {
+                let s_str = String::from_utf8_lossy(&s).to_string();
+                if s_str == "none" {
                     Ok(None)
                 } else {
-                    Ok(Some(s))
+                    Ok(Some(s_str))
                 }
             }
-            Value::Error(e) => Err(StoreError::Internal(e)),
+            Value::Error(e) => Err(StoreError::Internal(String::from_utf8_lossy(&e).to_string())),
             _ => Err(StoreError::Internal(format!(
                 "Unexpected response for TYPE: {:?}",
                 result

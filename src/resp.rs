@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use anyhow::{Result, Error};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -17,23 +17,52 @@ pub enum ParseResult {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    SimpleString(String),
-    BulkString(String),
+    SimpleString(Bytes),
+    BulkString(Bytes),
     Array(Vec<Value>),
     Integer(i64),
     RdbFile(Vec<u8>),
     Multiple(Vec<Value>),
-    Error(String),
+    Error(Bytes),
     Null,
     NullArray,
 }
 
 impl Value {
+    /// Convert Value to String (adapter layer for storage boundary)
+    /// This is where UTF-8 validation happens - commands must be valid UTF-8
+    pub fn to_string(&self) -> Result<String> {
+        match self {
+            Value::SimpleString(b) => Ok(std::str::from_utf8(b)
+                .map_err(|_| Error::msg("Invalid UTF-8 in SimpleString"))?
+                .to_string()),
+            Value::BulkString(b) => Ok(std::str::from_utf8(b)
+                .map_err(|_| Error::msg("Invalid UTF-8 in BulkString"))?
+                .to_string()),
+            Value::Error(b) => Ok(std::str::from_utf8(b)
+                .map_err(|_| Error::msg("Invalid UTF-8 in Error"))?
+                .to_string()),
+            _ => Err(Error::msg("Cannot convert this Value type to String")),
+        }
+    }
+
+    /// Extract bulk string as uppercase String (common for command names)
+    pub fn to_uppercase_string(&self) -> Result<String> {
+        match self {
+            Value::BulkString(b) => {
+                let s = std::str::from_utf8(b)
+                    .map_err(|_| Error::msg("Invalid UTF-8 in command"))?;
+                Ok(s.to_uppercase())
+            }
+            _ => Err(Error::msg("Expected BulkString for command")),
+        }
+    }
+
     #[cfg(test)]
     pub fn serialize(self) -> String {
         match self {
-            Value::SimpleString(s) => format!("+{}\r\n", s),
-            Value::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s),
+            Value::SimpleString(s) => format!("+{}\r\n", String::from_utf8_lossy(&s)),
+            Value::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), String::from_utf8_lossy(&s)),
             Value::Integer(i) => format!(":{}\r\n", i),
             Value::Array(items) => {
                 let mut s = format!("*{}\r\n", items.len());
@@ -44,7 +73,7 @@ impl Value {
             }
             Value::RdbFile(_) => panic!("Cannot serialize RdbFile to String"),
             Value::Multiple(_) => panic!("Cannot serialize Multiple to String"),
-            Value::Error(s) => format!("-{}\r\n", s),
+            Value::Error(s) => format!("-{}\r\n", String::from_utf8_lossy(&s)),
             Value::Null => "$-1\r\n".to_string(),
             Value::NullArray => "*-1\r\n".to_string(),
         }
@@ -52,8 +81,23 @@ impl Value {
     
     pub fn serialize_bytes(self) -> Vec<u8> {
         match self {
-            Value::SimpleString(s) => format!("+{}\r\n", s).into_bytes(),
-            Value::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s).into_bytes(),
+            Value::SimpleString(s) => {
+                let mut bytes = Vec::with_capacity(s.len() + 3);
+                bytes.push(b'+');
+                bytes.extend_from_slice(&s);
+                bytes.extend_from_slice(b"\r\n");
+                bytes
+            }
+            Value::BulkString(s) => {
+                let len_str = s.len().to_string();
+                let mut bytes = Vec::with_capacity(1 + len_str.len() + 2 + s.len() + 2);
+                bytes.push(b'$');
+                bytes.extend_from_slice(len_str.as_bytes());
+                bytes.extend_from_slice(b"\r\n");
+                bytes.extend_from_slice(&s);
+                bytes.extend_from_slice(b"\r\n");
+                bytes
+            }
             Value::Integer(i) => format!(":{}\r\n", i).into_bytes(),
             Value::Array(items) => {
                 let mut bytes = format!("*{}\r\n", items.len()).into_bytes();
@@ -74,7 +118,13 @@ impl Value {
                 }
                 bytes
             }
-            Value::Error(s) => format!("-{}\r\n", s).into_bytes(),
+            Value::Error(s) => {
+                let mut bytes = Vec::with_capacity(s.len() + 3);
+                bytes.push(b'-');
+                bytes.extend_from_slice(&s);
+                bytes.extend_from_slice(b"\r\n");
+                bytes
+            }
             Value::Null => "$-1\r\n".to_string().into_bytes(),
             Value::NullArray => "*-1\r\n".to_string().into_bytes(),
         }
@@ -225,8 +275,8 @@ fn parse_message(buffer: &[u8]) -> Result<(Value, usize)> {
 fn parse_simple_string(buffer: &[u8]) -> Result<(Value, usize)> {
     if let Some(i) = buffer.windows(2).position(|w| w == b"\r\n") {
         let line = &buffer[1..i];
-        let s = String::from_utf8(line.to_vec())?;
-        return Ok((Value::SimpleString(s), i + 2));
+        let bytes = Bytes::copy_from_slice(line);
+        return Ok((Value::SimpleString(bytes), i + 2));
     }
     Err(Error::msg("Incomplete simple string"))
 }
@@ -252,10 +302,10 @@ fn parse_bulk_string(buffer: &[u8]) -> Result<(Value, usize)> {
     let (len, rem) = parse_integer(buffer)?;
     let start = rem;
     let end = start + len as usize;
-    
+
     if end + 2 <= buffer.len() {
-        let s = String::from_utf8(buffer[start..end].to_vec())?;
-        return Ok((Value::BulkString(s), end + 2));
+        let bytes = Bytes::copy_from_slice(&buffer[start..end]);
+        return Ok((Value::BulkString(bytes), end + 2));
     }
     Err(Error::msg("Incomplete bulk string"))
 }
@@ -278,7 +328,7 @@ mod tests {
     fn test_parse_simple_string() {
         let buffer = b"+OK\r\n";
         let (value, consumed) = parse_message(buffer).unwrap();
-        assert_eq!(value, Value::SimpleString("OK".to_string()));
+        assert_eq!(value, Value::SimpleString(Bytes::from("OK")));
         assert_eq!(consumed, 5);
     }
 
@@ -286,7 +336,7 @@ mod tests {
     fn test_parse_bulk_string() {
         let buffer = b"$5\r\nhello\r\n";
         let (value, consumed) = parse_message(buffer).unwrap();
-        assert_eq!(value, Value::BulkString("hello".to_string()));
+        assert_eq!(value, Value::BulkString(Bytes::from("hello")));
         assert_eq!(consumed, 11);
     }
 
@@ -296,8 +346,8 @@ mod tests {
         let (value, consumed) = parse_message(buffer).unwrap();
         if let Value::Array(items) = value {
             assert_eq!(items.len(), 2);
-            assert_eq!(items[0], Value::BulkString("ECHO".to_string()));
-            assert_eq!(items[1], Value::BulkString("hello".to_string()));
+            assert_eq!(items[0], Value::BulkString(Bytes::from("ECHO")));
+            assert_eq!(items[1], Value::BulkString(Bytes::from("hello")));
         } else {
             panic!("Expected Array");
         }
@@ -306,13 +356,13 @@ mod tests {
 
     #[test]
     fn test_serialize_simple_string() {
-        let val = Value::SimpleString("OK".to_string());
+        let val = Value::SimpleString(Bytes::from("OK"));
         assert_eq!(val.serialize(), "+OK\r\n");
     }
 
     #[test]
     fn test_serialize_bulk_string() {
-        let val = Value::BulkString("hello".to_string());
+        let val = Value::BulkString(Bytes::from("hello"));
         assert_eq!(val.serialize(), "$5\r\nhello\r\n");
     }
     
@@ -331,8 +381,8 @@ mod tests {
     #[test]
     fn test_serialize_array() {
         let val = Value::Array(vec![
-            Value::SimpleString("OK".to_string()),
-            Value::BulkString("hello".to_string()),
+            Value::SimpleString(Bytes::from("OK")),
+            Value::BulkString(Bytes::from("hello")),
         ]);
         assert_eq!(val.serialize(), "*2\r\n+OK\r\n$5\r\nhello\r\n");
     }
@@ -368,7 +418,7 @@ mod tests {
         // Buffer contains complete command plus extra data
         let buffer = b"$5\r\nhello\r\n+OK\r\n";
         let (value, consumed) = parse_message(buffer).unwrap();
-        assert_eq!(value, Value::BulkString("hello".to_string()));
+        assert_eq!(value, Value::BulkString(Bytes::from("hello")));
         assert_eq!(consumed, 11);
         // Verify extra data is left in buffer
         assert_eq!(&buffer[consumed..], b"+OK\r\n");
@@ -382,24 +432,24 @@ mod tests {
 
         // Parse first command (GET foo)
         let (val1, consumed1) = parse_message(&buffer[offset..]).unwrap();
-        assert_eq!(val1, Value::BulkString("GET".to_string()));
+        assert_eq!(val1, Value::BulkString(Bytes::from("GET")));
         offset += consumed1;
 
         let (val2, consumed2) = parse_message(&buffer[offset..]).unwrap();
-        assert_eq!(val2, Value::BulkString("foo".to_string()));
+        assert_eq!(val2, Value::BulkString(Bytes::from("foo")));
         offset += consumed2;
 
         // Parse second command (SET bar value)
         let (val3, consumed3) = parse_message(&buffer[offset..]).unwrap();
-        assert_eq!(val3, Value::BulkString("SET".to_string()));
+        assert_eq!(val3, Value::BulkString(Bytes::from("SET")));
         offset += consumed3;
 
         let (val4, consumed4) = parse_message(&buffer[offset..]).unwrap();
-        assert_eq!(val4, Value::BulkString("bar".to_string()));
+        assert_eq!(val4, Value::BulkString(Bytes::from("bar")));
         offset += consumed4;
 
         let (val5, consumed5) = parse_message(&buffer[offset..]).unwrap();
-        assert_eq!(val5, Value::BulkString("value".to_string()));
+        assert_eq!(val5, Value::BulkString(Bytes::from("value")));
         offset += consumed5;
 
         assert_eq!(offset, buffer.len());
@@ -409,8 +459,8 @@ mod tests {
     fn test_serialize_batch() {
         // Test that batch serialization matches individual serialization
         let responses = vec![
-            Value::SimpleString("OK".to_string()),
-            Value::BulkString("value1".to_string()),
+            Value::SimpleString(Bytes::from("OK")),
+            Value::BulkString(Bytes::from("value1")),
             Value::Integer(42),
             Value::Null,
         ];
