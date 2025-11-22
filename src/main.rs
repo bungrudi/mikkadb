@@ -57,64 +57,93 @@ async fn main() -> Result<()> {
             let mut handler = resp::RespHandler::new(stream);
             let mut repl_rx: Option<mpsc::Receiver<crate::resp::Value>> = None;
             let (msg_tx, mut msg_rx) = mpsc::channel(32);
-            
+
+            // Phase 2: Pipelining constants
+            const MAX_BATCH_COMMANDS: usize = 1024;
+            const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024; // 4MB
+
             loop {
                 tokio::select! {
                     value = handler.read_value() => {
                         match value {
                             Ok(Some(v)) => {
-                                match RedisCommand::from_resp(v) {
-                                    Ok(command) => {
-                                        let (resp_tx, resp_rx) = oneshot::channel();
-                                        
-                                        let mut replica_tx = None;
-                                        if let RedisCommand::PSync { .. } = &command {
-                                            let (tx, rx) = mpsc::channel(32);
-                                            replica_tx = Some(tx);
-                                            repl_rx = Some(rx);
+                                // Phase 2: Collect commands into batch
+                                let mut command_batch = vec![v];
+                                let mut batch_bytes = 0usize; // Approximate
+
+                                // Drain buffer for additional commands (non-blocking)
+                                loop {
+                                    if command_batch.len() >= MAX_BATCH_COMMANDS || batch_bytes >= MAX_BATCH_BYTES {
+                                        break;
+                                    }
+
+                                    match handler.try_read_value_from_buf() {
+                                        resp::ParseResult::Complete(val, _consumed) => {
+                                            batch_bytes += 100; // Rough estimate per command
+                                            command_batch.push(val);
                                         }
-                                        
-                                        let req = CommandRequest {
-                                            client_id,
-                                            command,
-                                            response_tx: resp_tx,
-                                            replica_tx,
-                                            pub_sub_tx: Some(msg_tx.clone()),
-                                        };
-                                        
-                                        if let Err(_) = tx.send(req).await {
-                                            // println!("Engine receiver dropped");
+                                        resp::ParseResult::Incomplete => break, // No more complete commands
+                                        resp::ParseResult::Error(e) => {
+                                            // Malformed command, add error and stop batch
+                                            let _ = handler.write_value(resp::Value::Error(format!("ERR {}", e))).await;
                                             break;
                                         }
-                                        match resp_rx.await {
-                                            Ok(Ok(response)) => {
-                                                if let crate::resp::Value::Error(msg) = &response {
-                                                    if msg == "NO_REPLY" {
-                                                        continue;
-                                                    }
-                                                }
+                                    }
+                                }
 
-                                                // if let crate::resp::Value::Array(_) = &response {
-                                                //     println!("Sending Array response");
-                                                // } else if let crate::resp::Value::SimpleString(s) = &response {
-                                                //     println!("Sending SimpleString response: {}", s);
-                                                // }
-                                                let _ = handler.write_value(response).await;
+                                // Phase 2: Process batch of commands
+                                let mut response_batch = Vec::with_capacity(command_batch.len());
+
+                                for cmd_value in command_batch {
+                                    match RedisCommand::from_resp(cmd_value) {
+                                        Ok(command) => {
+                                            let (resp_tx, resp_rx) = oneshot::channel();
+
+                                            let mut replica_tx = None;
+                                            if let RedisCommand::PSync { .. } = &command {
+                                                let (tx, rx) = mpsc::channel(32);
+                                                replica_tx = Some(tx);
+                                                repl_rx = Some(rx);
                                             }
-                                            Ok(Err(e)) => {
-                                                // println!("Sending Error response from Engine: {}", e);
-                                                let _ = handler.write_value(resp::Value::Error(format!("ERR {}", e))).await;
+
+                                            let req = CommandRequest {
+                                                client_id,
+                                                command,
+                                                response_tx: resp_tx,
+                                                replica_tx,
+                                                pub_sub_tx: Some(msg_tx.clone()),
+                                            };
+
+                                            if let Err(_) = tx.send(req).await {
+                                                break; // Engine dropped, will exit outer loop
                                             }
-                                            Err(_) => {
-                                                // println!("Engine response sender dropped");
-                                                break;
+
+                                            match resp_rx.await {
+                                                Ok(Ok(response)) => {
+                                                    if let crate::resp::Value::Error(msg) = &response {
+                                                        if msg == "NO_REPLY" {
+                                                            continue; // Skip adding to response batch
+                                                        }
+                                                    }
+                                                    response_batch.push(response);
+                                                }
+                                                Ok(Err(e)) => {
+                                                    response_batch.push(resp::Value::Error(format!("ERR {}", e)));
+                                                }
+                                                Err(_) => {
+                                                    break; // Response channel dropped
+                                                }
                                             }
                                         }
+                                        Err(e) => {
+                                            response_batch.push(resp::Value::Error(format!("ERR {}", e)));
+                                        }
                                     }
-                                    Err(e) => {
-                                        // println!("Sending Error response from Parser: {}", e);
-                                        let _ = handler.write_value(resp::Value::Error(format!("ERR {}", e))).await;
-                                    }
+                                }
+
+                                // Phase 2: Write all responses with single flush
+                                if !response_batch.is_empty() {
+                                    let _ = handler.write_batch(response_batch).await;
                                 }
                             }
                             Ok(None) => break,

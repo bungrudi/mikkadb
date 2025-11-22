@@ -24,16 +24,52 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut handler = RespHandler::new(stream);
 
+            // Phase 2: Pipelining constants
+            const MAX_BATCH_COMMANDS: usize = 1024;
+            const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024; // 4MB
+
             loop {
                 match handler.read_value().await {
                     Ok(Some(v)) => {
-                        let response = match handle_command(&store, v).await {
-                            Ok(resp) => resp,
-                            Err(e) => Value::Error(format!("ERR {}", e)),
-                        };
+                        // Phase 2: Collect commands into batch
+                        let mut command_batch = vec![v];
+                        let mut batch_bytes = 0usize;
 
-                        if let Err(_) = handler.write_value(response).await {
-                            break;
+                        // Drain buffer for additional commands (non-blocking)
+                        loop {
+                            if command_batch.len() >= MAX_BATCH_COMMANDS || batch_bytes >= MAX_BATCH_BYTES {
+                                break;
+                            }
+
+                            match handler.try_read_value_from_buf() {
+                                mikkadb_rust::resp::ParseResult::Complete(val, _consumed) => {
+                                    batch_bytes += 100; // Rough estimate per command
+                                    command_batch.push(val);
+                                }
+                                mikkadb_rust::resp::ParseResult::Incomplete => break,
+                                mikkadb_rust::resp::ParseResult::Error(e) => {
+                                    let _ = handler.write_value(Value::Error(format!("ERR {}", e))).await;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Phase 2: Process batch of commands
+                        let mut response_batch = Vec::with_capacity(command_batch.len());
+
+                        for cmd_value in command_batch {
+                            let response = match handle_command(&store, cmd_value).await {
+                                Ok(resp) => resp,
+                                Err(e) => Value::Error(format!("ERR {}", e)),
+                            };
+                            response_batch.push(response);
+                        }
+
+                        // Phase 2: Write all responses with single flush
+                        if !response_batch.is_empty() {
+                            if let Err(_) = handler.write_batch(response_batch).await {
+                                break;
+                            }
                         }
                     }
                     Ok(None) => break,
@@ -65,6 +101,15 @@ async fn handle_command(store: &Arc<SingleLockStore>, value: Value) -> Result<Va
                 Ok(items[1].clone())
             } else {
                 Ok(Value::SimpleString("PONG".to_string()))
+            }
+        }
+        "ECHO" => {
+            if items.len() < 2 {
+                return Ok(Value::Error("ERR wrong number of arguments for 'echo' command".to_string()));
+            }
+            match &items[1] {
+                Value::BulkString(s) => Ok(Value::BulkString(s.clone())),
+                _ => Ok(Value::Error("ERR Invalid argument for ECHO".to_string())),
             }
         }
         "GET" => {
@@ -208,6 +253,20 @@ async fn handle_command(store: &Arc<SingleLockStore>, value: Value) -> Result<Va
 
             match store.incr(key).await {
                 Ok(n) => Ok(Value::Integer(n)),
+                Err(e) => Ok(Value::Error(format!("ERR {}", e))),
+            }
+        }
+        "LLEN" => {
+            if items.len() < 2 {
+                return Ok(Value::Error("ERR wrong number of arguments for 'llen' command".to_string()));
+            }
+            let key = match &items[1] {
+                Value::BulkString(s) => s,
+                _ => return Ok(Value::Error("ERR Invalid key".to_string())),
+            };
+
+            match store.llen(key).await {
+                Ok(len) => Ok(Value::Integer(len)),
                 Err(e) => Ok(Value::Error(format!("ERR {}", e))),
             }
         }

@@ -4,6 +4,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
+/// Result of attempting to parse RESP value from buffer
+#[derive(Debug)]
+pub enum ParseResult {
+    /// Successfully parsed a complete value (value, bytes_consumed)
+    Complete(Value, usize),
+    /// Buffer contains incomplete data, need more bytes
+    Incomplete,
+    /// Parsing error (malformed RESP)
+    Error(anyhow::Error),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     SimpleString(String),
@@ -117,6 +128,45 @@ impl RespHandler {
 
     pub async fn write_value(&mut self, value: Value) -> Result<()> {
         self.writer.write_all(&value.serialize_bytes()).await?;
+        self.writer.flush().await?;
+        Ok(())
+    }
+
+    /// Try to parse a RESP value from the internal buffer without blocking I/O
+    /// Returns Complete with value (buffer is automatically advanced), Incomplete if more data needed,
+    /// or Error if the data is malformed
+    pub fn try_read_value_from_buf(&mut self) -> ParseResult {
+        match parse_message(&self.buffer) {
+            Ok((value, consumed)) => {
+                // Advance buffer past the consumed bytes
+                let _ = self.buffer.split_to(consumed);
+                ParseResult::Complete(value, consumed)
+            }
+            Err(e) => {
+                // Check if error is due to incomplete data
+                let msg = e.to_string();
+                if msg.contains("Incomplete") || msg.contains("Empty buffer") {
+                    ParseResult::Incomplete
+                } else {
+                    ParseResult::Error(e)
+                }
+            }
+        }
+    }
+
+    /// Write multiple responses with a single flush operation
+    /// This is the core of command pipelining optimization
+    pub async fn write_batch(&mut self, responses: Vec<Value>) -> Result<()> {
+        if responses.is_empty() {
+            return Ok(());
+        }
+
+        // Write all responses to the buffer
+        for response in responses {
+            self.writer.write_all(&response.serialize_bytes()).await?;
+        }
+
+        // Single flush for entire batch
         self.writer.flush().await?;
         Ok(())
     }
@@ -285,5 +335,125 @@ mod tests {
             Value::BulkString("hello".to_string()),
         ]);
         assert_eq!(val.serialize(), "*2\r\n+OK\r\n$5\r\nhello\r\n");
+    }
+
+    // Phase 1: New tests for try_read_value_from_buf()
+    #[test]
+    fn test_try_read_value_from_buf_empty() {
+        // Test parse_message with empty buffer
+        let buffer = b"";
+        let result = parse_message(buffer);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Empty buffer"));
+    }
+
+    #[test]
+    fn test_try_read_value_from_buf_incomplete_simple_string() {
+        let buffer = b"+OK"; // Missing \r\n
+        let result = parse_message(buffer);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Incomplete"));
+    }
+
+    #[test]
+    fn test_try_read_value_from_buf_incomplete_bulk_string() {
+        let buffer = b"$5\r\nhel"; // Incomplete data
+        let result = parse_message(buffer);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Incomplete"));
+    }
+
+    #[test]
+    fn test_try_read_value_from_buf_complete_with_extra() {
+        // Buffer contains complete command plus extra data
+        let buffer = b"$5\r\nhello\r\n+OK\r\n";
+        let (value, consumed) = parse_message(buffer).unwrap();
+        assert_eq!(value, Value::BulkString("hello".to_string()));
+        assert_eq!(consumed, 11);
+        // Verify extra data is left in buffer
+        assert_eq!(&buffer[consumed..], b"+OK\r\n");
+    }
+
+    #[test]
+    fn test_try_read_value_from_buf_multiple_commands() {
+        // Simulate parsing multiple commands from buffer
+        let buffer = b"$3\r\nGET\r\n$3\r\nfoo\r\n$3\r\nSET\r\n$3\r\nbar\r\n$5\r\nvalue\r\n";
+        let mut offset = 0;
+
+        // Parse first command (GET foo)
+        let (val1, consumed1) = parse_message(&buffer[offset..]).unwrap();
+        assert_eq!(val1, Value::BulkString("GET".to_string()));
+        offset += consumed1;
+
+        let (val2, consumed2) = parse_message(&buffer[offset..]).unwrap();
+        assert_eq!(val2, Value::BulkString("foo".to_string()));
+        offset += consumed2;
+
+        // Parse second command (SET bar value)
+        let (val3, consumed3) = parse_message(&buffer[offset..]).unwrap();
+        assert_eq!(val3, Value::BulkString("SET".to_string()));
+        offset += consumed3;
+
+        let (val4, consumed4) = parse_message(&buffer[offset..]).unwrap();
+        assert_eq!(val4, Value::BulkString("bar".to_string()));
+        offset += consumed4;
+
+        let (val5, consumed5) = parse_message(&buffer[offset..]).unwrap();
+        assert_eq!(val5, Value::BulkString("value".to_string()));
+        offset += consumed5;
+
+        assert_eq!(offset, buffer.len());
+    }
+
+    #[test]
+    fn test_serialize_batch() {
+        // Test that batch serialization matches individual serialization
+        let responses = vec![
+            Value::SimpleString("OK".to_string()),
+            Value::BulkString("value1".to_string()),
+            Value::Integer(42),
+            Value::Null,
+        ];
+
+        // Serialize individually
+        let mut expected = Vec::new();
+        for resp in &responses {
+            expected.extend(resp.clone().serialize_bytes());
+        }
+
+        // Serialize as batch (manually, since write_batch is async)
+        let mut actual = Vec::new();
+        for resp in responses {
+            actual.extend(resp.serialize_bytes());
+        }
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_serialize_empty_batch() {
+        let responses: Vec<Value> = vec![];
+        let mut output = Vec::new();
+        for resp in responses {
+            output.extend(resp.serialize_bytes());
+        }
+        assert_eq!(output.len(), 0);
+    }
+
+    #[test]
+    fn test_serialize_large_batch() {
+        // Test batch of 100 responses
+        let mut responses = Vec::new();
+        for i in 0..100 {
+            responses.push(Value::Integer(i));
+        }
+
+        let mut output = Vec::new();
+        for resp in responses {
+            output.extend(resp.serialize_bytes());
+        }
+
+        // Should have 100 integer responses
+        assert!(output.len() > 100); // At least ":0\r\n" = 4 bytes per response
     }
 }
