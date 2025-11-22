@@ -53,13 +53,9 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(config: Arc<Config>, rx: mpsc::Receiver<CommandRequest>) -> Self {
+    pub fn new(config: Arc<Config>, rx: mpsc::Receiver<CommandRequest>, db: Db) -> Self {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
         let (read_timeout_tx, read_timeout_rx) = mpsc::channel(32);
-        let mut db = Db::new();
-        if let Err(e) = db.load_rdb(config.rdb_path()) {
-            eprintln!("Failed to load RDB file: {}", e);
-        }
         Engine {
             db,
             config,

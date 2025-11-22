@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use dashmap::DashMap;
+use std::sync::Arc;
 use std::fs;
 use std::path::Path;
 use bytes::Bytes;
@@ -22,13 +24,13 @@ enum DataType {
 
 #[derive(Clone)]
 pub struct Db {
-    data: HashMap<String, DataType>,
+    data: Arc<DashMap<String, DataType>>,
 }
 
 impl Db {
     pub fn new() -> Self {
         Db {
-            data: HashMap::new(),
+            data: Arc::new(DashMap::new()),
         }
     }
 
@@ -92,14 +94,14 @@ impl Db {
         Ok(())
     }
 
-    pub fn set(&mut self, key: String, value: Bytes, px: Option<u64>) {
+    pub fn set(&self, key: String, value: Bytes, px: Option<u64>) {
         let expiry = px.map(|ms| Instant::now() + Duration::from_millis(ms));
         self.data.insert(key, DataType::String(value, expiry));
     }
 
     pub fn get(&self, key: &str) -> Option<Bytes> {
         if let Some(data_type) = self.data.get(key) {
-            match data_type {
+            match data_type.value() {
                 DataType::String(value, expiry) => {
                     if let Some(expiry_time) = expiry {
                         if Instant::now() > *expiry_time {
@@ -116,12 +118,12 @@ impl Db {
         None
     }
     
-    pub fn add_stream_entry(&mut self, key: String, id: (u64, u64), fields: Vec<(String, String)>) -> Result<(u64, u64), String> {
+    pub fn add_stream_entry(&self, key: String, id: (u64, u64), fields: Vec<(String, String)>) -> Result<(u64, u64), String> {
         let entry = StreamEntry { id, fields };
         
-        let stream = self.data.entry(key).or_insert(DataType::Stream(Vec::new()));
+        let mut stream = self.data.entry(key).or_insert(DataType::Stream(Vec::new()));
         
-        match stream {
+        match stream.value_mut() {
             DataType::Stream(entries) => {
                 // Validate ID
                 if let Some(last) = entries.last() {
@@ -145,55 +147,61 @@ impl Db {
     }
     
     pub fn get_last_stream_id(&self, key: &str) -> Option<(u64, u64)> {
-        if let Some(DataType::Stream(entries)) = self.data.get(key) {
-            entries.last().map(|e| e.id)
-        } else {
-            None
+        if let Some(entry) = self.data.get(key) {
+            if let DataType::Stream(entries) = entry.value() {
+                return entries.last().map(|e| e.id);
+            }
         }
+        None
     }
     
     pub fn read_stream(&self, key: &str, start_id: (u64, u64)) -> Option<Vec<StreamEntry>> {
-        if let Some(DataType::Stream(entries)) = self.data.get(key) {
-            let result: Vec<StreamEntry> = entries.iter()
-                .filter(|e| e.id.0 > start_id.0 || (e.id.0 == start_id.0 && e.id.1 > start_id.1))
-                .cloned()
-                .collect();
-            
-            if result.is_empty() {
-                None
-            } else {
+        if let Some(entry) = self.data.get(key) {
+            if let DataType::Stream(entries) = entry.value() {
+                let result: Vec<StreamEntry> = entries.iter()
+                    .filter(|e| e.id.0 > start_id.0 || (e.id.0 == start_id.0 && e.id.1 > start_id.1))
+                    .cloned()
+                    .collect();
+                
+                if result.is_empty() {
+                    return None;
+                } else {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn range_stream(&self, key: &str, start: (u64, u64), end: (u64, u64)) -> Option<Vec<StreamEntry>> {
+        if let Some(entry) = self.data.get(key) {
+            if let DataType::Stream(entries) = entry.value() {
+                let result: Vec<StreamEntry> = entries.iter()
+                    .filter(|e| {
+                        let id = e.id;
+                        // Check start (inclusive)
+                        let after_start = id.0 > start.0 || (id.0 == start.0 && id.1 >= start.1);
+                        // Check end (inclusive)
+                        let before_end = id.0 < end.0 || (id.0 == end.0 && id.1 <= end.1);
+                        
+                        after_start && before_end
+                    })
+                    .cloned()
+                    .collect();
+                
                 Some(result)
+            } else {
+                None
             }
         } else {
             None
         }
     }
 
-    pub fn range_stream(&self, key: &str, start: (u64, u64), end: (u64, u64)) -> Option<Vec<StreamEntry>> {
-        if let Some(DataType::Stream(entries)) = self.data.get(key) {
-            let result: Vec<StreamEntry> = entries.iter()
-                .filter(|e| {
-                    let id = e.id;
-                    // Check start (inclusive)
-                    let after_start = id.0 > start.0 || (id.0 == start.0 && id.1 >= start.1);
-                    // Check end (inclusive)
-                    let before_end = id.0 < end.0 || (id.0 == end.0 && id.1 <= end.1);
-                    
-                    after_start && before_end
-                })
-                .cloned()
-                .collect();
-            
-            Some(result)
-        } else {
-            None
-        }
-    }
-
-    pub fn rpush(&mut self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
-        let list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
+    pub fn rpush(&self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
+        let mut list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
         
-        match list {
+        match list.value_mut() {
             DataType::List(v) => {
                 v.extend(values);
                 Ok(v.len())
@@ -204,36 +212,39 @@ impl Db {
     
     pub fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<Bytes>, String> {
         match self.data.get(key) {
-            Some(DataType::List(v)) => {
-                let len = v.len() as i64;
-                if len == 0 {
-                    return Ok(Vec::new());
+            Some(entry) => {
+                if let DataType::List(v) = entry.value() {
+                    let len = v.len() as i64;
+                    if len == 0 {
+                        return Ok(Vec::new());
+                    }
+                    
+                    // Normalize indices
+                    let start_idx = if start < 0 { len + start } else { start };
+                    let end_idx = if end < 0 { len + end } else { end };
+                    
+                    let start_idx = if start_idx < 0 { 0 } else { start_idx };
+                    // end_idx is inclusive in Redis
+                    let end_idx = if end_idx >= len { len - 1 } else { end_idx };
+                    
+                    if start_idx > end_idx {
+                        return Ok(Vec::new());
+                    }
+                    
+                    let result = v[start_idx as usize..=end_idx as usize].to_vec();
+                    Ok(result)
+                } else {
+                    Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
                 }
-                
-                // Normalize indices
-                let start_idx = if start < 0 { len + start } else { start };
-                let end_idx = if end < 0 { len + end } else { end };
-                
-                let start_idx = if start_idx < 0 { 0 } else { start_idx };
-                // end_idx is inclusive in Redis
-                let end_idx = if end_idx >= len { len - 1 } else { end_idx };
-                
-                if start_idx > end_idx {
-                    return Ok(Vec::new());
-                }
-                
-                let result = v[start_idx as usize..=end_idx as usize].to_vec();
-                Ok(result)
             }
-            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
             None => Ok(Vec::new()),
         }
     }
 
-    pub fn lpush(&mut self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
-        let list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
+    pub fn lpush(&self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
+        let mut list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
         
-        match list {
+        match list.value_mut() {
             DataType::List(v) => {
                 // Prepend values. Redis LPUSH inserts values one by one at the head.
                 // So LPUSH key a b c results in [c, b, a, ...]
@@ -259,66 +270,76 @@ impl Db {
 
     pub fn llen(&self, key: &str) -> Result<usize, String> {
         match self.data.get(key) {
-            Some(DataType::List(v)) => Ok(v.len()),
-            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            Some(entry) => {
+                if let DataType::List(v) = entry.value() {
+                    Ok(v.len())
+                } else {
+                    Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
+                }
+            }
             None => Ok(0),
         }
     }
 
-    pub fn lpop(&mut self, key: &str, count: Option<i64>) -> Result<Option<Vec<Bytes>>, String> {
-        match self.data.get_mut(key) {
-            Some(DataType::List(v)) => {
-                if v.is_empty() {
-                    return Ok(None);
+    pub fn lpop(&self, key: &str, count: Option<i64>) -> Result<Option<Vec<Bytes>>, String> {
+        if let Some(mut entry) = self.data.get_mut(key) {
+            match entry.value_mut() {
+                DataType::List(v) => {
+                    if v.is_empty() {
+                        return Ok(None);
+                    }
+                    
+                    let count = count.unwrap_or(1);
+                    if count < 0 {
+                         return Err("ERR value is out of range, must be positive".to_string());
+                    }
+                    
+                    let count = count as usize;
+                    let drain_count = std::cmp::min(count, v.len());
+                    
+                    let result: Vec<Bytes> = v.drain(0..drain_count).collect();
+                    
+                    // If list is empty, should we remove the key? Redis usually does.
+                    // But for now let's keep it simple, or check if we can remove it.
+                    // We can't remove easily here because we only have mutable reference to the value.
+                    // The caller might handle cleanup if needed, or we just leave empty list.
+                    
+                    Ok(Some(result))
                 }
-                
-                let count = count.unwrap_or(1);
-                if count < 0 {
-                     // Redis LPOP with negative count is invalid? No, count must be positive.
-                     // Actually, standard LPOP takes count argument in Redis 6.2+.
-                     // If count is not provided, it pops 1.
-                     return Err("ERR value is out of range, must be positive".to_string());
-                }
-                
-                let count = count as usize;
-                let drain_count = std::cmp::min(count, v.len());
-                
-                let result: Vec<Bytes> = v.drain(0..drain_count).collect();
-                
-                // If list is empty, should we remove the key? Redis usually does.
-                // But for now let's keep it simple, or check if we can remove it.
-                // We can't remove easily here because we only have mutable reference to the value.
-                // The caller might handle cleanup if needed, or we just leave empty list.
-                // Redis actually removes the key if empty.
-                // We'll leave it as empty list for now, consistent with rpush creating it.
-                
-                Ok(Some(result))
+                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
             }
-            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
-            None => Ok(None),
+        } else {
+            Ok(None)
         }
     }
 
-	pub fn key_type(&self, key: &str) -> String {
-		let now = Instant::now();
-		match self.data.get(key) {
-			Some(value) if Self::is_expired(value, now) => {
-				// Lazy expiration: check but don't remove
-				"none".to_string()
-			}
-			Some(DataType::String(_, _)) => "string".to_string(),
-            Some(DataType::Stream(_)) => "stream".to_string(),
-            Some(DataType::List(_)) => "list".to_string(),
-            Some(DataType::SortedSet(_)) => "zset".to_string(),
+    pub fn key_type(&self, key: &str) -> String {
+        let now = Instant::now();
+        match self.data.get(key) {
+            Some(entry) => {
+                let value = entry.value();
+                if Self::is_expired(value, now) {
+                    // Lazy expiration: check but don't remove
+                    return "none".to_string();
+                }
+                match value {
+                    DataType::String(_, _) => "string".to_string(),
+                    DataType::Stream(_) => "stream".to_string(),
+                    DataType::List(_) => "list".to_string(),
+                    DataType::SortedSet(_) => "zset".to_string(),
+                }
+            }
             None => "none".to_string(),
-		}
-	}
+        }
+    }
 
     pub fn keys(&self, pattern: &str) -> Vec<String> {
         let now = Instant::now();
         let mut matches = Vec::new();
 
-        for (key, value) in self.data.iter() {
+        for entry in self.data.iter() {
+            let key = entry.key();
+            let value = entry.value();
             // Skip expired keys (lazy expiration)
             if Self::is_expired(value, now) {
                 continue;
@@ -333,9 +354,9 @@ impl Db {
         matches
     }
 
-    pub fn zadd(&mut self, key: String, entries: Vec<(f64, String)>) -> Result<usize, String> {
-        let entry = self.data.entry(key).or_insert(DataType::SortedSet(HashMap::new()));
-        match entry {
+    pub fn zadd(&self, key: String, entries: Vec<(f64, String)>) -> Result<usize, String> {
+        let mut entry = self.data.entry(key).or_insert(DataType::SortedSet(HashMap::new()));
+        match entry.value_mut() {
             DataType::SortedSet(map) => {
                 let mut added = 0;
                 for (score, member) in entries {
@@ -351,54 +372,67 @@ impl Db {
 
     pub fn zrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<(String, Option<f64>)>, String> {
         match self.data.get(key) {
-            Some(DataType::SortedSet(map)) => {
-                let mut elements: Vec<(&String, &f64)> = map.iter().collect();
-                // Sort by score, then member lexicographically
-                elements.sort_by(|a, b| {
-                    a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.0.cmp(b.0))
-                });
+            Some(entry) => {
+                if let DataType::SortedSet(map) = entry.value() {
+                    let mut elements: Vec<(&String, &f64)> = map.iter().collect();
+                    // Sort by score, then member lexicographically
+                    elements.sort_by(|a, b| {
+                        a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(b.0))
+                    });
 
-                let len = elements.len() as i64;
-                let start = if start < 0 { len + start } else { start };
-                let end = if end < 0 { len + end } else { end };
+                    let len = elements.len() as i64;
+                    let start = if start < 0 { len + start } else { start };
+                    let end = if end < 0 { len + end } else { end };
 
-                let start = start.max(0);
-                let end = end.min(len - 1);
+                    let start = start.max(0);
+                    let end = end.min(len - 1);
 
-                if start > end || start >= len {
-                    return Ok(Vec::new());
+                    if start > end || start >= len {
+                        return Ok(Vec::new());
+                    }
+
+                    let result = elements[start as usize..=end as usize].iter()
+                        .map(|(m, s)| (m.to_string(), Some(**s)))
+                        .collect();
+                    Ok(result)
+                } else {
+                    Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
                 }
-
-                let result = elements[start as usize..=end as usize].iter()
-                    .map(|(m, s)| (m.to_string(), Some(**s)))
-                    .collect();
-                Ok(result)
             }
-            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
             None => Ok(Vec::new()),
         }
     }
 
     pub fn zcard(&self, key: &str) -> Result<usize, String> {
         match self.data.get(key) {
-            Some(DataType::SortedSet(map)) => Ok(map.len()),
-            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            Some(entry) => {
+                if let DataType::SortedSet(map) = entry.value() {
+                    Ok(map.len())
+                } else {
+                    Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
+                }
+            }
             None => Ok(0),
         }
     }
 
     pub fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>, String> {
         match self.data.get(key) {
-            Some(DataType::SortedSet(map)) => Ok(map.get(member).cloned()),
-            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
+            Some(entry) => {
+                if let DataType::SortedSet(map) = entry.value() {
+                    Ok(map.get(member).cloned())
+                } else {
+                    Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
+                }
+            }
             None => Ok(None),
         }
     }
 
-    pub fn zrem(&mut self, key: &str, members: &[String]) -> Result<usize, String> {
-        if let Some(entry) = self.data.get_mut(key) {
-            match entry {
+    pub fn zrem(&self, key: &str, members: &[String]) -> Result<usize, String> {
+        if let Some(mut entry) = self.data.get_mut(key) {
+            match entry.value_mut() {
                 DataType::SortedSet(map) => {
                     let mut removed = 0;
                     for member in members {
@@ -417,24 +451,27 @@ impl Db {
 
     pub fn zrank(&self, key: &str, member: &str) -> Result<Option<usize>, String> {
         match self.data.get(key) {
-            Some(DataType::SortedSet(map)) => {
-                if !map.contains_key(member) {
-                    return Ok(None);
+            Some(entry) => {
+                if let DataType::SortedSet(map) = entry.value() {
+                    if !map.contains_key(member) {
+                        return Ok(None);
+                    }
+                    let mut elements: Vec<(&String, &f64)> = map.iter().collect();
+                    elements.sort_by(|a, b| {
+                        a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(b.0))
+                    });
+                    
+                    for (i, (m, _)) in elements.iter().enumerate() {
+                         if m.as_str() == member {
+                             return Ok(Some(i));
+                         }
+                    }
+                    Ok(None)
+                } else {
+                    Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
                 }
-                let mut elements: Vec<(&String, &f64)> = map.iter().collect();
-                elements.sort_by(|a, b| {
-                    a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.0.cmp(b.0))
-                });
-                
-                for (i, (m, _)) in elements.iter().enumerate() {
-                     if m.as_str() == member {
-                         return Ok(Some(i));
-                     }
-                }
-                Ok(None)
             }
-            Some(_) => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
             None => Ok(None),
         }
     }
@@ -476,7 +513,7 @@ impl Db {
         pattern.ends_with('*') || current_index == text.len()
     }
 
-    fn store_loaded_string(&mut self, key: &[u8], value: Vec<u8>, expiry_ms: Option<u64>) {
+    fn store_loaded_string(&self, key: &[u8], value: Vec<u8>, expiry_ms: Option<u64>) {
         let key_str = match String::from_utf8(key.to_vec()) {
             Ok(s) => s,
             Err(_) => return,
