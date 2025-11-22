@@ -129,6 +129,10 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut handler = RespHandler::new(stream);
 
+            // Transaction state per connection
+            let mut in_transaction = false;
+            let mut transaction_queue: Vec<Value> = Vec::new();
+
             // Phase 2: Pipelining constants
             const MAX_BATCH_COMMANDS: usize = 1024;
             const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024; // 4MB
@@ -163,11 +167,66 @@ async fn main() -> Result<()> {
                         let mut response_batch = Vec::with_capacity(command_batch.len());
 
                         for cmd_value in command_batch {
-                            let response = match handle_command(&store, &config, cmd_value).await {
-                                Ok(resp) => resp,
-                                Err(e) => Value::Error(Bytes::from(format!("ERR {}", e))),
-                            };
-                            response_batch.push(response);
+                            // Check if this is a transaction control command
+                            let is_transaction_cmd = matches!(
+                                get_command_name(&cmd_value).as_deref(),
+                                Some("MULTI") | Some("EXEC") | Some("DISCARD")
+                            );
+
+                            if is_transaction_cmd {
+                                // Handle transaction control commands
+                                let cmd_name = get_command_name(&cmd_value).unwrap_or_default();
+                                match cmd_name.as_str() {
+                                    "MULTI" => {
+                                        if in_transaction {
+                                            response_batch.push(Value::Error(Bytes::from("ERR MULTI calls can not be nested")));
+                                        } else {
+                                            in_transaction = true;
+                                            transaction_queue.clear();
+                                            response_batch.push(Value::SimpleString(Bytes::from("OK")));
+                                        }
+                                    }
+                                    "EXEC" => {
+                                        if !in_transaction {
+                                            response_batch.push(Value::Error(Bytes::from("ERR EXEC without MULTI")));
+                                        } else {
+                                            // Execute all queued commands
+                                            let mut exec_results = Vec::new();
+                                            for queued_cmd in &transaction_queue {
+                                                let result = match handle_command(&store, &config, queued_cmd.clone()).await {
+                                                    Ok(resp) => resp,
+                                                    Err(e) => Value::Error(Bytes::from(format!("ERR {}", e))),
+                                                };
+                                                exec_results.push(result);
+                                            }
+                                            response_batch.push(Value::Array(exec_results));
+                                            in_transaction = false;
+                                            transaction_queue.clear();
+                                        }
+                                    }
+                                    "DISCARD" => {
+                                        if !in_transaction {
+                                            response_batch.push(Value::Error(Bytes::from("ERR DISCARD without MULTI")));
+                                        } else {
+                                            in_transaction = false;
+                                            transaction_queue.clear();
+                                            response_batch.push(Value::SimpleString(Bytes::from("OK")));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            } else if in_transaction {
+                                // Queue command during transaction
+                                transaction_queue.push(cmd_value);
+                                response_batch.push(Value::SimpleString(Bytes::from("QUEUED")));
+                            } else {
+                                // Normal command execution outside transaction
+                                let response = match handle_command(&store, &config, cmd_value).await {
+                                    Ok(resp) => resp,
+                                    Err(e) => Value::Error(Bytes::from(format!("ERR {}", e))),
+                                };
+                                response_batch.push(response);
+                            }
                         }
 
                         // Phase 2: Write all responses with single flush
@@ -182,6 +241,16 @@ async fn main() -> Result<()> {
                 }
             }
         });
+    }
+}
+
+// Helper function to extract command name from Value
+fn get_command_name(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) if !items.is_empty() => {
+            items[0].to_uppercase_string().ok()
+        }
+        _ => None,
     }
 }
 
