@@ -15,6 +15,7 @@ pub struct CommandRequest {
     pub response_tx: oneshot::Sender<Result<Value>>,
     pub replica_tx: Option<mpsc::Sender<Value>>,
     pub pub_sub_tx: Option<mpsc::Sender<Value>>,
+    pub executed: bool,
 }
 
 struct Replica {
@@ -204,7 +205,7 @@ impl Engine {
     }
 
     async fn handle_command(&mut self, req: CommandRequest) {
-        let CommandRequest { client_id, command, response_tx, replica_tx, pub_sub_tx } = req;
+        let CommandRequest { client_id, command, response_tx, replica_tx, pub_sub_tx, .. } = req;
         
         if let RedisCommand::InternalDisconnect = &command {
              self.transaction_state.remove(&client_id);
