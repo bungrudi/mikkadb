@@ -11,6 +11,9 @@ mod db;
 mod config;
 mod command;
 mod engine;
+mod storage;
+mod actor_store;
+mod single_lock_store;
 
 #[tokio::main]
 async fn main() -> Result<()> {

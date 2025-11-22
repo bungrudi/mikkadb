@@ -97,13 +97,14 @@ impl Db {
         self.data.insert(key, DataType::String(value, expiry));
     }
 
-    pub fn get(&mut self, key: &str) -> Option<Bytes> {
+    pub fn get(&self, key: &str) -> Option<Bytes> {
         if let Some(data_type) = self.data.get(key) {
             match data_type {
                 DataType::String(value, expiry) => {
                     if let Some(expiry_time) = expiry {
                         if Instant::now() > *expiry_time {
-                            self.data.remove(key);
+                            // Lazy expiration: check but don't remove
+                            // Cleanup happens on writes or via cleanup_expired()
                             return None;
                         }
                     }
@@ -298,11 +299,11 @@ impl Db {
         }
     }
 
-	pub fn key_type(&mut self, key: &str) -> String {
+	pub fn key_type(&self, key: &str) -> String {
 		let now = Instant::now();
 		match self.data.get(key) {
 			Some(value) if Self::is_expired(value, now) => {
-				self.data.remove(key);
+				// Lazy expiration: check but don't remove
 				"none".to_string()
 			}
 			Some(DataType::String(_, _)) => "string".to_string(),
@@ -313,24 +314,19 @@ impl Db {
 		}
 	}
 
-    pub fn keys(&mut self, pattern: &str) -> Vec<String> {
+    pub fn keys(&self, pattern: &str) -> Vec<String> {
         let now = Instant::now();
-        let mut expired = Vec::new();
         let mut matches = Vec::new();
 
         for (key, value) in self.data.iter() {
+            // Skip expired keys (lazy expiration)
             if Self::is_expired(value, now) {
-                expired.push(key.clone());
                 continue;
             }
 
             if pattern == "*" || Self::pattern_matches(pattern, key) {
                 matches.push(key.clone());
             }
-        }
-
-        for key in expired {
-            self.data.remove(&key);
         }
 
         matches.sort();

@@ -8,4 +8,17 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 bytes = "1"
 hex = "0.4.3"
+async-trait = "0.1"
+
+[lib]
+name = "mikkadb_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mikkadb-rust"
+path = "src/main.rs"
+
+[[bin]]
+name = "bench-single-lock"
+path = "src/bin/bench_single_lock.rs"
 
