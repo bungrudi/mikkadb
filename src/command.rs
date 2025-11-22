@@ -52,14 +52,14 @@ impl RedisCommand {
     pub fn from_resp(value: Value) -> Result<RedisCommand> {
         match value {
             Value::Array(items) => {
-                println!("Parsing command with {} items", items.len());
+                // println!("Parsing command with {} items", items.len());
                 if items.is_empty() {
                     return Ok(RedisCommand::None);
                 }
 
                 let command_name = match &items[0] {
                     Value::BulkString(s) => {
-                        println!("Received command: {}", s);
+                        // println!("Received command: {}", s);
                         s.to_uppercase()
                     },
                     _ => return Err(Error::msg("Invalid command format")),

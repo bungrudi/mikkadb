@@ -1,6 +1,7 @@
 use bytes::BytesMut;
 use anyhow::{Result, Error};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,26 +71,29 @@ impl Value {
 }
 
 pub struct RespHandler {
-    stream: TcpStream,
+    reader: OwnedReadHalf,
+    writer: BufWriter<OwnedWriteHalf>,
     buffer: BytesMut,
 }
 
 impl RespHandler {
     pub fn new(stream: TcpStream) -> Self {
+        let (reader, writer) = stream.into_split();
         RespHandler {
-            stream,
+            reader,
+            writer: BufWriter::new(writer),
             buffer: BytesMut::with_capacity(512),
         }
     }
 
     pub async fn read_value(&mut self) -> Result<Option<Value>> {
         loop {
-            if !self.buffer.is_empty() {
-                eprintln!("[resp] buffer len before parse: {}", self.buffer.len());
-            }
+            // if !self.buffer.is_empty() {
+            //     eprintln!("[resp] buffer len before parse: {}", self.buffer.len());
+            // }
 
             if let Ok((v, consumed)) = parse_message(&self.buffer) {
-                eprintln!("[resp] parsed message, consumed {}", consumed);
+                // eprintln!("[resp] parsed message, consumed {}", consumed);
                 // Drop only the bytes that were actually consumed for this value,
                 // leaving any remaining bytes in the buffer for the next parse.
                 let _ = self.buffer.split_to(consumed);
@@ -97,9 +101,9 @@ impl RespHandler {
             }
 
             // If we couldn't parse a full message yet, read more data from the stream.
-            eprintln!("[resp] reading more data from stream...");
-            let bytes_read = self.stream.read_buf(&mut self.buffer).await?;
-            eprintln!("[resp] read {} bytes from stream", bytes_read);
+            // eprintln!("[resp] reading more data from stream...");
+            let bytes_read = self.reader.read_buf(&mut self.buffer).await?;
+            // eprintln!("[resp] read {} bytes from stream", bytes_read);
             if bytes_read == 0 {
                 if self.buffer.is_empty() {
                     return Ok(None);
@@ -112,7 +116,8 @@ impl RespHandler {
     }
 
     pub async fn write_value(&mut self, value: Value) -> Result<()> {
-        self.stream.write_all(&value.serialize_bytes()).await?;
+        self.writer.write_all(&value.serialize_bytes()).await?;
+        self.writer.flush().await?;
         Ok(())
     }
 
@@ -123,7 +128,7 @@ impl RespHandler {
                 return Ok(data);
             }
 
-            let bytes_read = self.stream.read_buf(&mut self.buffer).await?;
+            let bytes_read = self.reader.read_buf(&mut self.buffer).await?;
             if bytes_read == 0 {
                 if self.buffer.is_empty() {
                     return Err(Error::msg("Connection closed abruptly"));

@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
                                         };
                                         
                                         if let Err(_) = tx.send(req).await {
-                                            println!("Engine receiver dropped");
+                                            // println!("Engine receiver dropped");
                                             break;
                                         }
                                         match resp_rx.await {
@@ -90,33 +90,33 @@ async fn main() -> Result<()> {
                                                         continue;
                                                     }
                                                 }
-                                                
-                                                if let crate::resp::Value::Array(_) = &response {
-                                                    println!("Sending Array response");
-                                                } else if let crate::resp::Value::SimpleString(s) = &response {
-                                                    println!("Sending SimpleString response: {}", s);
-                                                }
+
+                                                // if let crate::resp::Value::Array(_) = &response {
+                                                //     println!("Sending Array response");
+                                                // } else if let crate::resp::Value::SimpleString(s) = &response {
+                                                //     println!("Sending SimpleString response: {}", s);
+                                                // }
                                                 let _ = handler.write_value(response).await;
                                             }
                                             Ok(Err(e)) => {
-                                                println!("Sending Error response from Engine: {}", e);
+                                                // println!("Sending Error response from Engine: {}", e);
                                                 let _ = handler.write_value(resp::Value::Error(format!("ERR {}", e))).await;
                                             }
                                             Err(_) => {
-                                                println!("Engine response sender dropped");
+                                                // println!("Engine response sender dropped");
                                                 break;
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        println!("Sending Error response from Parser: {}", e);
+                                        // println!("Sending Error response from Parser: {}", e);
                                         let _ = handler.write_value(resp::Value::Error(format!("ERR {}", e))).await;
                                     }
                                 }
                             }
                             Ok(None) => break,
-                            Err(e) => {
-                                println!("Error: {}", e);
+                            Err(_e) => {
+                                // println!("Error: {}", _e);
                                 break;
                             }
                         }
