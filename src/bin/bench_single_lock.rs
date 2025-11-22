@@ -5,6 +5,7 @@ use mikkadb_rust::single_lock_store::SingleLockStore;
 use mikkadb_rust::storage::KeyValueStore;
 use mikkadb_rust::resp::{RespHandler, Value};
 use bytes::Bytes;
+use socket2::SockRef;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,6 +20,15 @@ async fn main() -> Result<()> {
 
     loop {
         let (stream, _) = listener.accept().await?;
+
+        // Phase 4: TCP_NODELAY optimization
+        // Disable Nagle's algorithm for low-latency Redis workloads
+        // Eliminates 40ms delay for small packets
+        if let Err(e) = SockRef::from(&stream).set_nodelay(true) {
+            eprintln!("Failed to set TCP_NODELAY: {}", e);
+            continue;
+        }
+
         let store = store.clone();
 
         tokio::spawn(async move {
