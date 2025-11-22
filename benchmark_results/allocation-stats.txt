@@ -1,0 +1,49 @@
+=== Allocation Hotspot Analysis ===
+
+Total Samples: 21668
+
+Counting allocation-related function calls...
+
+malloc calls: 1013
+free calls: 346
+Rust __rust_alloc: 13
+RawVec::grow (Vec allocations): 20
+
+=== Top Allocation Hotspots ===
+
+   9 +                     ! :     | 1 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   5 +                     ! :     | 2 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   5 +                     ! :     | 2 _$LT$alloc..string..String$u20$as$u20$core..clone..Clone$GT$::clone::h54aaa659662c9f23  (in bench-single-lock) + 84  [0x1007806f8]
+   5 +                     ! :     | + 1 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   4 +                     ! : |   + 1 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   4 +                     ! : |   + ! 1 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   4 +                     ! :     | 1 _xzm_free  (in libsystem_malloc.dylib) + 952  [0x1874e9afc]
+   4 +                     ! :     | 1 _xzm_free  (in libsystem_malloc.dylib) + 348  [0x1874e98a0]
+   4 +                     ! :     | + 2 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   4 +                     ! :     |   1 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   3 +                     ! : | + ! 3 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   3 +                     ! : | + ! 2 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   3 +                     ! : |   + 2 _$LT$alloc..string..String$u20$as$u20$core..clone..Clone$GT$::clone::h54aaa659662c9f23  (in bench-single-lock) + 84  [0x1007806f8]
+   3 +                     ! : |   + 1 alloc::str::_$LT$impl$u20$str$GT$::to_uppercase::h78915b15181ac91e  (in bench-single-lock) + 96  [0x10077fc74]
+   3 +                     ! : |   + 1 _xzm_free  (in libsystem_malloc.dylib) + 952  [0x1874e9afc]
+   3 +                     ! : |   + 1 _xzm_free  (in libsystem_malloc.dylib) + 348  [0x1874e98a0]
+   3 +                     ! : |   +   1 _xzm_xzone_malloc  (in libsystem_malloc.dylib) + 8  [0x1874e9094]
+   3 +                     ! :     | 3 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+   3 +                     ! :     | 1 _$LT$alloc..string..String$u20$as$u20$core..clone..Clone$GT$::clone::h54aaa659662c9f23  (in bench-single-lock) + 116  [0x100780718]
+   3 +                     ! :     | + ! 2 _xzm_free  (in libsystem_malloc.dylib) + 728  [0x1874e9a1c]
+
+=== Function Call Breakdown ===
+
+Analyzing key function call frequencies...
+I/O operations (__sendto/__recvfrom): 72 samples
+Lock operations (pthread_mutex/cond/RwLock): 224 samples
+RESP parsing (parse_message/parse_integer): 289 samples
+String operations (from_utf8/String::from/to_uppercase): 67 samples
+
+=== Estimated CPU Time Breakdown ===
+
+I/O operations: ~0.3%
+Lock operations: ~1.0%
+RESP parsing: ~1.3%
+String operations: ~0.3%
+

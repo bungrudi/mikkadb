@@ -1,0 +1,104 @@
+═══════════════════════════════════════════════════════════════════════════
+ PHASE 0: PROFILING ANALYSIS SUMMARY
+═══════════════════════════════════════════════════════════════════════════
+
+RECOMMENDATION: ⚠️ CAUTION - Defer zero-copy migration
+
+═══════════════════════════════════════════════════════════════════════════
+ CPU TIME BREAKDOWN (Active Request Processing)
+═══════════════════════════════════════════════════════════════════════════
+
+    I/O Operations ████████████████████████████████████████████ 91.0%
+    RESP Parsing   ███                                           3.7%
+    Allocations    ██                                            3.0%
+    String Ops     █                                             2.0%
+    HashMap        █                                             1.3%
+    Locks          ▌                                            <1.0%
+
+═══════════════════════════════════════════════════════════════════════════
+ KEY FINDINGS
+═══════════════════════════════════════════════════════════════════════════
+
+[✓] I/O is PRIMARY bottleneck (91% of active CPU time)
+[!] Allocations are MINOR contributor (~3% of active CPU time)
+[✓] Lock contention is NEGLIGIBLE (<1% - RwLock working well)
+[!] Most threads IDLE waiting for I/O (89% of samples in park/wait)
+
+Performance: 111,578 ops/sec @ 1.49ms avg latency
+
+═══════════════════════════════════════════════════════════════════════════
+ ALLOCATION HOTSPOTS (ranked by impact)
+═══════════════════════════════════════════════════════════════════════════
+
+1. parse_integer String allocation        23 samples (1.5%)
+2. String::clone operations               10 samples (0.7%)
+3. RawVec::grow (Vec reallocation)         8 samples (0.5%)
+4. String::to_uppercase                    5 samples (0.3%)
+5. format! macro (response serialization)  5 samples (0.3%)
+
+Total allocation overhead: ~40-50 samples / 1490 active = 3.0%
+
+═══════════════════════════════════════════════════════════════════════════
+ ZERO-COPY MIGRATION IMPACT ESTIMATE
+═══════════════════════════════════════════════════════════════════════════
+
+Expected CPU savings:      ~1.2% (reduces parsing from 3.7% to 2.5%)
+Expected throughput gain:  ~1,000-2,000 ops/sec (1-2% improvement)
+Implementation effort:     HIGH (significant refactoring)
+
+ROI:  LOW - Allocation overhead is minor compared to I/O bottleneck
+
+═══════════════════════════════════════════════════════════════════════════
+ RECOMMENDED OPTIMIZATION PRIORITY
+═══════════════════════════════════════════════════════════════════════════
+
+Priority  Optimization              Effort   Expected Gain   ROI
+────────────────────────────────────────────────────────────────────────
+  P0      I/O optimization          MEDIUM   10-30%          ⭐⭐⭐⭐⭐
+          (io_uring/kqueue,
+           pipelining)
+
+  P1      Command batching          MEDIUM   15-25%          ⭐⭐⭐⭐
+          (reduce syscalls)
+
+  P2      TCP tuning                LOW      5-10%           ⭐⭐⭐
+          (nodelay, buffers)
+
+  P3      Zero-copy RESP            HIGH     1-2%            ⭐
+          (deferred)
+
+═══════════════════════════════════════════════════════════════════════════
+ DECISION: DEFER ZERO-COPY MIGRATION
+═══════════════════════════════════════════════════════════════════════════
+
+Rationale:
+- Allocations contribute only ~3% of active CPU time
+- I/O syscalls dominate at 91% - address this first
+- Zero-copy ROI is low given high implementation cost
+- Better to optimize I/O path before tackling parser
+
+Next Steps:
+1. Implement command pipelining to reduce syscall overhead
+2. Test io_uring (Linux) or kqueue batching (macOS)
+3. Revisit zero-copy ONLY if allocations exceed 15% after I/O optimization
+
+═══════════════════════════════════════════════════════════════════════════
+ PROFILING ARTIFACTS
+═══════════════════════════════════════════════════════════════════════════
+
+✓ Sample output:       benchmark_results/sample-output.txt
+✓ Benchmark results:   benchmark_results/profiling-benchmark-results.txt
+✓ Allocation stats:    benchmark_results/allocation-stats.txt
+✓ Full analysis:       benchmark_results/PROFILING-ANALYSIS.md
+✓ This summary:        benchmark_results/PROFILING-SUMMARY.txt
+
+═══════════════════════════════════════════════════════════════════════════
+ CONCLUSION
+═══════════════════════════════════════════════════════════════════════════
+
+Zero-copy migration is technically sound but NOT the highest-priority
+optimization. Focus on I/O optimization first for maximum performance gain.
+
+Generated: 2025-11-22
+Tool: macOS sample (1ms sampling, 30 seconds)
+Load: memtier_benchmark -t 8 -c 25 --ratio=10:1

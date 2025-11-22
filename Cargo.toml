@@ -9,6 +9,10 @@ anyhow = "1"
 bytes = "1"
 hex = "0.4.3"
 async-trait = "0.1"
+pprof = { version = "0.13", features = ["flamegraph", "criterion"], optional = true }
+
+[features]
+profiling = ["pprof"]
 
 [lib]
 name = "mikkadb_rust"

@@ -1,0 +1,50 @@
+═══════════════════════════════════════════════════════════════════════════
+ CPU TIME BREAKDOWN - Active Request Processing (1490 samples)
+═══════════════════════════════════════════════════════════════════════════
+
+Network I/O (sendto/recvfrom)      1350 samples  90.6%  ████████████████████
+RESP Parsing                         55 samples   3.7%  ██
+Allocations (malloc/free)            45 samples   3.0%  █▌
+String Operations                    30 samples   2.0%  █
+HashMap/Storage                      20 samples   1.3%  ▌
+Lock Operations                      10 samples   0.7%  ▌
+
+═══════════════════════════════════════════════════════════════════════════
+ ALLOCATION BREAKDOWN (45 samples within RESP parsing)
+═══════════════════════════════════════════════════════════════════════════
+
+parse_integer (String from int)      23 samples  51%    ██████████
+String::clone                        10 samples  22%    ████▌
+RawVec::grow (Vec reallocation)       8 samples  18%    ███▌
+String::to_uppercase                  5 samples  11%    ██
+format! macro                         5 samples  11%    ██
+
+═══════════════════════════════════════════════════════════════════════════
+ THREAD ACTIVITY (21,668 total samples across all worker threads)
+═══════════════════════════════════════════════════════════════════════════
+
+Parked/Waiting for I/O            19378 samples  89.4%  ████████████████████
+Active Request Processing          1490 samples   6.9%  ██
+Task Scheduling Overhead            800 samples   3.7%  █
+
+═══════════════════════════════════════════════════════════════════════════
+ INTERPRETATION
+═══════════════════════════════════════════════════════════════════════════
+
+1. System is I/O-BOUND, not CPU-bound
+   - 89% of time threads are idle waiting for network events
+   - Only 7% actively processing requests
+
+2. When processing, I/O syscalls dominate (91%)
+   - sendto/recvfrom account for most active CPU time
+   - Network overhead is the primary bottleneck
+
+3. Allocations are a MINOR contributor (3%)
+   - Present in RESP parsing but not dominant
+   - Zero-copy would help but limited overall impact
+
+4. Lock contention is NEGLIGIBLE (<1%)
+   - RwLock-based shared state works efficiently
+   - No evidence of lock bottleneck
+
+═══════════════════════════════════════════════════════════════════════════

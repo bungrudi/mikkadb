@@ -1,0 +1,118 @@
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+Connection error: Connection refused
+[RUN #1 2%,   0 secs]  8 threads:       65489 ops,  130685 (avg:  130685) ops/sec, 9.39MB/sec (avg: 9.39MB/sec),  1.53 (avg:  1.53) msec latency[RUN #1 3%,   1 secs]  8 threads:      133083 ops,  135038 (avg:  132860) ops/sec, 9.70MB/sec (avg: 9.55MB/sec),  1.48 (avg:  1.50) msec latency[RUN #1 5%,   1 secs]  8 threads:      200323 ops,  134427 (avg:  133382) ops/sec, 9.66MB/sec (avg: 9.58MB/sec),  1.49 (avg:  1.50) msec latency[RUN #1 7%,   2 secs]  8 threads:      267721 ops,  134167 (avg:  133578) ops/sec, 9.64MB/sec (avg: 9.60MB/sec),  1.49 (avg:  1.50) msec latency[RUN #1 8%,   2 secs]  8 threads:      335213 ops,  134824 (avg:  133827) ops/sec, 9.69MB/sec (avg: 9.62MB/sec),  1.48 (avg:  1.49) msec latency[RUN #1 10%,   3 secs]  8 threads:      402727 ops,  134351 (avg:  133915) ops/sec, 9.65MB/sec (avg: 9.62MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 12%,   3 secs]  8 threads:      470026 ops,  134126 (avg:  133945) ops/sec, 9.64MB/sec (avg: 9.63MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 13%,   4 secs]  8 threads:      537524 ops,  134454 (avg:  134009) ops/sec, 9.66MB/sec (avg: 9.63MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 15%,   4 secs]  8 threads:      604868 ops,  134012 (avg:  134009) ops/sec, 9.63MB/sec (avg: 9.63MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 17%,   5 secs]  8 threads:      672548 ops,  134681 (avg:  134076) ops/sec, 9.68MB/sec (avg: 9.63MB/sec),  1.48 (avg:  1.49) msec latency[RUN #1 18%,   5 secs]  8 threads:      739793 ops,  134119 (avg:  134080) ops/sec, 9.64MB/sec (avg: 9.63MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 20%,   6 secs]  8 threads:      807210 ops,  134422 (avg:  134109) ops/sec, 9.66MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 22%,   6 secs]  8 threads:      874505 ops,  134127 (avg:  134110) ops/sec, 9.64MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 23%,   7 secs]  8 threads:      941902 ops,  134406 (avg:  134131) ops/sec, 9.66MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 25%,   7 secs]  8 threads:     1009222 ops,  133971 (avg:  134121) ops/sec, 9.63MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 27%,   8 secs]  8 threads:     1074813 ops,  130925 (avg:  133921) ops/sec, 9.40MB/sec (avg: 9.62MB/sec),  1.53 (avg:  1.49) msec latency[RUN #1 28%,   8 secs]  8 threads:     1141949 ops,  134219 (avg:  133939) ops/sec, 9.64MB/sec (avg: 9.62MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 30%,   9 secs]  8 threads:     1209439 ops,  134300 (avg:  133959) ops/sec, 9.65MB/sec (avg: 9.63MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 32%,   9 secs]  8 threads:     1277130 ops,  134704 (avg:  133998) ops/sec, 9.68MB/sec (avg: 9.63MB/sec),  1.48 (avg:  1.49) msec latency[RUN #1 33%,  10 secs]  8 threads:     1344427 ops,  134395 (avg:  134018) ops/sec, 9.66MB/sec (avg: 9.63MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 35%,  10 secs]  8 threads:     1411766 ops,  134500 (avg:  134041) ops/sec, 9.67MB/sec (avg: 9.63MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 37%,  11 secs]  8 threads:     1479103 ops,  134589 (avg:  134066) ops/sec, 9.67MB/sec (avg: 9.63MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 38%,  11 secs]  8 threads:     1547692 ops,  136787 (avg:  134184) ops/sec, 9.83MB/sec (avg: 9.64MB/sec),  1.46 (avg:  1.49) msec latency[RUN #1 40%,  12 secs]  8 threads:     1614977 ops,  134374 (avg:  134192) ops/sec, 9.66MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 42%,  12 secs]  8 threads:     1682379 ops,  134199 (avg:  134192) ops/sec, 9.64MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 43%,  13 secs]  8 threads:     1749587 ops,  134346 (avg:  134198) ops/sec, 9.65MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 45%,  13 secs]  8 threads:     1816870 ops,  133891 (avg:  134187) ops/sec, 9.62MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 47%,  14 secs]  8 threads:     1882747 ops,  131662 (avg:  134097) ops/sec, 9.46MB/sec (avg: 9.64MB/sec),  1.52 (avg:  1.49) msec latency[RUN #1 48%,  14 secs]  8 threads:     1950000 ops,  134348 (avg:  134105) ops/sec, 9.65MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency[RUN #1 50%,  15 secs]  0 threads:     2011809 ops,  134348 (avg:  134117) ops/sec, 9.65MB/sec (avg: 9.64MB/sec),  1.49 (avg:  1.49) msec latency
+
+8         Threads
+25        Connections per thread
+30        Seconds
+
+
+ALL STATS
+============================================================================================================================
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec 
+----------------------------------------------------------------------------------------------------------------------------
+Sets       101606.81          ---          ---         1.49133         1.48700         1.61500         2.36700      7828.06 
+Gets        10157.64        11.11     10146.53         1.48968         1.48700         1.62300         2.25500       396.07 
+Waits           0.00          ---          ---             ---             ---             ---             ---          --- 
+Totals     111764.45        11.11     10146.53         1.49118         1.48700         1.61500         2.33500      8224.13 
