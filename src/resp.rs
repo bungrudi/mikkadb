@@ -3,6 +3,28 @@ use anyhow::{Result, Error};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use std::time::{Duration, Instant};
+
+/// Buffer tier for adaptive buffering strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BufferTier {
+    /// 512 bytes - optimized for single commands, low latency
+    Small,
+    /// 4KB - moderate pipelining (2-8 commands per read)
+    Medium,
+    /// 16KB - heavy pipelining (8+ commands per read)
+    Large,
+}
+
+impl BufferTier {
+    fn capacity(&self) -> usize {
+        match self {
+            BufferTier::Small => 512,
+            BufferTier::Medium => 4 * 1024,
+            BufferTier::Large => 16 * 1024,
+        }
+    }
+}
 
 /// Result of attempting to parse RESP value from buffer
 #[derive(Debug)]
@@ -135,6 +157,9 @@ pub struct RespHandler {
     reader: OwnedReadHalf,
     writer: BufWriter<OwnedWriteHalf>,
     buffer: BytesMut,
+    tier: BufferTier,
+    last_activity: Instant,
+    commands_in_last_read: usize,
 }
 
 impl RespHandler {
@@ -143,28 +168,64 @@ impl RespHandler {
         RespHandler {
             reader,
             writer: BufWriter::new(writer),
-            buffer: BytesMut::with_capacity(512),
+            // Start with small buffer (Tier0) for low-latency single commands
+            // Will upgrade dynamically when pipelining is detected
+            buffer: BytesMut::with_capacity(BufferTier::Small.capacity()),
+            tier: BufferTier::Small,
+            last_activity: Instant::now(),
+            commands_in_last_read: 0,
+        }
+    }
+
+    /// Check if connection has been idle and downgrade buffer tier if needed
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+
+    fn check_idle_downgrade(&mut self) {
+        if self.last_activity.elapsed() > Self::IDLE_TIMEOUT && self.tier != BufferTier::Small {
+            // Connection idle - downgrade to small buffer for low latency
+            self.tier = BufferTier::Small;
+            // Keep the allocated capacity but logically reset to small tier
+        }
+    }
+
+    /// Upgrade buffer tier based on number of commands parsed
+    fn check_upgrade(&mut self, commands_parsed: usize) {
+        match self.tier {
+            BufferTier::Small if commands_parsed >= 2 => {
+                // Pipelining detected - upgrade to medium
+                self.tier = BufferTier::Medium;
+                self.buffer.reserve(BufferTier::Medium.capacity() - self.buffer.capacity());
+            }
+            BufferTier::Medium if commands_parsed >= 8 => {
+                // Heavy pipelining detected - upgrade to large
+                self.tier = BufferTier::Large;
+                self.buffer.reserve(BufferTier::Large.capacity() - self.buffer.capacity());
+            }
+            _ => {}
         }
     }
 
     pub async fn read_value(&mut self) -> Result<Option<Value>> {
         loop {
-            // if !self.buffer.is_empty() {
-            //     eprintln!("[resp] buffer len before parse: {}", self.buffer.len());
-            // }
+            // Check for idle timeout and downgrade if needed (before read)
+            self.check_idle_downgrade();
 
+            // Try to parse from existing buffer first
             if let Ok((v, consumed)) = parse_message(&self.buffer) {
-                // eprintln!("[resp] parsed message, consumed {}", consumed);
-                // Drop only the bytes that were actually consumed for this value,
-                // leaving any remaining bytes in the buffer for the next parse.
                 let _ = self.buffer.split_to(consumed);
+                self.last_activity = Instant::now();
+
+                // CONDITIONAL READ-AHEAD: Only for Medium and Large tiers
+                // Small tier stays low-latency without aggressive buffering
+                if self.tier != BufferTier::Small {
+                    self.try_fill_buffer().await;
+                }
+
                 return Ok(Some(v));
             }
 
-            // If we couldn't parse a full message yet, read more data from the stream.
-            // eprintln!("[resp] reading more data from stream...");
+            // Need more data - blocking read
             let bytes_read = self.reader.read_buf(&mut self.buffer).await?;
-            // eprintln!("[resp] read {} bytes from stream", bytes_read);
             if bytes_read == 0 {
                 if self.buffer.is_empty() {
                     return Ok(None);
@@ -172,8 +233,42 @@ impl RespHandler {
                     return Err(Error::msg("Connection closed abruptly"));
                 }
             }
-            // If parse failed (incomplete), continue reading
         }
+    }
+
+    /// Aggressively read all available data from socket without blocking
+    /// Only called for Medium and Large buffer tiers (conditional read-ahead)
+    async fn try_fill_buffer(&mut self) {
+        // Reserve space based on current tier
+        let reserve_size = match self.tier {
+            BufferTier::Small => return, // Should not be called for Small tier
+            BufferTier::Medium => 4 * 1024,
+            BufferTier::Large => 8 * 1024,
+        };
+        self.buffer.reserve(reserve_size);
+
+        // Try to read multiple times to fill buffer with all available data
+        let mut temp_buf = vec![0u8; 8192];
+        loop {
+            match self.reader.try_read(&mut temp_buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    // Got data - append to buffer and try for more
+                    self.buffer.extend_from_slice(&temp_buf[..n]);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No more data available right now - that's fine
+                    break;
+                }
+                Err(_) => break, // Other error - stop trying
+            }
+        }
+    }
+
+    /// Notify that a command batch was processed (for adaptive buffering)
+    pub fn notify_batch_processed(&mut self, commands_parsed: usize) {
+        self.commands_in_last_read = commands_parsed;
+        self.check_upgrade(commands_parsed);
     }
 
     pub async fn write_value(&mut self, value: Value) -> Result<()> {

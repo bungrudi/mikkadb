@@ -124,7 +124,8 @@ async fn main() -> Result<()> {
                                 }
 
                                 // Process batch
-                                let mut response_batch = Vec::with_capacity(command_batch.len());
+                                let batch_size = command_batch.len();
+                                let mut response_batch = Vec::with_capacity(batch_size);
 
                                 for cmd_value in command_batch {
                                     match RedisCommand::from_resp(cmd_value) {
@@ -183,6 +184,9 @@ async fn main() -> Result<()> {
                                 if !response_batch.is_empty() {
                                     let _ = handler.write_batch(response_batch).await;
                                 }
+
+                                // Notify handler about batch size for adaptive buffering
+                                handler.notify_batch_processed(batch_size);
                             }
                             Ok(None) => break,
                             Err(_e) => {
