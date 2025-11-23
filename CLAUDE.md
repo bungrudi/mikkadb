@@ -109,3 +109,15 @@ See **`claudedocs/PERFORMANCE-REPORT.md`** for:
 2. **P1**: io_uring/kqueue batching (20-30% gain, MEDIUM-HIGH effort)
 3. **P2**: TCP tuning (5-10% gain, LOW effort)
 4. **P3**: Zero-copy RESP parser (1-2% gain, HIGH effort) - DEFERRED
+
+---
+
+# Infrastructure & Testing
+
+## Remote Testing Server
+**Host**: `ubuntu@158.69.212.243`
+
+See **`claudedocs/INFRASTRUCTURE.md`** for:
+- SSH access and deployment instructions
+- Benchmark execution procedures
+- Remote vs local testing environment details
