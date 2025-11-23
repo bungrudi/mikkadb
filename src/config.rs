@@ -17,6 +17,7 @@ pub struct Config {
     pub master_port: Option<u16>,
     pub data_dir: String,
     pub db_filename: String,
+    pub num_shards: usize,
 }
 
 impl Config {
@@ -28,8 +29,9 @@ impl Config {
         let mut master_port = None;
         let mut data_dir = ".".to_string();
         let mut db_filename = "dump.rdb".to_string();
+        let mut num_shards = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 
-        let mut i = 0;
+        let mut i = 1; // Start from 1 (skip program name)
         while i < args.len() {
             match args[i].as_str() {
                 "--port" => {
@@ -37,79 +39,72 @@ impl Config {
                         if let Ok(p) = args[i + 1].parse() {
                             port = p;
                         }
+                        i += 2;
+                    } else {
+                        i += 1;
                     }
                 }
                 "--replicaof" => {
                     if i + 1 < args.len() {
-                        let parts: Vec<&str> = args[i + 1].split_whitespace().collect();
-                        if parts.len() >= 2 {
-                            master_host = Some(parts[0].to_string());
-                            if let Ok(p) = parts[1].parse() {
+                        let arg = &args[i+1];
+                        if arg.contains(' ') {
+                            // Handle single string argument: "host port"
+                            let parts: Vec<&str> = arg.split_whitespace().collect();
+                            if parts.len() >= 2 {
+                                role = ServerRole::Slave;
+                                master_host = Some(parts[0].to_string());
+                                if let Ok(p) = parts[1].parse() {
+                                    master_port = Some(p);
+                                }
+                            }
+                            i += 2;
+                        } else if i + 2 < args.len() {
+                            // Handle two separate arguments: host port
+                            role = ServerRole::Slave;
+                            master_host = Some(args[i + 1].clone());
+                            if let Ok(p) = args[i + 2].parse() {
                                 master_port = Some(p);
                             }
-                            role = ServerRole::Slave;
+                            i += 3;
+                        } else {
+                            i += 1;
                         }
-                        // Handle case where arguments might be separate tokens if not quoted (though usually passed as one string in tests, but shell splitting might vary)
-                        // Actually, standard args parsing splits by space unless quoted.
-                        // If run as: --replicaof "localhost 6379", it's one arg.
-                        // If run as: --replicaof localhost 6379, it's two args.
-                        // The tester usually passes it as two separate arguments to the binary if not using a shell script wrapper that quotes it.
-                        // But our `your_program.sh` passes "$@".
-                        // Let's assume the tester passes "--replicaof" "localhost" "6379" OR "--replicaof" "localhost 6379".
-                        // The previous implementation just set role = Slave.
-                        // Let's be robust.
-                    }
-                    // Re-implementing robust parsing below
-                }
-                "--dir" => {
-                    if i + 1 < args.len() {
-                        data_dir = args[i + 1].clone();
-                    }
-                }
-                "--dbfilename" => {
-                    if i + 1 < args.len() {
-                        db_filename = args[i + 1].clone();
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        
-        // Second pass or cleaner pass
-        let mut i = 0;
-        while i < args.len() {
-             match args[i].as_str() {
-                "--port" => {
-                    if i + 1 < args.len() {
-                        if let Ok(p) = args[i + 1].parse() {
-                            port = p;
-                        }
-                    }
-                }
-                "--replicaof" => {
-                    role = ServerRole::Slave;
-                    if i + 2 < args.len() {
-                         // Assume format: --replicaof <host> <port>
-                         master_host = Some(args[i+1].clone());
-                         if let Ok(p) = args[i+2].parse() {
-                             master_port = Some(p);
-                         }
+                    } else {
+                        i += 1;
                     }
                 }
                 "--dir" => {
                     if i + 1 < args.len() {
                         data_dir = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        i += 1;
                     }
                 }
                 "--dbfilename" => {
                     if i + 1 < args.len() {
                         db_filename = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        i += 1;
                     }
                 }
-                _ => {}
+                "--shards" => {
+                    if i + 1 < args.len() {
+                        if let Ok(n) = args[i + 1].parse() {
+                            if n > 0 {
+                                num_shards = n;
+                            }
+                        }
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => {
+                    i += 1;
+                }
             }
-            i += 1;
         }
 
         Config {
@@ -121,6 +116,7 @@ impl Config {
             master_port,
             data_dir,
             db_filename,
+            num_shards,
         }
     }
 

@@ -15,7 +15,7 @@ pub struct CommandRequest {
     pub response_tx: oneshot::Sender<Result<Value>>,
     pub replica_tx: Option<mpsc::Sender<Value>>,
     pub pub_sub_tx: Option<mpsc::Sender<Value>>,
-    pub executed: bool,
+    pub from_replica: bool,
 }
 
 struct Replica {
@@ -37,7 +37,9 @@ struct PendingRead {
 
 pub struct Engine {
     db: Db,
+    shard_id: usize,
     config: Arc<Config>,
+    peers: Vec<mpsc::Sender<CommandRequest>>,
     rx: mpsc::Receiver<CommandRequest>,
     replicas: Vec<Replica>,
     pending_waits: Vec<Option<PendingWait>>,
@@ -54,12 +56,14 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(config: Arc<Config>, rx: mpsc::Receiver<CommandRequest>, db: Db) -> Self {
+    pub fn new(shard_id: usize, config: Arc<Config>, rx: mpsc::Receiver<CommandRequest>, db: Db, peers: Vec<mpsc::Sender<CommandRequest>>) -> Self {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
         let (read_timeout_tx, read_timeout_rx) = mpsc::channel(32);
         Engine {
             db,
+            shard_id,
             config,
+            peers,
             rx,
             replicas: Vec::new(),
             pending_waits: Vec::new(),
@@ -91,6 +95,11 @@ impl Engine {
                         Value::BulkString(key.clone().into()),
                         Value::BulkString(Bytes::from(String::from_utf8_lossy(&values[0]).to_string())),
                     ]);
+                    
+                    // Broadcast LPOP to peers
+                    let broadcast_cmd = RedisCommand::LPop { key: key.clone(), count: None };
+                    self.broadcast_to_peers(broadcast_cmd).await;
+
                     let _ = response_tx.send(Ok(reply));
                     return;
                 }
@@ -204,8 +213,30 @@ impl Engine {
         }
     }
 
+    async fn broadcast_to_peers(&mut self, command: RedisCommand) {
+        for peer in &self.peers {
+            let peer = peer.clone();
+            let command = command.clone();
+            
+            tokio::spawn(async move {
+                let (tx, _) = oneshot::channel();
+                let req = CommandRequest {
+                    client_id: 0,
+                    command,
+                    response_tx: tx,
+                    replica_tx: None,
+                    pub_sub_tx: None,
+                    from_replica: true,
+                };
+                if let Err(e) = peer.send(req).await {
+                    eprintln!("Failed to broadcast to peer: {}", e);
+                }
+            });
+        }
+    }
+
     async fn handle_command(&mut self, req: CommandRequest) {
-        let CommandRequest { client_id, command, response_tx, replica_tx, pub_sub_tx, .. } = req;
+        let CommandRequest { client_id, command, response_tx, replica_tx, pub_sub_tx, from_replica } = req;
         
         if let RedisCommand::InternalDisconnect = &command {
              self.transaction_state.remove(&client_id);
@@ -287,7 +318,7 @@ impl Engine {
                         // But it will propagate as individual commands.
                         // That's fine for now.
                         
-                        match self.execute_command_immediate(client_id, cmd, None, None).await {
+                        match self.execute_command_immediate(client_id, cmd, None, None, from_replica).await {
                             Ok(val) => results.push(val),
                             Err(e) => {
                                 results.push(Value::Error(Bytes::from(e.to_string())));
@@ -331,7 +362,7 @@ impl Engine {
                 // Check if it's XREAD with BLOCK
 
                 
-                let result = self.execute_command_immediate(client_id, other.clone(), replica_tx, pub_sub_tx).await;
+                let result = self.execute_command_immediate(client_id, other.clone(), replica_tx, pub_sub_tx, from_replica).await;
                 
                 match result {
                     Ok(Value::Error(msg)) if msg == "BLOCKED" => {
@@ -522,7 +553,7 @@ impl Engine {
         Ok(Value::Integer(count))
     }
 
-    async fn execute_command_immediate(&mut self, client_id: u64, command: RedisCommand, resp_tx: Option<mpsc::Sender<Value>>, pub_sub_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
+    async fn execute_command_immediate(&mut self, client_id: u64, command: RedisCommand, resp_tx: Option<mpsc::Sender<Value>>, pub_sub_tx: Option<mpsc::Sender<Value>>, from_replica: bool) -> Result<Value, anyhow::Error> {
         match command {
             RedisCommand::Ping { message } => {
                 match message {
@@ -574,8 +605,8 @@ impl Engine {
                 
                 let mut args = vec![
                     Value::BulkString(Bytes::from("SET")),
-                    Value::BulkString(key.into()),
-                    Value::BulkString(value.into()),
+                    Value::BulkString(key.clone().into()),
+                    Value::BulkString(value.clone().into()),
                 ];
                 
                 if let Some(ms) = px {
@@ -585,6 +616,10 @@ impl Engine {
                 
                 let cmd_value = Value::Array(args);
                 self.propagate_command(cmd_value).await;
+                
+                if !from_replica {
+                    self.broadcast_to_peers(RedisCommand::Set { key: key.clone(), value: value.clone(), px }).await;
+                }
                 
                 Ok(Value::SimpleString(Bytes::from("OK")))
             }
@@ -651,10 +686,19 @@ impl Engine {
                     (ms, seq)
                 };
                 
-                match self.db.add_stream_entry(key.clone(), (ms, seq), fields) {
+                match self.db.add_stream_entry(key.clone(), (ms, seq), fields.clone()) {
                     Ok((ms, seq)) => {
                         let id_str = format!("{}-{}", ms, seq);
                         
+                        if !from_replica {
+                            // Broadcast with generated ID
+                            self.broadcast_to_peers(RedisCommand::XAdd { 
+                                key: key.clone(), 
+                                id: id_str.clone(), 
+                                fields: fields.clone() 
+                            }).await;
+                        }
+
                         // Check pending reads
                         let mut completed_indices = Vec::new();
                         for (i, read_opt) in self.pending_reads.iter().enumerate() {
@@ -830,13 +874,17 @@ impl Engine {
                             Value::BulkString(Bytes::from("RPUSH")),
                             Value::BulkString(key.clone().into()),
                         ];
-                        for v in values {
-                            args.push(Value::BulkString(v.into()));
+                        for v in &values {
+                            args.push(Value::BulkString(v.clone().into()));
                         }
                         self.propagate_command(Value::Array(args)).await;
                         // Wake any clients blocked on BLPOP for this key
                         self.check_blocked_list_clients(&key).await;
                         
+                        if !from_replica {
+                            self.broadcast_to_peers(RedisCommand::RPush { key: key.clone(), values: values.clone() }).await;
+                        }
+
                         Ok(Value::Integer(len as i64))
                     }
                     Err(e) => Ok(Value::Error(e.into())),
@@ -865,13 +913,17 @@ impl Engine {
                             Value::BulkString(Bytes::from("LPUSH")),
                             Value::BulkString(key.clone().into()),
                         ];
-                        for v in values {
-                            args.push(Value::BulkString(v.into()));
+                        for v in &values {
+                            args.push(Value::BulkString(v.clone().into()));
                         }
                         self.propagate_command(Value::Array(args)).await;
                         
                         // Check if any blocked clients are waiting for this key
                         self.check_blocked_list_clients(&key).await;
+                        
+                        if !from_replica {
+                            self.broadcast_to_peers(RedisCommand::LPush { key: key.clone(), values: values.clone() }).await;
+                        }
                         
                         Ok(Value::Integer(len as i64))
                     }
@@ -890,12 +942,17 @@ impl Engine {
                         // Propagate LPOP
                         let mut args = vec![
                             Value::BulkString(Bytes::from("LPOP")),
-                            Value::BulkString(key.into()),
+                            Value::BulkString(key.clone().into()),
                         ];
                         if let Some(c) = count {
                             args.push(Value::BulkString(Bytes::from(c.to_string())));
                         }
-                        self.propagate_command(Value::Array(args)).await;
+                        let cmd_value = Value::Array(args);
+                        self.propagate_command(cmd_value).await;
+                        
+                        if !from_replica {
+                            self.broadcast_to_peers(RedisCommand::LPop { key: key.clone(), count }).await;
+                        }
                         
                         if count.is_none() {
                             // Single value
@@ -937,8 +994,13 @@ impl Engine {
             }
             RedisCommand::InternalDisconnect => Ok(Value::SimpleString(Bytes::from("OK"))),
             RedisCommand::ZAdd { key, entries } => {
-                match self.db.zadd(key, entries) {
-                    Ok(added) => Ok(Value::Integer(added as i64)),
+                match self.db.zadd(key.clone(), entries.clone()) {
+                    Ok(added) => {
+                        if !from_replica {
+                            self.broadcast_to_peers(RedisCommand::ZAdd { key, entries }).await;
+                        }
+                        Ok(Value::Integer(added as i64))
+                    },
                     Err(e) => Ok(Value::Error(e.into())),
                 }
             }
@@ -983,7 +1045,12 @@ impl Engine {
             }
             RedisCommand::ZRem { key, members } => {
                 match self.db.zrem(&key, &members) {
-                    Ok(removed) => Ok(Value::Integer(removed as i64)),
+                    Ok(removed) => {
+                        if !from_replica {
+                            self.broadcast_to_peers(RedisCommand::ZRem { key: key.clone(), members: members.clone() }).await;
+                        }
+                        Ok(Value::Integer(removed as i64))
+                    },
                     Err(e) => Ok(Value::Error(e.into())),
                 }
             }
@@ -1021,10 +1088,15 @@ impl Engine {
                 
                 let args = vec![
                     Value::BulkString(Bytes::from("SET")),
-                    Value::BulkString(key.into()),
-                    Value::BulkString(new_val_str.into()),
+                    Value::BulkString(key.clone().into()),
+                    Value::BulkString(new_val_str.clone().into()),
                 ];
                 self.propagate_command(Value::Array(args)).await;
+                
+                if !from_replica {
+                    // Broadcast SET for convergence
+                    self.broadcast_to_peers(RedisCommand::Set { key: key.clone(), value: new_val_str, px: None }).await;
+                }
                 
                 Ok(Value::Integer(new_val))
             }

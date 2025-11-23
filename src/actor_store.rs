@@ -33,7 +33,7 @@ impl ActorStore {
             response_tx,
             replica_tx: None,
             pub_sub_tx: None,
-            executed: false,
+            from_replica: false,
         };
 
         self.tx

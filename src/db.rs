@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use dashmap::DashMap;
-use std::sync::Arc;
 use std::fs;
 use std::path::Path;
 use bytes::Bytes;
@@ -24,13 +22,13 @@ enum DataType {
 
 #[derive(Clone)]
 pub struct Db {
-    data: Arc<DashMap<String, DataType>>,
+    data: HashMap<String, DataType>,
 }
 
 impl Db {
     pub fn new() -> Self {
         Db {
-            data: Arc::new(DashMap::new()),
+            data: HashMap::new(),
         }
     }
 
@@ -94,19 +92,21 @@ impl Db {
         Ok(())
     }
 
-    pub fn set(&self, key: String, value: Bytes, px: Option<u64>) {
+    pub fn set(&mut self, key: String, value: Bytes, px: Option<u64>) {
         let expiry = px.map(|ms| Instant::now() + Duration::from_millis(ms));
         self.data.insert(key, DataType::String(value, expiry));
     }
 
     pub fn get(&self, key: &str) -> Option<Bytes> {
         if let Some(data_type) = self.data.get(key) {
-            match data_type.value() {
+            match data_type {
                 DataType::String(value, expiry) => {
                     if let Some(expiry_time) = expiry {
                         if Instant::now() > *expiry_time {
-                            // Lazy expiration: check but don't remove
-                            // Cleanup happens on writes or via cleanup_expired()
+                            // Lazy expiration: check but don't remove (requires mut)
+                            // Or return None.
+                            // In standard HashMap with &self, we can't remove.
+                            // We rely on cleanup or returning None.
                             return None;
                         }
                     }
@@ -118,12 +118,12 @@ impl Db {
         None
     }
     
-    pub fn add_stream_entry(&self, key: String, id: (u64, u64), fields: Vec<(String, String)>) -> Result<(u64, u64), String> {
+    pub fn add_stream_entry(&mut self, key: String, id: (u64, u64), fields: Vec<(String, String)>) -> Result<(u64, u64), String> {
         let entry = StreamEntry { id, fields };
         
-        let mut stream = self.data.entry(key).or_insert(DataType::Stream(Vec::new()));
+        let stream = self.data.entry(key).or_insert(DataType::Stream(Vec::new()));
         
-        match stream.value_mut() {
+        match stream {
             DataType::Stream(entries) => {
                 // Validate ID
                 if let Some(last) = entries.last() {
@@ -148,7 +148,7 @@ impl Db {
     
     pub fn get_last_stream_id(&self, key: &str) -> Option<(u64, u64)> {
         if let Some(entry) = self.data.get(key) {
-            if let DataType::Stream(entries) = entry.value() {
+            if let DataType::Stream(entries) = entry {
                 return entries.last().map(|e| e.id);
             }
         }
@@ -157,7 +157,7 @@ impl Db {
     
     pub fn read_stream(&self, key: &str, start_id: (u64, u64)) -> Option<Vec<StreamEntry>> {
         if let Some(entry) = self.data.get(key) {
-            if let DataType::Stream(entries) = entry.value() {
+            if let DataType::Stream(entries) = entry {
                 let result: Vec<StreamEntry> = entries.iter()
                     .filter(|e| e.id.0 > start_id.0 || (e.id.0 == start_id.0 && e.id.1 > start_id.1))
                     .cloned()
@@ -175,7 +175,7 @@ impl Db {
 
     pub fn range_stream(&self, key: &str, start: (u64, u64), end: (u64, u64)) -> Option<Vec<StreamEntry>> {
         if let Some(entry) = self.data.get(key) {
-            if let DataType::Stream(entries) = entry.value() {
+            if let DataType::Stream(entries) = entry {
                 let result: Vec<StreamEntry> = entries.iter()
                     .filter(|e| {
                         let id = e.id;
@@ -198,10 +198,10 @@ impl Db {
         }
     }
 
-    pub fn rpush(&self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
-        let mut list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
+    pub fn rpush(&mut self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
+        let list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
         
-        match list.value_mut() {
+        match list {
             DataType::List(v) => {
                 v.extend(values);
                 Ok(v.len())
@@ -213,7 +213,7 @@ impl Db {
     pub fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<Bytes>, String> {
         match self.data.get(key) {
             Some(entry) => {
-                if let DataType::List(v) = entry.value() {
+                if let DataType::List(v) = entry {
                     let len = v.len() as i64;
                     if len == 0 {
                         return Ok(Vec::new());
@@ -241,26 +241,13 @@ impl Db {
         }
     }
 
-    pub fn lpush(&self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
-        let mut list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
+    pub fn lpush(&mut self, key: String, values: Vec<Bytes>) -> Result<usize, String> {
+        let list = self.data.entry(key).or_insert(DataType::List(Vec::new()));
         
-        match list.value_mut() {
+        match list {
             DataType::List(v) => {
-                // Prepend values. Redis LPUSH inserts values one by one at the head.
-                // So LPUSH key a b c results in [c, b, a, ...]
-                // We need to reverse the values to prepend them in the correct order if we use splice or insert
-                // Or we can just iterate and insert at 0.
-                // Efficient way: create a new vector with capacity, add new values (reversed), then extend with old values.
-                // Or just insert at 0 one by one (slow for large lists).
-                // For Vec, inserting at 0 is O(N).
-                // Let's optimize slightly by splicing.
-                
-                // values: [a, b, c] -> we want list to be [c, b, a, old...]
-                // So we reverse values: [c, b, a] and prepend.
                 let mut values = values;
                 values.reverse();
-                
-                // Prepend
                 v.splice(0..0, values);
                 Ok(v.len())
             }
@@ -271,7 +258,7 @@ impl Db {
     pub fn llen(&self, key: &str) -> Result<usize, String> {
         match self.data.get(key) {
             Some(entry) => {
-                if let DataType::List(v) = entry.value() {
+                if let DataType::List(v) = entry {
                     Ok(v.len())
                 } else {
                     Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
@@ -281,9 +268,9 @@ impl Db {
         }
     }
 
-    pub fn lpop(&self, key: &str, count: Option<i64>) -> Result<Option<Vec<Bytes>>, String> {
-        if let Some(mut entry) = self.data.get_mut(key) {
-            match entry.value_mut() {
+    pub fn lpop(&mut self, key: &str, count: Option<i64>) -> Result<Option<Vec<Bytes>>, String> {
+        if let Some(entry) = self.data.get_mut(key) {
+            match entry {
                 DataType::List(v) => {
                     if v.is_empty() {
                         return Ok(None);
@@ -299,11 +286,6 @@ impl Db {
                     
                     let result: Vec<Bytes> = v.drain(0..drain_count).collect();
                     
-                    // If list is empty, should we remove the key? Redis usually does.
-                    // But for now let's keep it simple, or check if we can remove it.
-                    // We can't remove easily here because we only have mutable reference to the value.
-                    // The caller might handle cleanup if needed, or we just leave empty list.
-                    
                     Ok(Some(result))
                 }
                 _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
@@ -317,12 +299,10 @@ impl Db {
         let now = Instant::now();
         match self.data.get(key) {
             Some(entry) => {
-                let value = entry.value();
-                if Self::is_expired(value, now) {
-                    // Lazy expiration: check but don't remove
+                if Self::is_expired(entry, now) {
                     return "none".to_string();
                 }
-                match value {
+                match entry {
                     DataType::String(_, _) => "string".to_string(),
                     DataType::Stream(_) => "stream".to_string(),
                     DataType::List(_) => "list".to_string(),
@@ -337,9 +317,7 @@ impl Db {
         let now = Instant::now();
         let mut matches = Vec::new();
 
-        for entry in self.data.iter() {
-            let key = entry.key();
-            let value = entry.value();
+        for (key, value) in self.data.iter() {
             // Skip expired keys (lazy expiration)
             if Self::is_expired(value, now) {
                 continue;
@@ -354,9 +332,9 @@ impl Db {
         matches
     }
 
-    pub fn zadd(&self, key: String, entries: Vec<(f64, String)>) -> Result<usize, String> {
-        let mut entry = self.data.entry(key).or_insert(DataType::SortedSet(HashMap::new()));
-        match entry.value_mut() {
+    pub fn zadd(&mut self, key: String, entries: Vec<(f64, String)>) -> Result<usize, String> {
+        let entry = self.data.entry(key).or_insert(DataType::SortedSet(HashMap::new()));
+        match entry {
             DataType::SortedSet(map) => {
                 let mut added = 0;
                 for (score, member) in entries {
@@ -373,7 +351,7 @@ impl Db {
     pub fn zrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<(String, Option<f64>)>, String> {
         match self.data.get(key) {
             Some(entry) => {
-                if let DataType::SortedSet(map) = entry.value() {
+                if let DataType::SortedSet(map) = entry {
                     let mut elements: Vec<(&String, &f64)> = map.iter().collect();
                     // Sort by score, then member lexicographically
                     elements.sort_by(|a, b| {
@@ -407,7 +385,7 @@ impl Db {
     pub fn zcard(&self, key: &str) -> Result<usize, String> {
         match self.data.get(key) {
             Some(entry) => {
-                if let DataType::SortedSet(map) = entry.value() {
+                if let DataType::SortedSet(map) = entry {
                     Ok(map.len())
                 } else {
                     Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
@@ -420,7 +398,7 @@ impl Db {
     pub fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>, String> {
         match self.data.get(key) {
             Some(entry) => {
-                if let DataType::SortedSet(map) = entry.value() {
+                if let DataType::SortedSet(map) = entry {
                     Ok(map.get(member).cloned())
                 } else {
                     Err("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
@@ -430,9 +408,9 @@ impl Db {
         }
     }
 
-    pub fn zrem(&self, key: &str, members: &[String]) -> Result<usize, String> {
-        if let Some(mut entry) = self.data.get_mut(key) {
-            match entry.value_mut() {
+    pub fn zrem(&mut self, key: &str, members: &[String]) -> Result<usize, String> {
+        if let Some(entry) = self.data.get_mut(key) {
+            match entry {
                 DataType::SortedSet(map) => {
                     let mut removed = 0;
                     for member in members {
@@ -452,7 +430,7 @@ impl Db {
     pub fn zrank(&self, key: &str, member: &str) -> Result<Option<usize>, String> {
         match self.data.get(key) {
             Some(entry) => {
-                if let DataType::SortedSet(map) = entry.value() {
+                if let DataType::SortedSet(map) = entry {
                     if !map.contains_key(member) {
                         return Ok(None);
                     }
@@ -513,7 +491,7 @@ impl Db {
         pattern.ends_with('*') || current_index == text.len()
     }
 
-    fn store_loaded_string(&self, key: &[u8], value: Vec<u8>, expiry_ms: Option<u64>) {
+    fn store_loaded_string(&mut self, key: &[u8], value: Vec<u8>, expiry_ms: Option<u64>) {
         let key_str = match String::from_utf8(key.to_vec()) {
             Ok(s) => s,
             Err(_) => return,
