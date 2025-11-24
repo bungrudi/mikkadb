@@ -1,0 +1,64 @@
+=============================================================================
+ADAPTIVE TIERED BUFFERING - FINAL BENCHMARKS
+=============================================================================
+Date: 2025-11-23
+Server: ubuntu@158.69.212.243 (Remote Linux, 4 cores, 3 shards)
+Test: memtier_benchmark -t 8 -c 25 --test-time=10
+
+=============================================================================
+READ-HEAVY WORKLOAD (1:10 SET:GET) - Production Cache Pattern
+=============================================================================
+
+BASELINE vs ADAPTIVE vs REDIS:
+
+Pipeline=1 (Low Latency):
+  Baseline:  50,651 ops/sec, 3.85ms p50
+  Adaptive: 109,174 ops/sec, 1.58ms p50  (+115.6% throughput, -59.0% latency)
+  Redis:    109,267 ops/sec, 1.73ms p50  (virtual tie, MikkaDB better latency)
+
+Pipeline=10 (Moderate):
+  Baseline:  64,506 ops/sec, 30.98ms p50
+  Adaptive: 377,038 ops/sec,  5.06ms p50  (+484.5% throughput, -83.7% latency)
+  Redis:    748,696 ops/sec,  2.70ms p50  (Redis 98.6% faster)
+
+Pipeline=100 (High Throughput):
+  Baseline:   63,823 ops/sec, 311.30ms p50
+  Adaptive:  528,436 ops/sec,  35.84ms p50  (+727.8% throughput, -88.5% latency)
+  Redis:   1,651,281 ops/sec,  12.54ms p50  (Redis 212.5% faster)
+
+=============================================================================
+WRITE-HEAVY WORKLOAD (10:1 SET:GET) - High Mutation Pattern
+=============================================================================
+
+Pipeline=1:  54,676 ops/sec (adaptive) vs 33,815 ops/sec (baseline)  +61.7%
+Pipeline=10: 104,318 ops/sec (adaptive) vs 48,168 ops/sec (baseline) +116.6%
+Pipeline=100: 122,610 ops/sec (adaptive) vs 44,022 ops/sec (baseline) +178.5%
+
+=============================================================================
+ARCHITECTURE
+=============================================================================
+
+Three-tier adaptive buffering:
+- Small (512B): Default, optimized for low latency
+- Medium (4KB): Auto-upgrade when ≥2 commands detected
+- Large (16KB): Auto-upgrade when ≥8 commands detected
+- Downgrade: 2-second idle timeout → revert to Small
+
+Conditional read-ahead:
+- Disabled for Small tier (preserves latency)
+- Enabled for Medium/Large tiers (reduces syscalls)
+
+=============================================================================
+KEY INSIGHTS
+=============================================================================
+
+1. MikkaDB matches Redis at P=1 (109K ops/sec) with better latency
+2. Redis dominates deep pipelining (2-3x faster at P=10/100)
+3. Adaptive buffering scales 5x better than baseline (528K vs 64K plateau)
+4. Read-heavy workloads show 2-4x better performance than write-heavy
+
+Production use cases:
+- MikkaDB: Low-latency real-time apps, write-heavy workloads, single requests
+- Redis: Batch processing, deep pipelining, maximum throughput scenarios
+
+=============================================================================
