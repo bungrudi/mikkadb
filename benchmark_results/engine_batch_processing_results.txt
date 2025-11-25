@@ -1,0 +1,49 @@
+# Engine Batch Processing Optimization Results
+# Date: 2025-11-25
+# Server: ubuntu@158.69.212.243 (4 cores, 7.6GB RAM, Intel Haswell)
+# Configuration: 4 shards, memtier 3 threads × 50 connections
+
+## Summary
+
+| Workload   | Pipeline | Before  | After     | Improvement |
+|------------|----------|---------|-----------|-------------|
+| 1:10       | P=1      | 119K    | 113K      | -5% (ok)    |
+| 1:10       | P=10     | 391K    | 538K      | +37.6%      |
+| 1:10       | P=100    | 491K    | 718K      | +46.2%      |
+| Read-only  | P=100    | 838K    | 1.73M     | +106%       |
+
+## Optimization Details
+
+Changed from per-command channel send to batch channel send:
+- Before: N channel sends + N oneshot receives per batch
+- After: 1 channel send + 1 oneshot receive per batch
+- Complexity: O(N) → O(1) channel operations
+
+## Raw Results
+
+### P=1 (1:10 ratio) - Baseline check
+Sets: 10,337 ops/sec
+Gets: 103,345 ops/sec
+Total: 113,682 ops/sec
+Latency: 1.32ms avg
+
+### P=10 (1:10 ratio) - 37.6% improvement
+Sets: 48,989 ops/sec
+Gets: 489,867 ops/sec
+Total: 538,856 ops/sec
+Latency: 2.78ms avg
+
+### P=100 (1:10 ratio) - 46.2% improvement
+Sets: 65,296 ops/sec
+Gets: 652,941 ops/sec
+Total: 718,238 ops/sec
+Latency: 20.85ms avg
+
+### P=100 (Read-only) - 106% improvement
+Gets: 1,731,515 ops/sec
+Latency: 8.63ms avg
+
+## Files Modified
+- src/engine.rs: Added BatchCommandRequest, EngineRequest, handle_command_batch()
+- src/main.rs: Changed to batch mode, single channel send per batch
+- src/resp.rs: Optimized write_batch() with pre-allocation

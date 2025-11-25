@@ -1,0 +1,42 @@
+MikkaDB Phase 1 Baseline - Before Command Pipelining
+====================================================
+Date: 2025-11-22
+Implementation: Foundation only (ParseResult, try_read_value_from_buf, write_batch)
+Status: Methods implemented but NOT integrated into connection handler yet
+
+Test Configuration:
+------------------
+memtier_benchmark -p 6379 -t 8 -c 25 --ratio=10:1 --test-time=10 --pipeline=1
+
+8 threads
+25 connections per thread
+10:1 SET:GET ratio
+10 second test duration
+pipeline=1 (no client-side pipelining)
+
+Results:
+--------
+Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec
+----------------------------------------------------------------------------------------------------------------------------
+Sets       100667.46          ---          ---         1.50536         1.49500         1.92700         4.95900      7755.53
+Gets        10058.00         0.00     10058.00         1.50201         1.49500         1.87100         3.80700       391.88
+Waits           0.00          ---          ---             ---             ---             ---             ---          ---
+Totals     110725.45         0.00     10058.00         1.50505         1.49500         1.91900         4.86300      8147.42
+
+Summary:
+--------
+Total Throughput: 110,725 ops/sec
+Average Latency:  1.51ms
+p50 Latency:      1.50ms
+p99 Latency:      1.92ms
+p99.9 Latency:    4.86ms
+Throughput:       8.15 MB/sec
+
+Comparison to Redis 7.4.1 (same workload):
+-------------------------------------------
+Redis:   64,681 ops/sec, 3.09ms avg latency
+MikkaDB: 110,725 ops/sec, 1.51ms avg latency
+Improvement: +71% throughput, -51% latency
+
+Next: Phase 2 - Integrate pipelining into connection handler
+Expected improvement: 15-25% (127k-138k ops/sec)

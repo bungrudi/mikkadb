@@ -301,17 +301,38 @@ impl RespHandler {
 
     /// Write multiple responses with a single flush operation
     /// This is the core of command pipelining optimization
+    /// 
+    /// Optimization: Pre-allocate and coalesce all responses into a single buffer
+    /// before writing, reducing syscall overhead from N writes to 1 write.
     pub async fn write_batch(&mut self, responses: Vec<Value>) -> Result<()> {
         if responses.is_empty() {
             return Ok(());
         }
 
-        // Write all responses to the buffer
-        for response in responses {
-            self.writer.write_all(&response.serialize_bytes()).await?;
+        // Fast path: single response uses direct write
+        if responses.len() == 1 {
+            let bytes = responses.into_iter().next().unwrap().serialize_bytes();
+            self.writer.write_all(&bytes).await?;
+            self.writer.flush().await?;
+            return Ok(());
         }
 
-        // Single flush for entire batch
+        // Pre-serialize all responses
+        let serialized: Vec<Vec<u8>> = responses.into_iter()
+            .map(|v| v.serialize_bytes())
+            .collect();
+        
+        // Calculate total size for efficient single allocation
+        let total_size: usize = serialized.iter().map(|b| b.len()).sum();
+        
+        // Coalesce into single buffer (eliminates per-response write overhead)
+        let mut buffer = Vec::with_capacity(total_size);
+        for bytes in serialized {
+            buffer.extend(bytes);
+        }
+        
+        // Single write + single flush = minimal syscalls
+        self.writer.write_all(&buffer).await?;
         self.writer.flush().await?;
         Ok(())
     }

@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use crate::config::Config;
-use crate::engine::{Engine, CommandRequest};
+use crate::engine::{Engine, CommandRequest, EngineRequest, BatchCommandRequest};
 use crate::command::RedisCommand;
 use crate::db::Db;
 use bytes::Bytes;
@@ -28,12 +28,12 @@ async fn main() -> Result<()> {
     println!("Starting Mikkadb with {} shards (Share-Nothing Architecture)", num_shards);
 
     // 2. Spawn Engines (one per shard)
-    let mut channels = Vec::with_capacity(num_shards);
+    let mut channels: Vec<(mpsc::Sender<EngineRequest>, mpsc::Receiver<EngineRequest>)> = Vec::with_capacity(num_shards);
     for _ in 0..num_shards {
         channels.push(mpsc::channel(32));
     }
 
-    let shard_txs: Vec<mpsc::Sender<CommandRequest>> = channels.iter().map(|(tx, _)| tx.clone()).collect();
+    let shard_txs: Vec<mpsc::Sender<EngineRequest>> = channels.iter().map(|(tx, _)| tx.clone()).collect();
     
     for (shard_id, (_, rx)) in channels.into_iter().enumerate() {
         // Construct peers list: all txs except mine
@@ -123,66 +123,58 @@ async fn main() -> Result<()> {
                                     }
                                 }
 
-                                // Process batch
+                                // Process batch - Parse all commands first
                                 let batch_size = command_batch.len();
-                                let mut response_batch = Vec::with_capacity(batch_size);
+                                let mut commands = Vec::with_capacity(batch_size);
+                                let mut parse_errors: Vec<(usize, String)> = Vec::new();
 
-                                for cmd_value in command_batch {
+                                for (idx, cmd_value) in command_batch.into_iter().enumerate() {
                                     match RedisCommand::from_resp(cmd_value) {
-                                        Ok(command) => {
-                                            let (resp_tx, resp_rx) = oneshot::channel();
-
-                                            // Sharding Logic - Connection Based
-                                            let shard_idx = (client_id as usize) % num_shards;
-                                            let tx = &shard_channels[shard_idx];
-
-                                            let mut replica_tx = None;
-                                            if let RedisCommand::PSync { .. } = &command {
-                                                let (tx, rx) = mpsc::channel(32);
-                                                replica_tx = Some(tx);
-                                                repl_rx = Some(rx);
-                                            }
-
-                                            let req = CommandRequest {
-                                                client_id,
-                                                command,
-                                                response_tx: resp_tx,
-                                                replica_tx,
-                                                pub_sub_tx: Some(msg_tx.clone()),
-                                                from_replica: false,
-                                            };
-
-                                            if let Err(_) = tx.send(req).await {
-                                                // Engine dropped
-                                                response_batch.push(resp::Value::Error(Bytes::from("ERR Engine shutdown")));
-                                                break; 
-                                            }
-
-                                            match resp_rx.await {
-                                                Ok(Ok(response)) => {
-                                                    if let crate::resp::Value::Error(msg) = &response {
-                                                        if msg == "NO_REPLY" {
-                                                            continue; 
-                                                        }
-                                                    }
-                                                    response_batch.push(response);
-                                                }
-                                                Ok(Err(e)) => {
-                                                    response_batch.push(resp::Value::Error(Bytes::from(format!("ERR {}", e))));
-                                                }
-                                                Err(_) => {
-                                                    break; 
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            response_batch.push(resp::Value::Error(Bytes::from(format!("ERR {}", e))));
-                                        }
+                                        Ok(command) => commands.push(command),
+                                        Err(e) => parse_errors.push((idx, e.to_string())),
                                     }
                                 }
 
-                                if !response_batch.is_empty() {
-                                    let _ = handler.write_batch(response_batch).await;
+                                // Sharding Logic - Connection Based (all commands go to same shard)
+                                let shard_idx = (client_id as usize) % num_shards;
+                                let tx = &shard_channels[shard_idx];
+
+                                // Send batch through single channel message
+                                let (resp_tx, resp_rx) = oneshot::channel();
+                                let batch_req = BatchCommandRequest {
+                                    client_id,
+                                    commands,
+                                    response_tx: resp_tx,
+                                    pub_sub_tx: Some(msg_tx.clone()),
+                                };
+
+                                if let Err(_) = tx.send(EngineRequest::Batch(batch_req)).await {
+                                    // Engine dropped
+                                    break;
+                                }
+
+                                // Receive all responses in single message
+                                match resp_rx.await {
+                                    Ok(responses) => {
+                                        let mut response_batch: Vec<resp::Value> = responses.into_iter()
+                                            .map(|r| match r {
+                                                Ok(v) => v,
+                                                Err(e) => resp::Value::Error(Bytes::from(format!("ERR {}", e))),
+                                            })
+                                            .collect();
+                                        
+                                        // Insert parse errors at correct positions
+                                        for (idx, err_msg) in parse_errors {
+                                            if idx <= response_batch.len() {
+                                                response_batch.insert(idx, resp::Value::Error(Bytes::from(format!("ERR {}", err_msg))));
+                                            }
+                                        }
+
+                                        if !response_batch.is_empty() {
+                                            let _ = handler.write_batch(response_batch).await;
+                                        }
+                                    }
+                                    Err(_) => break,
                                 }
 
                                 // Notify handler about batch size for adaptive buffering
@@ -222,14 +214,14 @@ async fn main() -> Result<()> {
                     pub_sub_tx: None,
                     from_replica: false,
                 };
-                let _ = tx.send(req).await;
+                let _ = tx.send(EngineRequest::Single(req)).await;
             }
         });
     }
 }
 
 
-async fn perform_handshake(master_host: String, master_port: String, listening_port: String, tx: mpsc::Sender<CommandRequest>) -> Result<()> {
+async fn perform_handshake(master_host: String, master_port: String, listening_port: String, tx: mpsc::Sender<EngineRequest>) -> Result<()> {
     use tokio::net::TcpStream;
     use crate::resp::{RespHandler, Value};
 
@@ -309,7 +301,7 @@ async fn perform_handshake(master_host: String, master_port: String, listening_p
                             from_replica: false,
                         };
 
-                        if let Err(_) = tx.send(req).await {
+                        if let Err(_) = tx.send(EngineRequest::Single(req)).await {
                             eprintln!("[repl] failed to send command to engine");
                             break;
                         }

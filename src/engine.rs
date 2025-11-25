@@ -18,6 +18,21 @@ pub struct CommandRequest {
     pub from_replica: bool,
 }
 
+/// Batch of commands for efficient channel transport
+/// Reduces channel overhead from O(N) to O(1) per batch
+pub struct BatchCommandRequest {
+    pub client_id: u64,
+    pub commands: Vec<RedisCommand>,
+    pub response_tx: oneshot::Sender<Vec<Result<Value>>>,
+    pub pub_sub_tx: Option<mpsc::Sender<Value>>,
+}
+
+/// Engine request - supports both single and batch modes
+pub enum EngineRequest {
+    Single(CommandRequest),
+    Batch(BatchCommandRequest),
+}
+
 struct Replica {
     id: u64,
     tx: mpsc::Sender<Value>,
@@ -39,8 +54,8 @@ pub struct Engine {
     db: Db,
     shard_id: usize,
     config: Arc<Config>,
-    peers: Vec<mpsc::Sender<CommandRequest>>,
-    rx: mpsc::Receiver<CommandRequest>,
+    peers: Vec<mpsc::Sender<EngineRequest>>,
+    rx: mpsc::Receiver<EngineRequest>,
     replicas: Vec<Replica>,
     pending_waits: Vec<Option<PendingWait>>,
     timeout_rx: mpsc::Receiver<usize>,
@@ -56,7 +71,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(shard_id: usize, config: Arc<Config>, rx: mpsc::Receiver<CommandRequest>, db: Db, peers: Vec<mpsc::Sender<CommandRequest>>) -> Self {
+    pub fn new(shard_id: usize, config: Arc<Config>, rx: mpsc::Receiver<EngineRequest>, db: Db, peers: Vec<mpsc::Sender<EngineRequest>>) -> Self {
         let (timeout_tx, timeout_rx) = mpsc::channel(32);
         let (read_timeout_tx, read_timeout_rx) = mpsc::channel(32);
         Engine {
@@ -152,7 +167,14 @@ impl Engine {
         loop {
             tokio::select! {
                 Some(req) = self.rx.recv() => {
-                    self.handle_command(req).await;
+                    match req {
+                        EngineRequest::Single(cmd) => {
+                            self.handle_command(cmd).await;
+                        }
+                        EngineRequest::Batch(batch) => {
+                            self.handle_command_batch(batch).await;
+                        }
+                    }
                 }
                 Some(wait_idx) = self.timeout_rx.recv() => {
                     self.complete_wait(wait_idx);
@@ -163,6 +185,31 @@ impl Engine {
                 else => break,
             }
         }
+    }
+
+    /// Process a batch of commands efficiently
+    /// Returns all responses in a single oneshot message
+    async fn handle_command_batch(&mut self, batch: BatchCommandRequest) {
+        let BatchCommandRequest { client_id, commands, response_tx, pub_sub_tx } = batch;
+        
+        let mut responses = Vec::with_capacity(commands.len());
+        
+        for command in commands {
+            // Execute each command and collect response
+            // Note: Blocking commands (BLPOP, XREAD with BLOCK) should not be in batches
+            // They should be handled separately by the connection handler
+            let result = self.execute_command_immediate(
+                client_id, 
+                command, 
+                None,  // replica_tx not needed for batch mode
+                pub_sub_tx.clone(), 
+                false  // from_replica
+            ).await;
+            responses.push(result);
+        }
+        
+        // Send all responses in single message
+        let _ = response_tx.send(responses);
     }
     
     fn complete_read(&mut self, idx: usize) {
@@ -228,7 +275,8 @@ impl Engine {
                     pub_sub_tx: None,
                     from_replica: true,
                 };
-                if let Err(e) = peer.send(req).await {
+                // Wrap in EngineRequest::Single for channel transport
+                if let Err(e) = peer.send(EngineRequest::Single(req)).await {
                     eprintln!("Failed to broadcast to peer: {}", e);
                 }
             });

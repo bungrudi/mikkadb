@@ -1,0 +1,99 @@
+MikkaDB TRUE Baseline - Remote Server Performance
+===================================================
+Date: 2025-11-23
+Commit: 692a4c0 (before buffered I/O and pipelining optimizations)
+Server: ubuntu@158.69.212.243 (Remote Linux x86_64)
+Binary: mikkadb-true-baseline (built with Docker rust:latest)
+
+Test Configuration:
+------------------
+memtier_benchmark -p 6379 -t 8 -c 25 --ratio=10:1 --test-time=10 --pipeline=[1,10,100]
+
+8 threads
+25 connections per thread
+10:1 SET:GET ratio
+10 second test duration
+3 shards
+
+Results (Average of 3 runs):
+============================
+
+Pipeline=1 (No Client-Side Pipelining)
+---------------------------------------
+Run 1: 33,460 ops/sec, 5.97ms avg latency, 5.79ms p50, 11.84ms p99
+Run 2: 33,312 ops/sec, 6.00ms avg latency, 5.86ms p50, 11.46ms p99
+Run 3: 34,672 ops/sec, 5.77ms avg latency, 5.60ms p50, 11.14ms p99
+
+**AVERAGE P=1**:  33,815 ops/sec
+Average Latency:  5.91ms
+p50 Latency:      5.75ms
+p99 Latency:      11.48ms
+
+Pipeline=10
+-----------
+Run 1: 44,994 ops/sec, 44.40ms avg latency, 44.29ms p50, 58.62ms p99
+Run 2: 49,559 ops/sec, 44.54ms avg latency, 44.54ms p50, 58.62ms p99
+Run 3: 49,952 ops/sec, 44.43ms avg latency, 44.54ms p50, 57.86ms p99
+
+**AVERAGE P=10**: 48,168 ops/sec
+Average Latency:  44.46ms
+p50 Latency:      44.46ms
+p99 Latency:      58.37ms
+
+Pipeline=100
+------------
+Run 1: 41,596 ops/sec, 468.56ms avg latency, 479.23ms p50, 532.48ms p99
+Run 2: 44,120 ops/sec, 441.91ms avg latency, 450.56ms p50, 520.19ms p99
+Run 3: 46,349 ops/sec, 421.50ms avg latency, 430.08ms p50, 479.23ms p99
+
+**AVERAGE P=100**: 44,022 ops/sec
+Average Latency:   443.99ms
+p50 Latency:       453.29ms
+p99 Latency:       510.63ms
+
+Summary:
+========
+TRUE REMOTE BASELINE PERFORMANCE (before any optimizations):
+
+| Pipeline | Ops/sec | Avg Latency | p50 Latency | p99 Latency |
+|----------|---------|-------------|-------------|-------------|
+| P=1      | 33,815  | 5.91ms      | 5.75ms      | 11.48ms     |
+| P=10     | 48,168  | 44.46ms     | 44.46ms     | 58.37ms     |
+| P=100    | 44,022  | 443.99ms    | 453.29ms    | 510.63ms    |
+
+Key Observations:
+-----------------
+1. P=1 performance (33.8k ops/sec) is MUCH LOWER than local testing (110k)
+   - This is expected: remote server has network latency + different CPU
+   - Remote server is the TRUE production-like baseline
+
+2. P=10 shows modest improvement (42% gain over P=1)
+   - Buffering helps with batched requests
+   - Latency increases proportionally to pipeline depth
+
+3. P=100 shows REGRESSION (-8.6% vs P=10)
+   - Likely head-of-line blocking or connection saturation
+   - Baseline architecture not optimized for high-throughput pipelining
+
+4. Comparison to phase1_baseline_pipelining.txt (LOCAL):
+   - Local P=1: 110,725 ops/sec vs Remote P=1: 33,815 ops/sec
+   - 3.3x difference due to network latency and CPU differences
+   - ALL remote benchmarks should be compared to THIS baseline, not local
+
+Next Steps:
+-----------
+1. This establishes the TRUE starting point for remote optimization work
+2. Any pipelining/buffering optimizations should be measured against:
+   - P=1 target: maintain or improve 33.8k ops/sec
+   - P=10 target: improve beyond 48.2k ops/sec
+   - P=100 target: improve beyond 44.0k ops/sec (currently regressing)
+
+3. Expected gains from pipelining optimization:
+   - Moderate: 15-25% improvement (50-60k ops/sec at P=10)
+   - Best case: 40-50% improvement (60-70k ops/sec at P=10)
+
+Deployment Note:
+----------------
+This baseline uses the Actor model architecture with no buffering optimizations.
+The code at commit 692a4c0 represents the foundation before any I/O or
+concurrency optimizations were attempted.

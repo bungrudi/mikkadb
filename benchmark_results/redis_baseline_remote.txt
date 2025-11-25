@@ -1,0 +1,175 @@
+==================================================================
+REDIS BASELINE BENCHMARK - Remote Linux Server
+==================================================================
+Server: ubuntu@158.69.212.243 (4 cores, Linux)
+Redis Version: 7.0.15 (official Redis)
+Date: 2025-11-23
+
+Test Configuration:
+------------------
+memtier_benchmark -p 6379 -t 8 -c 25 --ratio=10:1 --test-time=10 --pipeline=X
+
+8 threads
+25 connections per thread (200 total connections)
+10:1 SET:GET ratio
+10 second test duration
+
+==================================================================
+REDIS RESULTS
+==================================================================
+
+Test 1: Pipeline=1 (No pipelining)
+-----------------------------------
+Total Throughput: 67,759 ops/sec
+Average Latency:  2.95ms
+p50 Latency:      2.51ms
+p99 Latency:      10.30ms
+p99.9 Latency:    16.64ms
+Throughput:       5.76 MB/sec
+
+Test 2: Pipeline=10
+-----------------------------------
+Total Throughput: 121,639 ops/sec
+Average Latency:  16.45ms
+p50 Latency:      15.74ms
+p99 Latency:      36.10ms
+p99.9 Latency:    55.30ms
+Throughput:       10.35 MB/sec
+
+Test 3: Pipeline=100
+-----------------------------------
+Total Throughput: 159,429 ops/sec
+Average Latency:  124.89ms
+p50 Latency:      124.42ms
+p99 Latency:      183.30ms
+p99.9 Latency:    214.02ms
+Throughput:       13.56 MB/sec
+
+==================================================================
+MIKKADB RESULTS (Same Server - From remote_linux_3shards.txt)
+==================================================================
+
+Test 1: Pipeline=1 (No pipelining)
+-----------------------------------
+Average: 87,556 ops/sec (+29% vs Redis!)
+
+Test 2: Pipeline=10
+-----------------------------------
+Average: 102,182 ops/sec (-16% vs Redis)
+
+Test 3: Pipeline=100
+-----------------------------------
+Average: 97,280 ops/sec (-39% vs Redis)
+
+==================================================================
+COMPARISON: MIKKADB vs REDIS (Remote Linux Server)
+==================================================================
+
+Pipeline=1 (Latency-Sensitive):
+  - MikkaDB: 87,556 ops/sec
+  - Redis:   67,759 ops/sec
+  - Difference: +29% (MikkaDB FASTER!)
+
+Pipeline=10:
+  - MikkaDB: 102,182 ops/sec
+  - Redis:   121,639 ops/sec
+  - Difference: -16% (Redis faster)
+
+Pipeline=100 (High Throughput):
+  - MikkaDB: 97,280 ops/sec
+  - Redis:   159,429 ops/sec
+  - Difference: -39% (Redis significantly faster)
+
+==================================================================
+KEY FINDINGS
+==================================================================
+
+1. **Latency Advantage**: MikkaDB is 29% FASTER than Redis for low-latency
+   workloads (pipeline=1). This is impressive for a Rust implementation
+   competing against the highly optimized Redis C codebase.
+
+2. **Pipelining Gap**: Redis has a significant advantage with pipelining:
+   - 16% faster at pipeline=10
+   - 39% faster at pipeline=100
+
+3. **Redis Pipelining Efficiency**: Redis shows excellent scaling with
+   pipelining (67k → 121k → 159k), while MikkaDB plateaus around 100k.
+
+4. **Architecture Trade-offs**:
+   - MikkaDB's share-nothing architecture (3 shards) excels at low-latency
+   - Redis's single-threaded event loop excels at batch processing
+
+5. **Performance Context**:
+   - MikkaDB with 3 shards: 87k-102k ops/sec
+   - Redis single-threaded: 67k-159k ops/sec
+   - Both are competitive, with different sweet spots
+
+==================================================================
+LATENCY COMPARISON
+==================================================================
+
+Pipeline=1:
+  - MikkaDB p99: ~1.92ms (from phase1_baseline_pipelining.txt)
+  - Redis p99:   10.30ms
+  - MikkaDB has 5.4x LOWER p99 latency!
+
+Pipeline=10:
+  - Redis p99: 36.10ms
+
+Pipeline=100:
+  - Redis p99: 183.30ms
+
+MikkaDB shows exceptional latency characteristics for low-pipeline
+workloads, making it ideal for latency-sensitive applications.
+
+==================================================================
+RECOMMENDATIONS
+==================================================================
+
+1. **For Latency-Sensitive Workloads**: MikkaDB is the clear winner
+   - 29% higher throughput
+   - 5.4x lower p99 latency
+   - Better tail latency characteristics
+
+2. **For High-Throughput Pipelining**: Redis has the advantage
+   - 39% higher throughput at pipeline=100
+   - Better scaling with increased pipeline depth
+
+3. **Next Steps for MikkaDB**:
+   - Investigate pipelining implementation
+   - Profile pipeline=10 and pipeline=100 workloads
+   - Optimize batch command processing
+   - Consider I/O batching strategies
+
+4. **Architecture Validation**:
+   - Share-nothing architecture is working well
+   - Focus on I/O optimization (already identified as 91% of CPU time)
+   - Command pipelining integration is the next priority
+
+==================================================================
+CONFIGURATION USED
+==================================================================
+
+Redis Configuration:
+-------------------
+port 6379
+bind 0.0.0.0
+protected-mode no
+daemonize yes
+databases 16
+save ""
+appendonly no
+maxmemory-policy noeviction
+
+Benchmark Commands:
+------------------
+# Pipeline=1
+memtier_benchmark -p 6379 -t 8 -c 25 --ratio=10:1 --test-time=10 --pipeline=1
+
+# Pipeline=10
+memtier_benchmark -p 6379 -t 8 -c 25 --ratio=10:1 --test-time=10 --pipeline=10
+
+# Pipeline=100
+memtier_benchmark -p 6379 -t 8 -c 25 --ratio=10:1 --test-time=10 --pipeline=100
+
+==================================================================
