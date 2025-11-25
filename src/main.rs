@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
     // 2. Spawn Engines (one per shard)
     let mut channels: Vec<(mpsc::Sender<EngineRequest>, mpsc::Receiver<EngineRequest>)> = Vec::with_capacity(num_shards);
     for _ in 0..num_shards {
-        channels.push(mpsc::channel(32));
+        channels.push(mpsc::channel(256));
     }
 
     let shard_txs: Vec<mpsc::Sender<EngineRequest>> = channels.iter().map(|(tx, _)| tx.clone()).collect();
@@ -82,6 +82,8 @@ async fn main() -> Result<()> {
 
     loop {
         let (stream, _) = listener.accept().await?;
+        // Disable Nagle's algorithm for lower latency
+        let _ = stream.set_nodelay(true);
         let shard_channels = shard_channels.clone();
         
         client_id_counter += 1;
@@ -90,7 +92,7 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut handler = resp::RespHandler::new(stream);
             let mut repl_rx: Option<mpsc::Receiver<crate::resp::Value>> = None;
-            let (msg_tx, mut msg_rx) = mpsc::channel(32);
+            let (msg_tx, mut msg_rx) = mpsc::channel(256);
 
             // Pipelining constants
             const MAX_BATCH_COMMANDS: usize = 1024;
