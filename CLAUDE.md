@@ -115,9 +115,17 @@ See **`claudedocs/PERFORMANCE-REPORT.md`** for:
 # Infrastructure & Testing
 
 ## Remote Testing Server
-**Host**: `ubuntu@158.69.212.243`
+
+**Instance**: `instance-20251125-121024`
+**Project**: `ajaib-poc-cs`
+**Zone**: `asia-southeast2-a`
+**External IP**: `34.50.117.27`
+
+**Services**:
+- mikkadb: port 6379
+- Redis: port 6380 (both run in parallel)
 
 See **`claudedocs/INFRASTRUCTURE.md`** for:
 - SSH access and deployment instructions
 - Benchmark execution procedures
-- Remote vs local testing environment details
+- Server setup and configuration details

@@ -247,7 +247,47 @@ less server.log
 
 ---
 
-## 9. Future Improvements / TODO Ideas (Optional)
+## 9. Remote Testing on GCP
+
+For production-like benchmarking and testing, we have a GCP VM instance set up with mikkadb and Redis.
+
+### Quick Access
+```sh
+# SSH to GCP instance
+gcloud compute ssh instance-20251125-121024 --zone=asia-southeast2-a --project=ajaib-poc-cs
+
+# Deploy latest build
+cargo build --release
+gcloud compute scp target/release/mikkadb-rust instance-20251125-121024:~/mikkadb-rust/target/release/ \
+  --zone=asia-southeast2-a --project=ajaib-poc-cs
+```
+
+### Running Tests on GCP
+```sh
+# SSH into instance
+gcloud compute ssh instance-20251125-121024 --zone=asia-southeast2-a --project=ajaib-poc-cs
+
+# Start mikkadb with 2 shards (Redis already running on port 6380)
+~/start_mikkadb.sh
+
+# Check status
+~/status_servers.sh
+
+# Benchmark mikkadb (port 6379, 2 shards)
+memtier_benchmark -p 6379 -t 4 -c 50 -n 10000
+
+# Benchmark Redis (port 6380)
+memtier_benchmark -p 6380 -t 4 -c 50 -n 10000
+
+# Stop mikkadb
+~/stop_mikkadb.sh
+```
+
+See **`claudedocs/INFRASTRUCTURE.md`** for complete server details and setup instructions.
+
+---
+
+## 10. Future Improvements / TODO Ideas (Optional)
 
 - Add more detailed logging around:
   - Replication offsets and `WAIT` behavior.
