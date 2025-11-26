@@ -649,12 +649,13 @@ impl Engine {
                 Ok(Value::SimpleString(Bytes::from(t)))
             }
             RedisCommand::Set { key, value, px } => {
-                self.db.set(key.clone(), bytes::Bytes::from(value.clone()), px);
+                // Use set_bytes() for zero-copy key handling
+                self.db.set_bytes(key.clone(), value.clone(), px);
                 
                 let mut args = vec![
                     Value::BulkString(Bytes::from("SET")),
-                    Value::BulkString(key.clone().into()),
-                    Value::BulkString(value.clone().into()),
+                    Value::BulkString(key.clone()),
+                    Value::BulkString(value.clone()),
                 ];
                 
                 if let Some(ms) = px {
@@ -1103,13 +1104,15 @@ impl Engine {
                 }
             }
             RedisCommand::Get { key } => {
-                match self.db.get(&key) {
-                    Some(value) => Ok(Value::BulkString(Bytes::from(String::from_utf8_lossy(&value).to_string()))),
+                // Use get_bytes() for zero-copy key lookup
+                match self.db.get_bytes(&key) {
+                    Some(value) => Ok(Value::BulkString(value)),
                     None => Ok(Value::Null),
                 }
             }
             RedisCommand::Incr { key } => {
-                let current_val = match self.db.get(&key) {
+                // Use get_bytes() for zero-copy key lookup
+                let current_val = match self.db.get_bytes(&key) {
                     Some(bytes) => {
                         let s = String::from_utf8_lossy(&bytes);
                         match s.parse::<i64>() {
@@ -1121,29 +1124,22 @@ impl Engine {
                 };
                 
                 let new_val = current_val + 1;
-                let new_val_str = new_val.to_string();
-                self.db.set(key.clone(), bytes::Bytes::from(new_val_str.clone()), None);
+                let new_val_bytes = Bytes::from(new_val.to_string());
+                // Convert key to String at storage boundary
+                let key_str = String::from_utf8_lossy(&key).to_string();
+                self.db.set(key_str, new_val_bytes.clone(), None);
                 
-                // Propagate as SET for simplicity, or we could propagate INCR if we wanted.
-                // But replicas are dumb, they just apply commands. 
-                // If we propagate INCR, replicas need to handle INCR.
-                // Let's propagate SET to be safe and stateless on replica side?
-                // Actually, standard Redis propagates INCR as INCR (or SELECT + INCR).
-                // But here, let's propagate SET to ensure consistency if we had complex logic.
-                // However, for INCR, propagating INCR is fine too.
-                // Let's stick to SET for now to avoid implementing INCR on replica if it differs (it shouldn't).
-                // Actually, let's propagate INCR to save bandwidth? No, SET is safer for now.
-                
+                // Propagate as SET for simplicity
                 let args = vec![
                     Value::BulkString(Bytes::from("SET")),
-                    Value::BulkString(key.clone().into()),
-                    Value::BulkString(new_val_str.clone().into()),
+                    Value::BulkString(key.clone()),
+                    Value::BulkString(new_val_bytes.clone()),
                 ];
                 self.propagate_command(Value::Array(args)).await;
                 
                 if !from_replica {
                     // Broadcast SET for convergence
-                    self.broadcast_to_peers(RedisCommand::Set { key: key.clone(), value: new_val_str, px: None }).await;
+                    self.broadcast_to_peers(RedisCommand::Set { key: key.clone(), value: new_val_bytes, px: None }).await;
                 }
                 
                 Ok(Value::Integer(new_val))

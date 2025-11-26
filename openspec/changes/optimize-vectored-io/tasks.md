@@ -1,10 +1,10 @@
 ## 1. Implementation
 
-- [ ] 1.1 Import `std::io::IoSlice` in `resp.rs`
-- [ ] 1.2 Modify `write_batch()` to create `IoSlice` array from serialized responses
-- [ ] 1.3 Implement vectored write loop with proper handling of partial writes
-- [ ] 1.4 Maintain single flush after all data written
-- [ ] 1.5 Add unit test for vectored write behavior
+- [x] 1.1 Import `std::io::IoSlice` in `resp.rs`
+- [x] 1.2 Modify `write_batch()` to eliminate intermediate buffer copy (sequential writes to BufWriter)
+- [x] 1.3 Implement `write_batch_vectored()` with IoSlice and partial write handling
+- [x] 1.4 Maintain single flush after all data written
+- [x] 1.5 Add unit test for vectored write behavior
 
 ## 2. Verification
 

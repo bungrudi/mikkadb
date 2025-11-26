@@ -1,12 +1,15 @@
 use crate::resp::Value;
 use anyhow::{Result, Error};
+use bytes::Bytes;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedisCommand {
     Ping { message: Option<String> },
     Echo { message: String },
-    Set { key: String, value: String, px: Option<u64> },
-    Get { key: String },
+    /// SET command with zero-copy Bytes key and value
+    Set { key: Bytes, value: Bytes, px: Option<u64> },
+    /// GET command with zero-copy Bytes key
+    Get { key: Bytes },
     Info { section: String },
     ReplConf { subcommand: String, args: Vec<String> },
     PSync { replication_id: String, offset: i64 },
@@ -26,7 +29,8 @@ pub enum RedisCommand {
         start: String,
         end: String,
     },
-    Incr { key: String },
+    /// INCR command with zero-copy Bytes key
+    Incr { key: Bytes },
     Type { key: String },
     Multi,
     Exec,
@@ -88,13 +92,14 @@ impl RedisCommand {
                         if items.len() < 3 {
                             return Err(Error::msg("ERR wrong number of arguments for 'set' command"));
                         }
-                        let key = match items[1].to_string() {
-                            Ok(s) => s,
-                            _ => return Err(Error::msg("Invalid key for SET")),
+                        // Zero-copy: extract Bytes directly without String allocation
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SET")),
                         };
-                        let value = match items[2].to_string() {
-                            Ok(s) => s,
-                            _ => return Err(Error::msg("Invalid value for SET")),
+                        let value = match items[2].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid value for SET")),
                         };
                         
                         let mut px = None;
@@ -118,9 +123,10 @@ impl RedisCommand {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'get' command"));
                         }
-                        let key = match items[1].to_string() {
-                            Ok(s) => s,
-                            _ => return Err(Error::msg("Invalid key for GET")),
+                        // Zero-copy: extract Bytes directly without String allocation
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for GET")),
                         };
                         Ok(RedisCommand::Get { key })
                     }
@@ -375,9 +381,10 @@ impl RedisCommand {
                         if items.len() < 2 {
                             return Err(Error::msg("ERR wrong number of arguments for 'incr' command"));
                         }
-                        let key = match items[1].to_string() {
-                            Ok(s) => s,
-                            _ => return Err(Error::msg("Invalid key for INCR")),
+                        // Zero-copy: extract Bytes directly
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for INCR")),
                         };
                         Ok(RedisCommand::Incr { key })
                     }

@@ -57,7 +57,7 @@ impl KeyValueStore for ActorStore {
     async fn get(&self, key: &str) -> Result<Option<Bytes>, StoreError> {
         let value = self
             .execute_command(RedisCommand::Get {
-                key: key.to_string(),
+                key: Bytes::from(key.to_string()),
             })
             .await?;
 
@@ -72,11 +72,10 @@ impl KeyValueStore for ActorStore {
     }
 
     async fn set(&self, key: String, value: Bytes, px: Option<u64>) -> Result<(), StoreError> {
-        let value_str = String::from_utf8_lossy(&value).to_string();
         let result = self
             .execute_command(RedisCommand::Set {
-                key,
-                value: value_str,
+                key: Bytes::from(key),
+                value,
                 px,
             })
             .await?;
@@ -94,7 +93,7 @@ impl KeyValueStore for ActorStore {
     async fn incr(&self, key: &str) -> Result<i64, StoreError> {
         let value = self
             .execute_command(RedisCommand::Incr {
-                key: key.to_string(),
+                key: Bytes::from(key.to_string()),
             })
             .await?;
 

@@ -96,6 +96,18 @@ impl Db {
         let expiry = px.map(|ms| Instant::now() + Duration::from_millis(ms));
         self.data.insert(key, DataType::String(value, expiry));
     }
+    
+    /// Zero-copy set: accepts Bytes key, converts to String at storage boundary
+    /// Use this when you have Bytes from the parser to avoid intermediate String allocation
+    pub fn set_bytes(&mut self, key: Bytes, value: Bytes, px: Option<u64>) {
+        // Convert Bytes to String at storage boundary
+        // This is where the allocation happens, but only once per SET
+        let key_str = match std::str::from_utf8(&key) {
+            Ok(s) => s.to_string(),
+            Err(_) => String::from_utf8_lossy(&key).to_string(),
+        };
+        self.set(key_str, value, px);
+    }
 
     pub fn get(&self, key: &str) -> Option<Bytes> {
         if let Some(data_type) = self.data.get(key) {
@@ -116,6 +128,16 @@ impl Db {
             }
         }
         None
+    }
+    
+    /// Zero-copy get: accepts byte slice and converts to &str for lookup
+    /// This avoids String allocation for the lookup key
+    pub fn get_bytes(&self, key: &[u8]) -> Option<Bytes> {
+        // Convert bytes to str for HashMap lookup (no allocation)
+        match std::str::from_utf8(key) {
+            Ok(key_str) => self.get(key_str),
+            Err(_) => None, // Invalid UTF-8 keys not supported in String-based HashMap
+        }
     }
     
     pub fn add_stream_entry(&mut self, key: String, id: (u64, u64), fields: Vec<(String, String)>) -> Result<(u64, u64), String> {
