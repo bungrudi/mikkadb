@@ -518,6 +518,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "hex",
+ "parking_lot",
  "pprof",
  "socket2 0.5.10",
  "tokio",

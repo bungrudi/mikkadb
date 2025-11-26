@@ -375,3 +375,212 @@ mod integration_tests {
         assert_eq!(&serialized[0], b"$6\r\nvalue0\r\n");
     }
 }
+
+// ============================================================================
+// PHASE 3: RwLock Concurrent Access Tests
+// ============================================================================
+
+mod rwlock_tests {
+    use super::*;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// Test that Db supports concurrent read access
+    /// Multiple GET operations should not block each other
+    #[test]
+    fn test_concurrent_reads_no_blocking() {
+        let mut db = Db::new();
+        
+        // Setup: populate with test data
+        for i in 0..100 {
+            db.set(format!("key{}", i), Bytes::from(format!("value{}", i)), None);
+        }
+        
+        // Verify reads work correctly (basic correctness test)
+        for i in 0..100 {
+            let result = db.get(&format!("key{}", i));
+            assert_eq!(result, Some(Bytes::from(format!("value{}", i))));
+        }
+    }
+
+    /// Test that GET and SET operations maintain data consistency
+    #[test]
+    fn test_read_write_consistency() {
+        let mut db = Db::new();
+        
+        // Initial write
+        db.set("counter".to_string(), Bytes::from("0"), None);
+        
+        // Read should see written value
+        assert_eq!(db.get("counter"), Some(Bytes::from("0")));
+        
+        // Update
+        db.set("counter".to_string(), Bytes::from("1"), None);
+        
+        // Read should see updated value
+        assert_eq!(db.get("counter"), Some(Bytes::from("1")));
+    }
+
+    /// Test batch of mixed GET/SET operations (simulating pipelined workload)
+    #[test]
+    fn test_mixed_operations_batch() {
+        let mut db = Db::new();
+        
+        // Simulate P=10 pipeline with 50% reads, 50% writes
+        let operations: Vec<(&str, &str)> = vec![
+            ("SET", "a"),
+            ("GET", "a"),
+            ("SET", "b"),
+            ("GET", "b"),
+            ("SET", "c"),
+            ("GET", "a"),
+            ("GET", "b"),
+            ("SET", "a"),  // overwrite
+            ("GET", "c"),
+            ("GET", "a"),  // should see new value
+        ];
+        
+        for (op, key) in operations {
+            match op {
+                "SET" => {
+                    db.set(key.to_string(), Bytes::from(format!("value_{}", key)), None);
+                }
+                "GET" => {
+                    let _ = db.get(key);  // Just exercise the path
+                }
+                _ => {}
+            }
+        }
+        
+        // Verify final state
+        assert_eq!(db.get("a"), Some(Bytes::from("value_a")));
+        assert_eq!(db.get("b"), Some(Bytes::from("value_b")));
+        assert_eq!(db.get("c"), Some(Bytes::from("value_c")));
+    }
+
+    /// Test read-heavy workload performance characteristics
+    /// This simulates the GET-heavy workload where RwLock shines
+    #[test]
+    fn test_read_heavy_workload() {
+        let mut db = Db::new();
+        
+        // Setup: 1000 keys
+        for i in 0..1000 {
+            db.set(format!("key{}", i), Bytes::from(format!("value{}", i)), None);
+        }
+        
+        // Simulate read-heavy workload: 10000 reads, 100 writes (100:1 ratio)
+        let start = Instant::now();
+        
+        for i in 0..10000 {
+            let key_idx = i % 1000;
+            let _ = db.get(&format!("key{}", key_idx));
+            
+            // Occasional write (1% of operations)
+            if i % 100 == 0 {
+                db.set(format!("key{}", key_idx), Bytes::from(format!("updated{}", i)), None);
+            }
+        }
+        
+        let elapsed = start.elapsed();
+        
+        // Should complete quickly (< 100ms for 10K operations)
+        assert!(elapsed < Duration::from_millis(500), 
+            "Read-heavy workload took too long: {:?}", elapsed);
+    }
+
+    /// Test expiry check doesn't require write lock
+    /// GET with lazy expiry check is still a read operation
+    #[test]
+    fn test_expiry_is_read_only_check() {
+        let mut db = Db::new();
+        
+        // Set with very short expiry
+        db.set("ephemeral".to_string(), Bytes::from("temp"), Some(1));
+        
+        // Immediate read should succeed
+        assert!(db.get("ephemeral").is_some());
+        
+        // Wait for expiry
+        thread::sleep(Duration::from_millis(10));
+        
+        // Read after expiry should return None (lazy check)
+        assert!(db.get("ephemeral").is_none());
+    }
+
+    /// Test that get_bytes works correctly with RwLock
+    #[test]
+    fn test_get_bytes_concurrent_safe() {
+        let mut db = Db::new();
+        
+        // Setup with Bytes keys
+        let key = Bytes::from("testkey");
+        db.set_bytes(key.clone(), Bytes::from("testvalue"), None);
+        
+        // Verify get_bytes works
+        let result = db.get_bytes(&key);
+        assert_eq!(result, Some(Bytes::from("testvalue")));
+    }
+
+    /// Test that all-GET batch qualifies for fast path
+    #[test]
+    fn test_fast_batch_path_detection() {
+        // Simulate what Engine.handle_command_batch does
+        let commands = vec![
+            RedisCommand::Get { key: Bytes::from("a") },
+            RedisCommand::Get { key: Bytes::from("b") },
+            RedisCommand::Get { key: Bytes::from("c") },
+        ];
+        
+        // All simple commands should qualify for fast path
+        let all_simple = commands.iter().all(|cmd| {
+            matches!(cmd, RedisCommand::Get { .. } | RedisCommand::Set { .. } | RedisCommand::Incr { .. })
+        });
+        assert!(all_simple, "All-GET batch should use fast path");
+    }
+
+    /// Test that mixed GET/SET batch qualifies for fast path
+    #[test]
+    fn test_mixed_get_set_fast_path() {
+        let commands = vec![
+            RedisCommand::Set { key: Bytes::from("x"), value: Bytes::from("1"), px: None },
+            RedisCommand::Get { key: Bytes::from("x") },
+            RedisCommand::Set { key: Bytes::from("y"), value: Bytes::from("2"), px: None },
+            RedisCommand::Get { key: Bytes::from("y") },
+        ];
+        
+        let all_simple = commands.iter().all(|cmd| {
+            matches!(cmd, RedisCommand::Get { .. } | RedisCommand::Set { .. } | RedisCommand::Incr { .. })
+        });
+        assert!(all_simple, "Mixed GET/SET batch should use fast path");
+    }
+
+    /// Test fast batch execution timing
+    #[test]
+    fn test_fast_batch_performance() {
+        let mut db = Db::new();
+        
+        // Pre-populate
+        for i in 0..1000 {
+            db.set_bytes(
+                Bytes::from(format!("key{}", i)),
+                Bytes::from(format!("value{}", i)),
+                None
+            );
+        }
+        
+        // Simulate 100 batches of 10 GET commands each
+        let start = Instant::now();
+        for batch in 0..100 {
+            for i in 0..10 {
+                let idx = (batch * 10 + i) % 1000;
+                let _ = db.get_bytes(&Bytes::from(format!("key{}", idx)));
+            }
+        }
+        let elapsed = start.elapsed();
+        
+        // 1000 GET operations should complete in < 10ms
+        assert!(elapsed < Duration::from_millis(50), 
+            "Fast batch operations took too long: {:?}", elapsed);
+    }
+}

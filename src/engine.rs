@@ -192,24 +192,78 @@ impl Engine {
     async fn handle_command_batch(&mut self, batch: BatchCommandRequest) {
         let BatchCommandRequest { client_id, commands, response_tx, pub_sub_tx } = batch;
         
-        let mut responses = Vec::with_capacity(commands.len());
+        // Fast path: check if all commands are simple GET/SET/INCR
+        // These can be executed synchronously without async overhead
+        let all_simple = commands.iter().all(|cmd| {
+            matches!(cmd, RedisCommand::Get { .. } | RedisCommand::Set { .. } | RedisCommand::Incr { .. })
+        });
         
-        for command in commands {
-            // Execute each command and collect response
-            // Note: Blocking commands (BLPOP, XREAD with BLOCK) should not be in batches
-            // They should be handled separately by the connection handler
-            let result = self.execute_command_immediate(
-                client_id, 
-                command, 
-                None,  // replica_tx not needed for batch mode
-                pub_sub_tx.clone(), 
-                false  // from_replica
-            ).await;
-            responses.push(result);
-        }
+        let responses = if all_simple {
+            // Fast synchronous path for GET/SET batches
+            self.execute_simple_batch(&commands)
+        } else {
+            // Slow path for complex commands
+            let mut responses = Vec::with_capacity(commands.len());
+            for command in commands {
+                let result = self.execute_command_immediate(
+                    client_id, 
+                    command, 
+                    None,
+                    pub_sub_tx.clone(), 
+                    false
+                ).await;
+                responses.push(result);
+            }
+            responses
+        };
         
         // Send all responses in single message
         let _ = response_tx.send(responses);
+    }
+    
+    /// Fast synchronous execution for simple GET/SET/INCR commands
+    /// Avoids async overhead entirely
+    #[inline]
+    fn execute_simple_batch(&mut self, commands: &[RedisCommand]) -> Vec<Result<Value>> {
+        let mut responses = Vec::with_capacity(commands.len());
+        
+        for command in commands {
+            let result = match command {
+                RedisCommand::Get { key } => {
+                    match self.db.get_bytes(key) {
+                        Some(value) => Ok(Value::BulkString(value)),
+                        None => Ok(Value::Null),
+                    }
+                }
+                RedisCommand::Set { key, value, px } => {
+                    self.db.set_bytes(key.clone(), value.clone(), *px);
+                    Ok(Value::SimpleString(Bytes::from("OK")))
+                }
+                RedisCommand::Incr { key } => {
+                    // Fast path INCR
+                    let current_val = match self.db.get_bytes(key) {
+                        Some(bytes) => {
+                            match std::str::from_utf8(&bytes).ok().and_then(|s| s.parse::<i64>().ok()) {
+                                Some(n) => n,
+                                None => {
+                                    responses.push(Ok(Value::Error(Bytes::from("ERR value is not an integer or out of range"))));
+                                    continue;
+                                }
+                            }
+                        }
+                        None => 0,
+                    };
+                    let new_val = current_val + 1;
+                    let key_str = String::from_utf8_lossy(key).to_string();
+                    self.db.set(key_str, Bytes::from(new_val.to_string()), None);
+                    Ok(Value::Integer(new_val))
+                }
+                _ => unreachable!("Only GET/SET/INCR should be in simple batch"),
+            };
+            responses.push(result);
+        }
+        
+        responses
     }
     
     fn complete_read(&mut self, idx: usize) {

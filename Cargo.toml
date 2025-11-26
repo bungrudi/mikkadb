@@ -11,6 +11,7 @@ hex = "0.4.3"
 async-trait = "0.1"
 socket2 = "0.5"
 dashmap = "6.0"
+parking_lot = "0.12"
 pprof = { version = "0.13", features = ["flamegraph", "criterion"], optional = true }
 
 [features]
