@@ -93,8 +93,261 @@ impl Engine {
             pub_sub_subs: HashMap::new(),
         }
     }
+    
+    /// Get shard_id for debugging
+    pub fn shard_id(&self) -> usize {
+        self.shard_id
+    }
+    
+    /// Process a single replication request from peer
+    /// Returns true if more work is available
+    pub async fn process_replication(&mut self) -> bool {
+        match self.rx.try_recv() {
+            Ok(req) => {
+                match req {
+                    EngineRequest::Single(cmd) => {
+                        self.handle_command(cmd).await;
+                    }
+                    EngineRequest::Batch(batch) => {
+                        self.handle_command_batch(batch).await;
+                    }
+                }
+                true
+            }
+            Err(mpsc::error::TryRecvError::Empty) => false,
+            Err(mpsc::error::TryRecvError::Disconnected) => false,
+        }
+    }
+    
+    /// Process pending timeouts - called from event loop
+    pub fn process_timeouts(&mut self) {
+        // Process wait timeouts
+        while let Ok(wait_idx) = self.timeout_rx.try_recv() {
+            self.complete_wait(wait_idx);
+        }
+        // Process read timeouts
+        while let Ok(read_idx) = self.read_timeout_rx.try_recv() {
+            self.complete_read(read_idx);
+        }
+    }
+    
+    /// Handle client disconnect - cleanup state
+    pub fn handle_disconnect(&mut self, client_id: u64) {
+        self.transaction_state.remove(&client_id);
+        for subs in self.pub_sub_subs.values_mut() {
+            subs.remove(&client_id);
+        }
+    }
+    
+    /// Execute a batch of commands directly (no channel)
+    /// Returns results for all commands
+    pub async fn execute_batch_direct(
+        &mut self,
+        client_id: u64,
+        commands: Vec<RedisCommand>,
+        pub_sub_tx: Option<mpsc::Sender<Value>>,
+    ) -> Vec<Result<Value>> {
+        // Fast path: check if all commands are simple GET/SET/INCR
+        let all_simple = commands.iter().all(|cmd| {
+            matches!(cmd, RedisCommand::Get { .. } | RedisCommand::Set { .. } | RedisCommand::Incr { .. })
+        });
+        
+        if all_simple {
+            self.execute_simple_batch(&commands)
+        } else {
+            let mut responses = Vec::with_capacity(commands.len());
+            for command in commands {
+                let result = self.execute_command_immediate(
+                    client_id,
+                    command,
+                    None,
+                    pub_sub_tx.clone(),
+                    false
+                ).await;
+                responses.push(result);
+            }
+            responses
+        }
+    }
+    
+    /// Execute a single command directly (no channel) - handles blocking commands
+    /// Returns Ok(Some(value)) for immediate response, Ok(None) if response will be sent via oneshot
+    pub async fn execute_command_direct(
+        &mut self,
+        client_id: u64,
+        command: RedisCommand,
+        pub_sub_tx: Option<mpsc::Sender<Value>>,
+        response_tx: Option<oneshot::Sender<Result<Value>>>,
+    ) -> Option<Result<Value>> {
+        // Handle disconnect
+        if let RedisCommand::InternalDisconnect = &command {
+            self.handle_disconnect(client_id);
+            return Some(Ok(Value::SimpleString(Bytes::from("OK"))));
+        }
+        
+        // Check subscription state
+        let is_subscribed = self.pub_sub_subs.values().any(|subs| subs.contains_key(&client_id));
+        if is_subscribed {
+            match &command {
+                RedisCommand::Subscribe { .. } | 
+                RedisCommand::Unsubscribe { .. } => {},
+                RedisCommand::Ping { message } => {
+                    let resp = match message {
+                        Some(msg) => Value::Array(vec![
+                            Value::BulkString(Bytes::from("pong")),
+                            Value::BulkString(msg.clone().into()),
+                        ]),
+                        None => Value::Array(vec![
+                            Value::BulkString(Bytes::from("pong")),
+                            Value::BulkString(Bytes::from("")),
+                        ]),
+                    };
+                    return Some(Ok(resp));
+                },
+                _ => {
+                    return Some(Ok(Value::Error(Bytes::from(format!("ERR Can't execute '{}': only (P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT allowed in this context", command.name())))));
+                }
+            }
+        }
+        
+        // Transaction handling
+        match &command {
+            RedisCommand::Multi => {
+                if self.transaction_state.contains_key(&client_id) {
+                    return Some(Ok(Value::Error(Bytes::from("ERR MULTI calls can not be nested"))));
+                } else {
+                    self.transaction_state.insert(client_id, Vec::new());
+                    return Some(Ok(Value::SimpleString(Bytes::from("OK"))));
+                }
+            }
+            RedisCommand::Discard => {
+                if self.transaction_state.remove(&client_id).is_some() {
+                    return Some(Ok(Value::SimpleString(Bytes::from("OK"))));
+                } else {
+                    return Some(Ok(Value::Error(Bytes::from("ERR DISCARD without MULTI"))));
+                }
+            }
+            RedisCommand::Exec => {
+                if let Some(commands) = self.transaction_state.remove(&client_id) {
+                    if commands.is_empty() {
+                        return Some(Ok(Value::Array(vec![])));
+                    }
+                    
+                    let mut results = Vec::new();
+                    for cmd in commands {
+                        match self.execute_command_immediate(client_id, cmd, None, None, false).await {
+                            Ok(val) => results.push(val),
+                            Err(e) => results.push(Value::Error(Bytes::from(e.to_string()))),
+                        }
+                    }
+                    return Some(Ok(Value::Array(results)));
+                } else {
+                    return Some(Ok(Value::Error(Bytes::from("ERR EXEC without MULTI"))));
+                }
+            }
+            _ => {}
+        }
+        
+        // If in transaction, queue command
+        if let Some(queue) = self.transaction_state.get_mut(&client_id) {
+            match &command {
+                RedisCommand::Subscribe { .. } | RedisCommand::Unsubscribe { .. } => {
+                    return Some(Ok(Value::Error(Bytes::from("ERR subscribe inside MULTI is not allowed"))));
+                }
+                _ => {}
+            }
+            queue.push(command);
+            return Some(Ok(Value::SimpleString(Bytes::from("QUEUED"))));
+        }
+        
+        // Handle blocking commands
+        match command {
+            RedisCommand::Wait { num_replicas, timeout } => {
+                if let Some(tx) = response_tx {
+                    self.handle_wait(num_replicas, timeout, tx).await;
+                    return None; // Response sent via oneshot
+                }
+                return Some(Ok(Value::Error(Bytes::from("ERR WAIT requires response channel"))));
+            }
+            RedisCommand::BLPop { keys, timeout } => {
+                if let Some(tx) = response_tx {
+                    self.handle_blpop(keys, timeout, tx).await;
+                    return None; // Response sent via oneshot
+                }
+                return Some(Ok(Value::Error(Bytes::from("ERR BLPOP requires response channel"))));
+            }
+            other => {
+                // Check for blocking XREAD
+                if let RedisCommand::XRead { block: Some(block_ms), streams } = &other {
+                    // First check if data is available immediately
+                    let mut has_results = false;
+                    let mut result_streams = Vec::new();
+                    let mut resolved_streams = Vec::new();
+                    
+                    for (key, id_str) in streams {
+                        let start_id = if id_str == "$" {
+                            self.db.get_last_stream_id(key).unwrap_or((0, 0))
+                        } else {
+                            let parts: Vec<&str> = id_str.split('-').collect();
+                            if parts.len() != 2 {
+                                if id_str == "0" {
+                                    (0, 0)
+                                } else {
+                                    return Some(Ok(Value::Error(Bytes::from("ERR Invalid stream ID"))));
+                                }
+                            } else {
+                                let ms = parts[0].parse::<u64>().unwrap_or(0);
+                                let seq = parts[1].parse::<u64>().unwrap_or(0);
+                                (ms, seq)
+                            }
+                        };
+                        resolved_streams.push((key.clone(), start_id));
+                    }
+                    
+                    for (key, start_id) in &resolved_streams {
+                        if let Some(entries) = self.db.read_stream(key, *start_id) {
+                            has_results = true;
+                            let mut stream_entries = Vec::new();
+                            for entry in entries {
+                                let id_str = format!("{}-{}", entry.id.0, entry.id.1);
+                                let mut fields_val = Vec::new();
+                                for (k, v) in entry.fields {
+                                    fields_val.push(Value::BulkString(k.into()));
+                                    fields_val.push(Value::BulkString(v.into()));
+                                }
+                                stream_entries.push(Value::Array(vec![
+                                    Value::BulkString(id_str.into()),
+                                    Value::Array(fields_val)
+                                ]));
+                            }
+                            result_streams.push(Value::Array(vec![
+                                Value::BulkString(key.clone().into()),
+                                Value::Array(stream_entries)
+                            ]));
+                        }
+                    }
+                    
+                    if has_results {
+                        return Some(Ok(Value::Array(result_streams)));
+                    }
+                    
+                    // Block if no results
+                    if let Some(tx) = response_tx {
+                        self.handle_read_block(*block_ms, resolved_streams, tx).await;
+                        return None;
+                    }
+                    return Some(Ok(Value::Error(Bytes::from("ERR blocking XREAD requires response channel"))));
+                }
+                
+                // Regular command execution
+                let result = self.execute_command_immediate(client_id, other, None, pub_sub_tx, false).await;
+                Some(result)
+            }
+        }
+    }
 
-    async fn handle_blpop(&mut self, keys: Vec<String>, timeout: f64, response_tx: oneshot::Sender<Result<Value>>) {
+    /// Handle BLPOP - public for direct access
+    pub async fn handle_blpop(&mut self, keys: Vec<String>, timeout: f64, response_tx: oneshot::Sender<Result<Value>>) {
         // 1. Try to pop immediately from any of the keys
         for key in &keys {
             match self.db.lpop(key, None) {
@@ -499,7 +752,8 @@ impl Engine {
         }
     }
     
-    async fn handle_read_block(&mut self, block_ms: u64, streams: Vec<(String, (u64, u64))>, response_tx: oneshot::Sender<Result<Value>>) {
+    /// Handle blocking XREAD - public for direct access
+    pub async fn handle_read_block(&mut self, block_ms: u64, streams: Vec<(String, (u64, u64))>, response_tx: oneshot::Sender<Result<Value>>) {
         let read_index = self.pending_reads.len();
         
         // If block_ms is 0, it means block indefinitely.
@@ -519,7 +773,8 @@ impl Engine {
         }));
     }
 
-    async fn handle_wait(&mut self, num_replicas: usize, timeout: u64, response_tx: oneshot::Sender<Result<Value>>) {
+    /// Handle WAIT - public for direct access
+    pub async fn handle_wait(&mut self, num_replicas: usize, timeout: u64, response_tx: oneshot::Sender<Result<Value>>) {
         // 1. Count replicas that are already synced up to current offset
         let synced_count = self.replicas.iter()
             .filter(|r| r.offset >= self.replication_offset)
@@ -571,7 +826,8 @@ impl Engine {
         }
     }
 
-    async fn handle_subscribe(&mut self, client_id: u64, channels: Vec<String>, pub_sub_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
+    /// Handle SUBSCRIBE - public for direct access
+    pub async fn handle_subscribe(&mut self, client_id: u64, channels: Vec<String>, pub_sub_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
         if let Some(tx) = pub_sub_tx {
             for channel in &channels {
                 let subs = self.pub_sub_subs.entry(channel.clone()).or_insert(HashMap::new());
@@ -598,7 +854,8 @@ impl Engine {
         }
     }
 
-    async fn handle_unsubscribe(&mut self, client_id: u64, channels: Vec<String>, pub_sub_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
+    /// Handle UNSUBSCRIBE - public for direct access
+    pub async fn handle_unsubscribe(&mut self, client_id: u64, channels: Vec<String>, pub_sub_tx: Option<mpsc::Sender<Value>>) -> Result<Value, anyhow::Error> {
         if let Some(tx) = pub_sub_tx {
             let channels_to_unsub = if channels.is_empty() {
                 let mut all = Vec::new();
@@ -655,7 +912,9 @@ impl Engine {
         Ok(Value::Integer(count))
     }
 
-    async fn execute_command_immediate(&mut self, client_id: u64, command: RedisCommand, resp_tx: Option<mpsc::Sender<Value>>, pub_sub_tx: Option<mpsc::Sender<Value>>, from_replica: bool) -> Result<Value, anyhow::Error> {
+    /// Direct command execution - public for thread-local access
+    /// Used by connection handlers in the same thread (zero-channel path)
+    pub async fn execute_command_immediate(&mut self, client_id: u64, command: RedisCommand, resp_tx: Option<mpsc::Sender<Value>>, pub_sub_tx: Option<mpsc::Sender<Value>>, from_replica: bool) -> Result<Value, anyhow::Error> {
         match command {
             RedisCommand::Ping { message } => {
                 match message {
