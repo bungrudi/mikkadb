@@ -25,7 +25,3 @@ path = "src/lib.rs"
 name = "mikkadb-rust"
 path = "src/main.rs"
 
-[[bin]]
-name = "bench-single-lock"
-path = "src/bin/bench_single_lock.rs"
-

@@ -3,12 +3,12 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::cell::RefCell;
 use std::rc::Rc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use socket2::{Socket, Domain, Type, Protocol};
 use std::net::SocketAddr;
 use crate::config::Config;
-use crate::engine::{Engine, CommandRequest, EngineRequest};
+use crate::engine::{Engine, EngineRequest};
 use crate::command::RedisCommand;
 use crate::db::Db;
 use bytes::Bytes;
@@ -18,9 +18,6 @@ mod db;
 mod config;
 mod command;
 mod engine;
-mod storage;
-mod actor_store;
-mod single_lock_store;
 
 fn main() -> Result<()> {
     let config = Arc::new(Config::parse());
@@ -265,110 +262,4 @@ async fn handle_connection(
         let mut engine = engine.borrow_mut();
         engine.handle_disconnect(client_id);
     }
-}
-
-
-async fn perform_handshake(master_host: String, master_port: String, listening_port: String, tx: mpsc::Sender<EngineRequest>) -> Result<()> {
-    use tokio::net::TcpStream;
-    use crate::resp::{RespHandler, Value};
-
-    let stream = TcpStream::connect(format!("{}:{}", master_host, master_port)).await?;
-    let mut handler = RespHandler::new(stream);
-    
-    // 1. PING
-    handler.write_value(Value::Array(vec![Value::BulkString(Bytes::from("PING"))])).await?;
-    let _ = handler.read_value().await?; // PONG
-
-    // 2. REPLCONF listening-port
-    handler.write_value(Value::Array(vec![
-        Value::BulkString(Bytes::from("REPLCONF")),
-        Value::BulkString(Bytes::from("listening-port")),
-        Value::BulkString(Bytes::from(listening_port)),
-    ])).await?;
-    let _ = handler.read_value().await?; // OK
-
-    // 3. REPLCONF capa psync2
-    handler.write_value(Value::Array(vec![
-        Value::BulkString(Bytes::from("REPLCONF")),
-        Value::BulkString(Bytes::from("capa")),
-        Value::BulkString(Bytes::from("psync2")),
-    ])).await?;
-    let _ = handler.read_value().await?; // OK
-
-    // 4. PSYNC ? -1
-    handler.write_value(Value::Array(vec![
-        Value::BulkString(Bytes::from("PSYNC")),
-        Value::BulkString(Bytes::from("?")),
-        Value::BulkString(Bytes::from("-1")),
-    ])).await?;
-    
-    // Expect FULLRESYNC
-    let _ = handler.read_value().await?; 
-    
-    // Expect RDB file
-    let _ = handler.read_rdb_file().await?;
-
-    let mut offset = 0;
-
-    // Process commands from master
-    loop {
-        let value = handler.read_value().await?;
-        match value {
-            Some(v) => {
-                let len = v.clone().serialize_bytes().len();
-                
-                eprintln!("[repl] received from master: {:?}", v);
-                match RedisCommand::from_resp(v) {
-                    Ok(command) => {
-                        eprintln!("[repl] parsed replication command: {:?}", command);
-                        if let RedisCommand::ReplConf { subcommand, .. } = &command {
-                            if subcommand.to_uppercase() == "GETACK" {
-                                let ack = Value::Array(vec![
-                                    Value::BulkString(Bytes::from("REPLCONF")),
-                                    Value::BulkString(Bytes::from("ACK")),
-                                    Value::BulkString(Bytes::from(offset.to_string())),
-                                ]);
-                                eprintln!("[repl] sending ACK {} to master", offset);
-                                handler.write_value(ack).await?;
-                                offset += len; // Update offset after ACK
-                                continue;
-                            }
-                        }
-                        
-                        offset += len; // Update offset for non-GETACK commands
-                        
-                        // Execute command against Engine
-                        let (resp_tx, resp_rx) = oneshot::channel();
-                        let req = CommandRequest {
-                            client_id: 0, // Internal/Replica ID
-                            command,
-                            response_tx: resp_tx,
-                            replica_tx: None, // We are the replica, we don't propagate further
-                            pub_sub_tx: None,
-                            from_replica: false,
-                        };
-
-                        if let Err(_) = tx.send(EngineRequest::Single(req)).await {
-                            eprintln!("[repl] failed to send command to engine");
-                            break;
-                        }
-
-                        // Wait for execution to finish
-                        if let Err(_) = resp_rx.await {
-                            eprintln!("[repl] engine dropped response channel");
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[repl] failed to parse replication command: {}", e);
-                    }
-                }
-            }
-            None => {
-                eprintln!("[repl] master closed replication connection");
-                break;
-            }
-        }
-    }
-    Ok(())
 }

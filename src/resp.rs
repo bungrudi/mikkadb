@@ -417,43 +417,6 @@ impl RespHandler {
         Ok(())
     }
 
-    pub async fn read_rdb_file(&mut self) -> Result<Vec<u8>> {
-        loop {
-            if let Ok((data, consumed)) = parse_rdb_file(&self.buffer) {
-                let _ = self.buffer.split_to(consumed);
-                return Ok(data);
-            }
-
-            let bytes_read = self.reader.read_buf(&mut self.buffer).await?;
-            if bytes_read == 0 {
-                if self.buffer.is_empty() {
-                    return Err(Error::msg("Connection closed abruptly"));
-                } else {
-                    return Err(Error::msg("Connection closed abruptly"));
-                }
-            }
-        }
-    }
-}
-
-fn parse_rdb_file(buffer: &[u8]) -> Result<(Vec<u8>, usize)> {
-    if buffer.is_empty() {
-        return Err(Error::msg("Empty buffer"));
-    }
-    if buffer[0] != b'$' {
-        return Err(Error::msg("Expected $ for RDB file"));
-    }
-    
-    let (len, header_len) = parse_integer(buffer)?;
-    let len = len as usize;
-    let total_len = header_len + len;
-    
-    if buffer.len() >= total_len {
-        let data = buffer[header_len..total_len].to_vec();
-        return Ok((data, total_len));
-    }
-    
-    Err(Error::msg("Incomplete RDB file"))
 }
 
 fn parse_message(buffer: &[u8]) -> Result<(Value, usize)> {
