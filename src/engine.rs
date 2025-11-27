@@ -961,6 +961,404 @@ impl Engine {
                 let t = self.db.key_type(&key);
                 Ok(Value::SimpleString(Bytes::from(t)))
             }
+            RedisCommand::Del { keys } => {
+                let mut deleted = 0i64;
+                for key in &keys {
+                    if self.db.del_bytes(key) {
+                        deleted += 1;
+                    }
+                }
+
+                if !from_replica && deleted > 0 {
+                    // Broadcast to peers
+                    self.broadcast_to_peers(RedisCommand::Del { keys: keys.clone() }).await;
+                }
+
+                Ok(Value::Integer(deleted))
+            }
+            RedisCommand::Exists { keys } => {
+                let mut count = 0i64;
+                for key in &keys {
+                    if self.db.exists_bytes(key) {
+                        count += 1;
+                    }
+                }
+                Ok(Value::Integer(count))
+            }
+            RedisCommand::Expire { key, seconds } => {
+                let key_str = String::from_utf8_lossy(&key).to_string();
+                let result = self.db.expire(&key_str, seconds);
+                Ok(Value::Integer(result))
+            }
+            RedisCommand::PExpire { key, milliseconds } => {
+                let key_str = String::from_utf8_lossy(&key).to_string();
+                let result = self.db.pexpire(&key_str, milliseconds);
+                Ok(Value::Integer(result))
+            }
+            RedisCommand::Ttl { key } => {
+                let key_str = String::from_utf8_lossy(&key).to_string();
+                let result = self.db.ttl(&key_str);
+                Ok(Value::Integer(result))
+            }
+            RedisCommand::PTtl { key } => {
+                let key_str = String::from_utf8_lossy(&key).to_string();
+                let result = self.db.pttl(&key_str);
+                Ok(Value::Integer(result))
+            }
+            RedisCommand::Persist { key } => {
+                let key_str = String::from_utf8_lossy(&key).to_string();
+                let result = self.db.persist(&key_str);
+                Ok(Value::Integer(result))
+            }
+            RedisCommand::Decr { key } => {
+                match self.db.incrby_bytes(&key, -1) {
+                    Ok(new_val) => {
+                        if !from_replica {
+                            // Broadcast SET for convergence
+                            self.broadcast_to_peers(RedisCommand::Set {
+                                key: key.clone(),
+                                value: Bytes::from(new_val.to_string()),
+                                px: None
+                            }).await;
+                        }
+                        Ok(Value::Integer(new_val))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::DecrBy { key, decrement } => {
+                match self.db.incrby_bytes(&key, -decrement) {
+                    Ok(new_val) => {
+                        if !from_replica {
+                            self.broadcast_to_peers(RedisCommand::Set {
+                                key: key.clone(),
+                                value: Bytes::from(new_val.to_string()),
+                                px: None
+                            }).await;
+                        }
+                        Ok(Value::Integer(new_val))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::IncrBy { key, increment } => {
+                match self.db.incrby_bytes(&key, increment) {
+                    Ok(new_val) => {
+                        if !from_replica {
+                            self.broadcast_to_peers(RedisCommand::Set {
+                                key: key.clone(),
+                                value: Bytes::from(new_val.to_string()),
+                                px: None
+                            }).await;
+                        }
+                        Ok(Value::Integer(new_val))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::Append { key, value } => {
+                match self.db.append_bytes(&key, &value) {
+                    Ok(len) => {
+                        if !from_replica {
+                            // We need to get the full value to broadcast
+                            // For simplicity, broadcast the append operation
+                            // Peers will handle it correctly
+                        }
+                        Ok(Value::Integer(len as i64))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::StrLen { key } => {
+                match self.db.strlen_bytes(&key) {
+                    Ok(len) => Ok(Value::Integer(len as i64)),
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::SetNx { key, value } => {
+                let was_set = self.db.setnx_bytes(&key, value.clone());
+                if was_set && !from_replica {
+                    self.broadcast_to_peers(RedisCommand::Set {
+                        key: key.clone(),
+                        value: value.clone(),
+                        px: None
+                    }).await;
+                }
+                Ok(Value::Integer(if was_set { 1 } else { 0 }))
+            }
+            RedisCommand::SetEx { key, seconds, value } => {
+                if seconds <= 0 {
+                    return Ok(Value::Error(Bytes::from("ERR invalid expire time in 'setex' command")));
+                }
+                let px = Some((seconds * 1000) as u64);
+                self.db.set_bytes(key.clone(), value.clone(), px);
+                if !from_replica {
+                    self.broadcast_to_peers(RedisCommand::Set {
+                        key: key.clone(),
+                        value: value.clone(),
+                        px
+                    }).await;
+                }
+                Ok(Value::SimpleString(Bytes::from("OK")))
+            }
+            RedisCommand::Rename { key, newkey } => {
+                match self.db.rename_bytes(&key, &newkey) {
+                    Ok(()) => {
+                        if !from_replica {
+                            self.broadcast_to_peers(RedisCommand::Rename {
+                                key: key.clone(),
+                                newkey: newkey.clone()
+                            }).await;
+                        }
+                        Ok(Value::SimpleString(Bytes::from("OK")))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            // Hash commands
+            RedisCommand::HSet { key, fields } => {
+                match self.db.hset_bytes(&key, fields.clone()) {
+                    Ok(added) => {
+                        if !from_replica {
+                            self.broadcast_to_peers(RedisCommand::HSet {
+                                key: key.clone(),
+                                fields: fields.clone()
+                            }).await;
+                        }
+                        Ok(Value::Integer(added as i64))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HGet { key, field } => {
+                match self.db.hget_bytes(&key, &field) {
+                    Ok(Some(value)) => Ok(Value::BulkString(value)),
+                    Ok(None) => Ok(Value::Null),
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HMGet { key, fields } => {
+                match self.db.hmget_bytes(&key, &fields) {
+                    Ok(values) => {
+                        let resp: Vec<Value> = values.into_iter()
+                            .map(|v| match v {
+                                Some(b) => Value::BulkString(b),
+                                None => Value::Null,
+                            })
+                            .collect();
+                        Ok(Value::Array(resp))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HGetAll { key } => {
+                match self.db.hgetall_bytes(&key) {
+                    Ok(pairs) => {
+                        let mut resp = Vec::new();
+                        for (field, value) in pairs {
+                            resp.push(Value::BulkString(Bytes::from(field)));
+                            resp.push(Value::BulkString(value));
+                        }
+                        Ok(Value::Array(resp))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HDel { key, fields } => {
+                match self.db.hdel_bytes(&key, &fields) {
+                    Ok(deleted) => {
+                        if !from_replica && deleted > 0 {
+                            self.broadcast_to_peers(RedisCommand::HDel {
+                                key: key.clone(),
+                                fields: fields.clone()
+                            }).await;
+                        }
+                        Ok(Value::Integer(deleted as i64))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HExists { key, field } => {
+                match self.db.hexists_bytes(&key, &field) {
+                    Ok(exists) => Ok(Value::Integer(if exists { 1 } else { 0 })),
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HKeys { key } => {
+                match self.db.hkeys_bytes(&key) {
+                    Ok(keys) => {
+                        let resp: Vec<Value> = keys.into_iter()
+                            .map(|k| Value::BulkString(Bytes::from(k)))
+                            .collect();
+                        Ok(Value::Array(resp))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HVals { key } => {
+                match self.db.hvals_bytes(&key) {
+                    Ok(vals) => {
+                        let resp: Vec<Value> = vals.into_iter()
+                            .map(|v| Value::BulkString(v))
+                            .collect();
+                        Ok(Value::Array(resp))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HLen { key } => {
+                match self.db.hlen_bytes(&key) {
+                    Ok(len) => Ok(Value::Integer(len as i64)),
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HIncrBy { key, field, increment } => {
+                match self.db.hincrby_bytes(&key, &field, increment) {
+                    Ok(new_val) => {
+                        if !from_replica {
+                            // Broadcast the HINCRBY or a SET equivalent
+                            self.broadcast_to_peers(RedisCommand::HIncrBy {
+                                key: key.clone(),
+                                field: field.clone(),
+                                increment
+                            }).await;
+                        }
+                        Ok(Value::Integer(new_val))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::HSetNx { key, field, value } => {
+                match self.db.hsetnx_bytes(&key, &field, value.clone()) {
+                    Ok(result) => {
+                        if !from_replica && result == 1 {
+                            self.broadcast_to_peers(RedisCommand::HSet {
+                                key: key.clone(),
+                                fields: vec![(field.clone(), value.clone())]
+                            }).await;
+                        }
+                        Ok(Value::Integer(result))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            // Set commands
+            RedisCommand::SAdd { key, members } => {
+                match self.db.sadd_bytes(&key, members.clone()) {
+                    Ok(count) => {
+                        if !from_replica && count > 0 {
+                            self.broadcast_to_peers(RedisCommand::SAdd {
+                                key: key.clone(),
+                                members: members.clone()
+                            }).await;
+                        }
+                        Ok(Value::Integer(count as i64))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::SRem { key, members } => {
+                match self.db.srem_bytes(&key, &members) {
+                    Ok(count) => {
+                        if !from_replica && count > 0 {
+                            self.broadcast_to_peers(RedisCommand::SRem {
+                                key: key.clone(),
+                                members: members.clone()
+                            }).await;
+                        }
+                        Ok(Value::Integer(count as i64))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::SMembers { key } => {
+                match self.db.smembers_bytes(&key) {
+                    Ok(members) => {
+                        let values: Vec<Value> = members.into_iter()
+                            .map(|m| Value::BulkString(m))
+                            .collect();
+                        Ok(Value::Array(values))
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::SIsMember { key, member } => {
+                match self.db.sismember_bytes(&key, &member) {
+                    Ok(exists) => Ok(Value::Integer(if exists { 1 } else { 0 })),
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::SCard { key } => {
+                match self.db.scard_bytes(&key) {
+                    Ok(count) => Ok(Value::Integer(count as i64)),
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::SPop { key, count } => {
+                match self.db.spop_bytes(&key, count) {
+                    Ok(members) => {
+                        if !from_replica && !members.is_empty() {
+                            // Broadcast removal
+                            self.broadcast_to_peers(RedisCommand::SRem {
+                                key: key.clone(),
+                                members: members.clone()
+                            }).await;
+                        }
+                        if count.is_none() && members.len() == 1 {
+                            // Single pop returns bulk string
+                            Ok(Value::BulkString(members.into_iter().next().unwrap()))
+                        } else if count.is_none() && members.is_empty() {
+                            Ok(Value::Null)
+                        } else {
+                            // Multiple pop returns array
+                            let values: Vec<Value> = members.into_iter()
+                                .map(|m| Value::BulkString(m))
+                                .collect();
+                            Ok(Value::Array(values))
+                        }
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::SRandMember { key, count } => {
+                match self.db.srandmember_bytes(&key, count) {
+                    Ok(members) => {
+                        if count.is_none() && members.len() == 1 {
+                            // No count returns bulk string
+                            Ok(Value::BulkString(members.into_iter().next().unwrap()))
+                        } else if count.is_none() && members.is_empty() {
+                            Ok(Value::Null)
+                        } else {
+                            // With count returns array
+                            let values: Vec<Value> = members.into_iter()
+                                .map(|m| Value::BulkString(m))
+                                .collect();
+                            Ok(Value::Array(values))
+                        }
+                    }
+                    Err(e) => Ok(Value::Error(Bytes::from(e))),
+                }
+            }
+            RedisCommand::MGet { keys } => {
+                let results = self.db.mget_bytes(&keys);
+                let values: Vec<Value> = results.into_iter()
+                    .map(|opt| match opt {
+                        Some(v) => Value::BulkString(v),
+                        None => Value::Null,
+                    })
+                    .collect();
+                Ok(Value::Array(values))
+            }
+            RedisCommand::MSet { pairs } => {
+                self.db.mset_bytes(&pairs);
+
+                // Broadcast to peers for replication
+                if !from_replica {
+                    self.broadcast_to_peers(RedisCommand::MSet { pairs: pairs.clone() }).await;
+                }
+
+                Ok(Value::SimpleString(Bytes::from("OK")))
+            }
             RedisCommand::Set { key, value, px } => {
                 // Use set_bytes() for zero-copy key handling
                 self.db.set_bytes(key.clone(), value.clone(), px);

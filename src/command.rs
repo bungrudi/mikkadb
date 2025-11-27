@@ -48,6 +48,76 @@ pub enum RedisCommand {
     ZScore { key: String, member: String },
     ZRank { key: String, member: String },
     ZRem { key: String, members: Vec<String> },
+    /// DEL command - delete one or more keys
+    Del { keys: Vec<Bytes> },
+    /// EXISTS command - check if one or more keys exist
+    Exists { keys: Vec<Bytes> },
+    /// EXPIRE command - set key expiration in seconds
+    Expire { key: Bytes, seconds: i64 },
+    /// PEXPIRE command - set key expiration in milliseconds
+    PExpire { key: Bytes, milliseconds: i64 },
+    /// TTL command - get key time-to-live in seconds
+    Ttl { key: Bytes },
+    /// PTTL command - get key time-to-live in milliseconds
+    PTtl { key: Bytes },
+    /// PERSIST command - remove expiration from key
+    Persist { key: Bytes },
+    /// DECR command - decrement integer value by 1
+    Decr { key: Bytes },
+    /// DECRBY command - decrement integer value by specified amount
+    DecrBy { key: Bytes, decrement: i64 },
+    /// INCRBY command - increment integer value by specified amount
+    IncrBy { key: Bytes, increment: i64 },
+    /// APPEND command - append value to string
+    Append { key: Bytes, value: Bytes },
+    /// STRLEN command - get string length
+    StrLen { key: Bytes },
+    /// SETNX command - set if not exists
+    SetNx { key: Bytes, value: Bytes },
+    /// SETEX command - set with expiration in seconds
+    SetEx { key: Bytes, seconds: i64, value: Bytes },
+    /// RENAME command - rename a key
+    Rename { key: Bytes, newkey: Bytes },
+    /// HSET command - set hash fields
+    HSet { key: Bytes, fields: Vec<(Bytes, Bytes)> },
+    /// HGET command - get hash field
+    HGet { key: Bytes, field: Bytes },
+    /// HMGET command - get multiple hash fields
+    HMGet { key: Bytes, fields: Vec<Bytes> },
+    /// HGETALL command - get all fields and values
+    HGetAll { key: Bytes },
+    /// HDEL command - delete hash fields
+    HDel { key: Bytes, fields: Vec<Bytes> },
+    /// HEXISTS command - check if hash field exists
+    HExists { key: Bytes, field: Bytes },
+    /// HKEYS command - get all hash field names
+    HKeys { key: Bytes },
+    /// HVALS command - get all hash field values
+    HVals { key: Bytes },
+    /// HLEN command - get number of hash fields
+    HLen { key: Bytes },
+    /// HINCRBY command - increment hash field by integer
+    HIncrBy { key: Bytes, field: Bytes, increment: i64 },
+    /// HSETNX command - set hash field only if not exists
+    HSetNx { key: Bytes, field: Bytes, value: Bytes },
+    /// SADD command - add members to set
+    SAdd { key: Bytes, members: Vec<Bytes> },
+    /// SREM command - remove members from set
+    SRem { key: Bytes, members: Vec<Bytes> },
+    /// SMEMBERS command - get all set members
+    SMembers { key: Bytes },
+    /// SISMEMBER command - check if member exists in set
+    SIsMember { key: Bytes, member: Bytes },
+    /// SCARD command - get set cardinality (size)
+    SCard { key: Bytes },
+    /// SPOP command - remove and return random members
+    SPop { key: Bytes, count: Option<usize> },
+    /// SRANDMEMBER command - get random members without removing
+    SRandMember { key: Bytes, count: Option<i64> },
+    /// MGET command - get multiple keys at once
+    MGet { keys: Vec<Bytes> },
+    /// MSET command - set multiple key-value pairs at once
+    MSet { pairs: Vec<(Bytes, Bytes)> },
     Error { message: String },
     None,
 }
@@ -608,6 +678,506 @@ impl RedisCommand {
                         }
                         Ok(RedisCommand::ZRem { key, members })
                     }
+                    "DEL" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'del' command"));
+                        }
+                        let mut keys = Vec::new();
+                        for i in 1..items.len() {
+                            match items[i].clone_bytes() {
+                                Some(b) => keys.push(b),
+                                None => return Err(Error::msg("Invalid key for DEL")),
+                            }
+                        }
+                        Ok(RedisCommand::Del { keys })
+                    }
+                    "EXISTS" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'exists' command"));
+                        }
+                        let mut keys = Vec::new();
+                        for i in 1..items.len() {
+                            match items[i].clone_bytes() {
+                                Some(b) => keys.push(b),
+                                None => return Err(Error::msg("Invalid key for EXISTS")),
+                            }
+                        }
+                        Ok(RedisCommand::Exists { keys })
+                    }
+                    "EXPIRE" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'expire' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for EXPIRE")),
+                        };
+                        let seconds = match items[2].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid seconds for EXPIRE")),
+                        };
+                        Ok(RedisCommand::Expire { key, seconds })
+                    }
+                    "PEXPIRE" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'pexpire' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for PEXPIRE")),
+                        };
+                        let milliseconds = match items[2].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid milliseconds for PEXPIRE")),
+                        };
+                        Ok(RedisCommand::PExpire { key, milliseconds })
+                    }
+                    "TTL" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'ttl' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for TTL")),
+                        };
+                        Ok(RedisCommand::Ttl { key })
+                    }
+                    "PTTL" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'pttl' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for PTTL")),
+                        };
+                        Ok(RedisCommand::PTtl { key })
+                    }
+                    "PERSIST" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'persist' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for PERSIST")),
+                        };
+                        Ok(RedisCommand::Persist { key })
+                    }
+                    "DECR" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'decr' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for DECR")),
+                        };
+                        Ok(RedisCommand::Decr { key })
+                    }
+                    "DECRBY" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'decrby' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for DECRBY")),
+                        };
+                        let decrement = match items[2].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid decrement for DECRBY")),
+                        };
+                        Ok(RedisCommand::DecrBy { key, decrement })
+                    }
+                    "INCRBY" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'incrby' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for INCRBY")),
+                        };
+                        let increment = match items[2].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid increment for INCRBY")),
+                        };
+                        Ok(RedisCommand::IncrBy { key, increment })
+                    }
+                    "APPEND" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'append' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for APPEND")),
+                        };
+                        let value = match items[2].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid value for APPEND")),
+                        };
+                        Ok(RedisCommand::Append { key, value })
+                    }
+                    "STRLEN" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'strlen' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for STRLEN")),
+                        };
+                        Ok(RedisCommand::StrLen { key })
+                    }
+                    "SETNX" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'setnx' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SETNX")),
+                        };
+                        let value = match items[2].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid value for SETNX")),
+                        };
+                        Ok(RedisCommand::SetNx { key, value })
+                    }
+                    "SETEX" => {
+                        if items.len() < 4 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'setex' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SETEX")),
+                        };
+                        let seconds = match items[2].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid seconds for SETEX")),
+                        };
+                        let value = match items[3].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid value for SETEX")),
+                        };
+                        Ok(RedisCommand::SetEx { key, seconds, value })
+                    }
+                    "RENAME" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'rename' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for RENAME")),
+                        };
+                        let newkey = match items[2].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid newkey for RENAME")),
+                        };
+                        Ok(RedisCommand::Rename { key, newkey })
+                    }
+                    "HSET" => {
+                        if items.len() < 4 || (items.len() - 2) % 2 != 0 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hset' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HSET")),
+                        };
+                        let mut fields = Vec::new();
+                        let mut i = 2;
+                        while i < items.len() {
+                            let field = match items[i].clone_bytes() {
+                                Some(b) => b,
+                                None => return Err(Error::msg("Invalid field for HSET")),
+                            };
+                            let value = match items[i + 1].clone_bytes() {
+                                Some(b) => b,
+                                None => return Err(Error::msg("Invalid value for HSET")),
+                            };
+                            fields.push((field, value));
+                            i += 2;
+                        }
+                        Ok(RedisCommand::HSet { key, fields })
+                    }
+                    "HGET" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hget' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HGET")),
+                        };
+                        let field = match items[2].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid field for HGET")),
+                        };
+                        Ok(RedisCommand::HGet { key, field })
+                    }
+                    "HMGET" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hmget' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HMGET")),
+                        };
+                        let mut fields = Vec::new();
+                        for i in 2..items.len() {
+                            match items[i].clone_bytes() {
+                                Some(b) => fields.push(b),
+                                None => return Err(Error::msg("Invalid field for HMGET")),
+                            }
+                        }
+                        Ok(RedisCommand::HMGet { key, fields })
+                    }
+                    "HGETALL" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hgetall' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HGETALL")),
+                        };
+                        Ok(RedisCommand::HGetAll { key })
+                    }
+                    "HDEL" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hdel' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HDEL")),
+                        };
+                        let mut fields = Vec::new();
+                        for i in 2..items.len() {
+                            match items[i].clone_bytes() {
+                                Some(b) => fields.push(b),
+                                None => return Err(Error::msg("Invalid field for HDEL")),
+                            }
+                        }
+                        Ok(RedisCommand::HDel { key, fields })
+                    }
+                    "HEXISTS" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hexists' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HEXISTS")),
+                        };
+                        let field = match items[2].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid field for HEXISTS")),
+                        };
+                        Ok(RedisCommand::HExists { key, field })
+                    }
+                    "HKEYS" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hkeys' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HKEYS")),
+                        };
+                        Ok(RedisCommand::HKeys { key })
+                    }
+                    "HVALS" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hvals' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HVALS")),
+                        };
+                        Ok(RedisCommand::HVals { key })
+                    }
+                    "HLEN" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hlen' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HLEN")),
+                        };
+                        Ok(RedisCommand::HLen { key })
+                    }
+                    "HINCRBY" => {
+                        if items.len() < 4 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hincrby' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HINCRBY")),
+                        };
+                        let field = match items[2].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid field for HINCRBY")),
+                        };
+                        let increment = match items[3].to_string() {
+                            Ok(s) => s.parse::<i64>()?,
+                            _ => return Err(Error::msg("Invalid increment for HINCRBY")),
+                        };
+                        Ok(RedisCommand::HIncrBy { key, field, increment })
+                    }
+                    "HSETNX" => {
+                        if items.len() < 4 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'hsetnx' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for HSETNX")),
+                        };
+                        let field = match items[2].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid field for HSETNX")),
+                        };
+                        let value = match items[3].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid value for HSETNX")),
+                        };
+                        Ok(RedisCommand::HSetNx { key, field, value })
+                    }
+                    "SADD" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'sadd' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SADD")),
+                        };
+                        let mut members = Vec::with_capacity(items.len() - 2);
+                        for i in 2..items.len() {
+                            match items[i].clone_bytes() {
+                                Some(b) => members.push(b),
+                                None => return Err(Error::msg("Invalid member for SADD")),
+                            }
+                        }
+                        Ok(RedisCommand::SAdd { key, members })
+                    }
+                    "SREM" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'srem' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SREM")),
+                        };
+                        let mut members = Vec::with_capacity(items.len() - 2);
+                        for i in 2..items.len() {
+                            match items[i].clone_bytes() {
+                                Some(b) => members.push(b),
+                                None => return Err(Error::msg("Invalid member for SREM")),
+                            }
+                        }
+                        Ok(RedisCommand::SRem { key, members })
+                    }
+                    "SMEMBERS" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'smembers' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SMEMBERS")),
+                        };
+                        Ok(RedisCommand::SMembers { key })
+                    }
+                    "SISMEMBER" => {
+                        if items.len() < 3 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'sismember' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SISMEMBER")),
+                        };
+                        let member = match items[2].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid member for SISMEMBER")),
+                        };
+                        Ok(RedisCommand::SIsMember { key, member })
+                    }
+                    "SCARD" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'scard' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SCARD")),
+                        };
+                        Ok(RedisCommand::SCard { key })
+                    }
+                    "SPOP" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'spop' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SPOP")),
+                        };
+                        let count = if items.len() > 2 {
+                            match items[2].to_string() {
+                                Ok(s) => match s.parse::<usize>() {
+                                    Ok(c) => Some(c),
+                                    Err(_) => return Err(Error::msg("ERR value is not an integer or out of range")),
+                                },
+                                Err(_) => return Err(Error::msg("Invalid count for SPOP")),
+                            }
+                        } else {
+                            None
+                        };
+                        Ok(RedisCommand::SPop { key, count })
+                    }
+                    "SRANDMEMBER" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'srandmember' command"));
+                        }
+                        let key = match items[1].clone_bytes() {
+                            Some(b) => b,
+                            None => return Err(Error::msg("Invalid key for SRANDMEMBER")),
+                        };
+                        let count = if items.len() > 2 {
+                            match items[2].to_string() {
+                                Ok(s) => match s.parse::<i64>() {
+                                    Ok(c) => Some(c),
+                                    Err(_) => return Err(Error::msg("ERR value is not an integer or out of range")),
+                                },
+                                Err(_) => return Err(Error::msg("Invalid count for SRANDMEMBER")),
+                            }
+                        } else {
+                            None
+                        };
+                        Ok(RedisCommand::SRandMember { key, count })
+                    }
+                    "MGET" => {
+                        if items.len() < 2 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'mget' command"));
+                        }
+                        let mut keys = Vec::with_capacity(items.len() - 1);
+                        for item in items.iter().skip(1) {
+                            match item.clone_bytes() {
+                                Some(b) => keys.push(b),
+                                None => return Err(Error::msg("Invalid key for MGET")),
+                            }
+                        }
+                        Ok(RedisCommand::MGet { keys })
+                    }
+                    "MSET" => {
+                        // MSET key value [key value ...]
+                        // Must have at least 3 items (MSET + key + value)
+                        // And an odd number of arguments after MSET
+                        if items.len() < 3 || (items.len() - 1) % 2 != 0 {
+                            return Err(Error::msg("ERR wrong number of arguments for 'mset' command"));
+                        }
+                        let mut pairs = Vec::with_capacity((items.len() - 1) / 2);
+                        let mut i = 1;
+                        while i < items.len() {
+                            let key = match items[i].clone_bytes() {
+                                Some(b) => b,
+                                None => return Err(Error::msg("Invalid key for MSET")),
+                            };
+                            let value = match items[i + 1].clone_bytes() {
+                                Some(b) => b,
+                                None => return Err(Error::msg("Invalid value for MSET")),
+                            };
+                            pairs.push((key, value));
+                            i += 2;
+                        }
+                        Ok(RedisCommand::MSet { pairs })
+                    }
                     _ => Ok(RedisCommand::Error { message: format!("Unknown command: {}", command_name) }),
                 }
             }
@@ -651,6 +1221,41 @@ impl RedisCommand {
             RedisCommand::ZScore { .. } => "zscore",
             RedisCommand::ZRank { .. } => "zrank",
             RedisCommand::ZRem { .. } => "zrem",
+            RedisCommand::Del { .. } => "del",
+            RedisCommand::Exists { .. } => "exists",
+            RedisCommand::Expire { .. } => "expire",
+            RedisCommand::PExpire { .. } => "pexpire",
+            RedisCommand::Ttl { .. } => "ttl",
+            RedisCommand::PTtl { .. } => "pttl",
+            RedisCommand::Persist { .. } => "persist",
+            RedisCommand::Decr { .. } => "decr",
+            RedisCommand::DecrBy { .. } => "decrby",
+            RedisCommand::IncrBy { .. } => "incrby",
+            RedisCommand::Append { .. } => "append",
+            RedisCommand::StrLen { .. } => "strlen",
+            RedisCommand::SetNx { .. } => "setnx",
+            RedisCommand::SetEx { .. } => "setex",
+            RedisCommand::Rename { .. } => "rename",
+            RedisCommand::HSet { .. } => "hset",
+            RedisCommand::HGet { .. } => "hget",
+            RedisCommand::HMGet { .. } => "hmget",
+            RedisCommand::HGetAll { .. } => "hgetall",
+            RedisCommand::HDel { .. } => "hdel",
+            RedisCommand::HExists { .. } => "hexists",
+            RedisCommand::HKeys { .. } => "hkeys",
+            RedisCommand::HVals { .. } => "hvals",
+            RedisCommand::HLen { .. } => "hlen",
+            RedisCommand::HIncrBy { .. } => "hincrby",
+            RedisCommand::HSetNx { .. } => "hsetnx",
+            RedisCommand::SAdd { .. } => "sadd",
+            RedisCommand::SRem { .. } => "srem",
+            RedisCommand::SMembers { .. } => "smembers",
+            RedisCommand::SIsMember { .. } => "sismember",
+            RedisCommand::SCard { .. } => "scard",
+            RedisCommand::SPop { .. } => "spop",
+            RedisCommand::SRandMember { .. } => "srandmember",
+            RedisCommand::MGet { .. } => "mget",
+            RedisCommand::MSet { .. } => "mset",
             RedisCommand::Error { .. } => "error",
             RedisCommand::None => "none",
         }
