@@ -387,27 +387,21 @@ impl Engine {
         if timeout > 0.0 {
             let duration = tokio::time::Duration::from_secs_f64(timeout);
             tokio::spawn(async move {
-                match tokio::time::timeout(duration, notify_rx).await {
-                    Ok(Ok(val)) => {
-                        let _ = response_tx.send(val);
-                    }
-                    Ok(Err(_)) => {
-                        let _ = response_tx.send(Ok(Value::NullArray));
-                    }
-                    Err(_) => {
-                        let _ = response_tx.send(Ok(Value::NullArray));
-                    }
+                if let Ok(Ok(val)) = tokio::time::timeout(duration, notify_rx).await {
+                    let _ = response_tx.send(val);
+                } else {
+                    // This handles both timeout and sender dropped cases.
+                    let _ = response_tx.send(Ok(Value::NullArray));
                 }
             });
         } else {
+            // No timeout, wait indefinitely.
             tokio::spawn(async move {
-                match notify_rx.await {
-                    Ok(val) => {
-                        let _ = response_tx.send(val);
-                    }
-                    Err(_) => {
-                        let _ = response_tx.send(Ok(Value::NullArray));
-                    }
+                if let Ok(val) = notify_rx.await {
+                    let _ = response_tx.send(val);
+                } else {
+                    // The sender was dropped.
+                    let _ = response_tx.send(Ok(Value::NullArray));
                 }
             });
         }
