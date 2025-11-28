@@ -330,46 +330,6 @@ impl RespHandler {
             return Ok(());
         }
 
-        // Fast path: single response uses direct write (no vectored overhead)
-        if responses.len() == 1 {
-            let bytes = responses.into_iter().next().unwrap().serialize_bytes();
-            self.writer.write_all(&bytes).await?;
-            self.writer.flush().await?;
-            return Ok(());
-        }
-
-        // Pre-serialize all responses (each into its own Vec<u8>)
-        let serialized: Vec<Vec<u8>> = responses.into_iter()
-            .map(|v| v.serialize_bytes())
-            .collect();
-        
-        // Vectored I/O: write each buffer sequentially into BufWriter
-        // BufWriter accumulates small writes efficiently before syscall.
-        // This eliminates the intermediate buffer copy (old: extend into single Vec).
-        //
-        // Note: For very large batches (>100), we could use write_vectored directly
-        // on the socket, but BufWriter handles typical pipelining (10-50) well.
-        for bytes in &serialized {
-            self.writer.write_all(bytes).await?;
-        }
-        
-        // Single flush after all writes = minimal syscalls
-        self.writer.flush().await?;
-        Ok(())
-    }
-    
-    /// Write multiple responses using true vectored I/O (writev syscall)
-    /// 
-    /// This method bypasses BufWriter buffering and writes directly to the socket
-    /// using IoSlice, which maps to a single writev syscall on Linux.
-    /// 
-    /// Use for large batches where avoiding intermediate copies is critical.
-    #[allow(dead_code)]
-    pub async fn write_batch_vectored(&mut self, responses: Vec<Value>) -> Result<()> {
-        if responses.is_empty() {
-            return Ok(());
-        }
-
         // Fast path: single response
         if responses.len() == 1 {
             let bytes = responses.into_iter().next().unwrap().serialize_bytes();
@@ -416,6 +376,8 @@ impl RespHandler {
         self.writer.flush().await?;
         Ok(())
     }
+    
+
 
 }
 
